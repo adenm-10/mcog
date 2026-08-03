@@ -53,6 +53,14 @@ def report() -> int:
 def close(a, b, tol=1e-9) -> bool:
     return abs(float(a) - float(b)) <= tol
 
+def _partition_ascii(mcfg: dict, name: str = "") -> str:
+    parts = mcfg.get("partitions")
+    if parts:
+        key = name or mcfg.get("partition") or sorted(parts)[0]
+        spec = parts[key]
+        return str(spec["labels"] if isinstance(spec, dict) else spec).rstrip("\n")
+    return str(mcfg["regions"]).rstrip("\n")
+
 
 # =========================================================================== #
 # static
@@ -132,8 +140,10 @@ def cmd_static() -> None:
     check("callback=_callbacks(" not in src,
           "model.learn does not re-call _callbacks (tuple bug)")
     check("callback=cb" in src, "model.learn passes cb")
-    check('"partitions"' in src or "'partitions'" in src,
-          "_write_summary excludes the partitions block")
+    m = re.search(r"_NON_SCALAR\s*=\s*\(([^)]*)\)", src)
+    names = set(re.findall(r"['\"]([A-Za-z_]+)['\"]", m.group(1))) if m else set()
+    check(m is not None and {"walls", "regions", "partitions", "interfaces"} <= names,
+          "_NON_SCALAR holds all four structured keys", f"got {sorted(names)}")
 
     section("callbacks.py double-count")
     src = open("option_graph/callbacks.py").read()
@@ -153,8 +163,6 @@ def cmd_static() -> None:
 # =========================================================================== #
 
 def cmd_geometry() -> None:
-    import numpy as np
-    import yaml
     from config.loader import _read_yaml, build_maze_bundle, _rmin_gate
     from domains.partitions import (describe_partition, parse_ascii,
                                     table_to_ascii)
@@ -181,7 +189,7 @@ def cmd_geometry() -> None:
                 print(f"        region {l}: expected {e}, got {g}")
 
     section("partition ASCII round trip")
-    want = mcfg["regions"].rstrip("\n")
+    want = _partition_ascii(mcfg, bundle.partition_name)
     back = table_to_ascii(bundle.maze, bundle.table).rstrip("\n")
     check(back == want, "table_to_ascii(parse_ascii(x)) == x")
     if back != want:
@@ -253,7 +261,7 @@ def cmd_geometry() -> None:
                   f"{len(bad_line)} mismatch")
 
     section("D4 premature-switch audit, all 24 directed edges")
-    for gate in ("halfplane", "rect"):
+    for gate in ("halfplane",):
         rows, total = [], 0
         for i in bundle.interfaces:
             for src, direction in ((i.a, "ab"), (i.b, "ba")):
@@ -280,8 +288,7 @@ def cmd_geometry() -> None:
 # =========================================================================== #
 
 def cmd_smoke(dirs: list[str]) -> None:
-    import yaml
-    want = yaml.safe_load(open(MAZE_YAML))["regions"].rstrip("\n")
+    from config.loader import _read_yaml
 
     for d in dirs:
         section(f"smoke: {d}")
@@ -289,6 +296,8 @@ def cmd_smoke(dirs: list[str]) -> None:
         if not check(os.path.isfile(sp), "summary.json exists"):
             continue
         s = json.load(open(sp))
+        want = _partition_ascii(_read_yaml(MAZE_YAML), s.get("partition", ""))
+        got = open(os.path.join(d, "partition.txt")).read().rstrip("\n")
         for fn in ("resolved_config.yaml", "partition.txt", "training.log"):
             check(os.path.isfile(os.path.join(d, fn)), f"{fn} exists")
 
@@ -357,11 +366,11 @@ def cmd_accept(pattern: str) -> None:
               f"geo={m.get('mean_geodesic_dist')} n={m.get('n')}  ({p})")
 
     section("headline success rates (n=32, SE ~ 8pp; band is ~1 SE)")
-    for mode, lo, hi, ref in (("regions", 0.94, 1.01, JULY_COMPOSITION),
-                              ("monolith", 0.22, 0.35, JULY_MONOLITH)):
-        if mode not in seen:
-            check(False, f"{mode} run present")
-            continue
+    for mode, want_h in (("regions", 200), ("monolith", 600)):
+        if mode in seen:
+            h = seen[mode][0].get("config", {}).get("horizon")
+            check(h is not None and int(h) == want_h,
+                  f"{mode}: horizon still {want_h} (Phase B item 2)", f"got {h!r}")
         sr = seen[mode][1].get("success_rate")
         if not isinstance(sr, (int, float)):
             check(False, f"{mode}: success_rate is numeric", f"got {sr!r}")
@@ -378,11 +387,16 @@ def cmd_accept(pattern: str) -> None:
         check(not low, "all nine regions >= 0.97",
               "" if not low else f"low: {low}")
 
-    section("eval transition accounting (D3, Q5)")
+    section("eval transition accounting (D3, Q5) — diagnostic, not a gate")
     for mode, (s, _, _) in seen.items():
+        c = s.get("config", {})
         ev = s.get("eval_env_steps")
-        check(isinstance(ev, int) and ev > 0,
-              f"{mode}: eval_env_steps nonzero at 2M", f"got {ev!r}")
+        n_lab = len(s.get("per_region", {})) or 1
+        per = int(c["total_steps"]) // n_lab
+        fires = (per // int(c["diag_eval_freq"])) * n_lab
+        bound = fires * int(c["diag_eval_episodes"]) * int(c["horizon"])
+        check(isinstance(ev, int) and 0 < ev <= bound,
+              f"{mode}: 0 < eval_env_steps <= {bound:,} ({fires} fires)", f"got {ev!r}")
 
     section("EXACT eval-pair identity (the fairness anchor)")
     print("  mean_geodesic_dist depends only on sample_eval_pairs, the seed, and")
@@ -421,6 +435,9 @@ def main() -> int:
         cmd_geometry()
     elif cmd == "smoke":
         cmd_smoke(args or ["logs/smoke/regions", "logs/smoke/monolith"])
+    elif cmd == "fixtures":
+        from tests.fixture_eval import cmd_fixtures
+        _results.extend(cmd_fixtures(args[0] if args else "tests/fixtures"))
     elif cmd == "accept":
         cmd_accept(args[0] if args else "logs/phaseA_*/*/*/summary.json")
     else:

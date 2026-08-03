@@ -237,11 +237,13 @@ def main():
               f"({2 * need:.0f}); per-region episodes may be horizon-bound")
     bad = [r for r in desc if r["interior_walls"] > 0]
     if bad:
-        print(f"[partitions][warn] {len(walled)} region(s) have wall cells inside "
-              f"their bounding box (labels {sorted(walled)}); this is the bbox "
-              f"convexity proxy and is EXPECTED for the aligned partition, since "
-              f"each region owning a doorway cell has a ragged hull. Check "
-              f"`diameter` for single-reach: all 8 here means single reach holds.")
+        labels = sorted(r["label"] for r in bad)
+        diams = sorted({r["diameter"] for r in desc})
+        print(f"[partitions] {len(bad)} region(s) have wall cells inside their "
+              f"bounding box (labels {labels}). This is the bbox convexity proxy "
+              f"and is EXPECTED for the aligned partition, since each region "
+              f"owning a doorway cell has a ragged hull. Single-reach is carried "
+              f"by `diameter`, which here is {diams}.")
 
     print(f"[cfg] {cfg['algo']}/{cfg['mode']} maze={cfg['maze_name']} "
           f"v0={cfg['_v0']:.3f} r_min={cfg['_r_min']:.3f} -> {base_dir}")

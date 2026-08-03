@@ -1,4 +1,4 @@
-# rl/reward.py
+# domains/env/reward.py
 """Sparse arrival reward, shared by the live env step and HER relabeling.
 Variant (2): +goal_reward on arrival, -step_pen otherwise; optional -collision_pen.
 Vectorized: accepts scalars or equal-length arrays (HerReplayBuffer passes batches)."""

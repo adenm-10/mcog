@@ -1,0 +1,7 @@
+{
+  "region": 1,
+  "train_time_s": 196.5412735939026,
+  "cells": 27,
+  "success_rate": 0.96875,
+  "eval_env_steps": 0
+}

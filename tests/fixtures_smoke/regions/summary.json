@@ -1,0 +1,126 @@
+{
+  "algo": "sac",
+  "mode": "regions",
+  "partition": "regions",
+  "config": {
+    "seed": 1,
+    "n_envs": 1,
+    "vec": "subproc",
+    "jax_platform": "cpu",
+    "net_arch": [
+      256,
+      256
+    ],
+    "dt": 0.1,
+    "horizon": 200,
+    "variable_speed": false,
+    "arrival_eps": 0.4,
+    "goal_reward": 10.0,
+    "collision_pen": 0.0,
+    "step_pen": 0.01,
+    "wall_margin": 0.0,
+    "gamma": 0.995,
+    "omega_max": 8.0,
+    "learning_rate": 0.0003,
+    "total_steps": 90000,
+    "eval_episodes": 32,
+    "eval_seed": 123,
+    "eval_horizon": 600,
+    "diag_eval_freq": 25000,
+    "diag_eval_episodes": 16,
+    "use_her": false,
+    "n_sampled_goal": 4,
+    "her_strategy": "final",
+    "switch_gate": "halfplane",
+    "buffer_size": 90000,
+    "learning_starts": 2000,
+    "batch_size": 256,
+    "train_freq": 1,
+    "gradient_steps": 4,
+    "name": "nine_rooms",
+    "cell_size": 1.0,
+    "algo": "sac",
+    "mode": "regions",
+    "maze_name": "nine_rooms",
+    "config_dir": "config",
+    "output_dir": "logs/smoke/regions",
+    "partition": "regions"
+  },
+  "train_time_s": 1751.2244596481323,
+  "train_time_parallel_s": 196.86797833442688,
+  "eval_env_steps": 0,
+  "per_region": {
+    "1": {
+      "region": 1,
+      "train_time_s": 196.5412735939026,
+      "cells": 27,
+      "success_rate": 0.96875,
+      "eval_env_steps": 0
+    },
+    "2": {
+      "region": 2,
+      "train_time_s": 196.86797833442688,
+      "cells": 28,
+      "success_rate": 1.0,
+      "eval_env_steps": 0
+    },
+    "3": {
+      "region": 3,
+      "train_time_s": 196.74416518211365,
+      "cells": 27,
+      "success_rate": 0.5625,
+      "eval_env_steps": 0
+    },
+    "4": {
+      "region": 4,
+      "train_time_s": 194.9625163078308,
+      "cells": 28,
+      "success_rate": 0.9375,
+      "eval_env_steps": 0
+    },
+    "5": {
+      "region": 5,
+      "train_time_s": 194.34222865104675,
+      "cells": 29,
+      "success_rate": 1.0,
+      "eval_env_steps": 0
+    },
+    "6": {
+      "region": 6,
+      "train_time_s": 191.7462863922119,
+      "cells": 28,
+      "success_rate": 1.0,
+      "eval_env_steps": 0
+    },
+    "7": {
+      "region": 7,
+      "train_time_s": 193.37792420387268,
+      "cells": 27,
+      "success_rate": 0.96875,
+      "eval_env_steps": 0
+    },
+    "8": {
+      "region": 8,
+      "train_time_s": 193.6998574733734,
+      "cells": 28,
+      "success_rate": 1.0,
+      "eval_env_steps": 0
+    },
+    "9": {
+      "region": 9,
+      "train_time_s": 192.94222950935364,
+      "cells": 27,
+      "success_rate": 0.96875,
+      "eval_env_steps": 0
+    }
+  },
+  "composition": {
+    "success_rate": 0.84375,
+    "time_to_arrival": 116.37037037037037,
+    "mean_path_length": 10.732712177559733,
+    "mean_efficiency": 1.1663921461389526,
+    "mean_control_cost": 6.706506547052413,
+    "mean_geodesic_dist": 10.572200933471322,
+    "n": 32
+  }
+}
