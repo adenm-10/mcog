@@ -1,8 +1,7 @@
 # option_graph/callbacks.py
 """SB3 callbacks that only READ state and record scalars — no effect on training.
 
-TrainMetricsCallback : per-episode success / tta / collision / reward-decomp from
-                       the info dict (near-free).
+TrainMetricsCallback : per-episode success / tta / collision.
 PeriodicEvalCallback : deterministic eval every eval_freq env steps; logs overall
                        success/tta plus success binned by start->goal geodesic
                        distance (reuses the env's own geodesic field, zero extra

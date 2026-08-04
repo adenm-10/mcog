@@ -1,8 +1,28 @@
+# Python
 __pycache__/
 *.py[cod]
-logs/
-media/
-runs/
-*.npz
-*.zip
+*.egg-info/
 .ipynb_checkpoints/
+.venv/
+.DS_Store
+
+# Run output. Contents ignored, directories kept: SLURM writes into
+# logs/slurm_staging/ and loses its output if the path is missing.
+logs/*
+!logs/.gitkeep
+!logs/slurm_staging/
+logs/slurm_staging/*
+!logs/slurm_staging/.gitkeep
+
+media/*
+!media/.gitkeep
+
+wandb/
+
+# Checkpoints are NOT ignored globally. tests/fixtures_smoke/ has to keep its
+# weights — the reference numbers only mean anything against the weights that
+# produced them.
+
+tests/*
+media/*
+status.md

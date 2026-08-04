@@ -26,11 +26,15 @@ SCHEMA_VERSION = 1
 #: premature    crossed a switch surface that was not this option's target
 #: stuck        guard fired, no positional progress over the guard window
 #: aborted      executor stopped it (episode budget exhausted)
+#: goal         the EPISODE goal was reached while this option was running, so the
+#:              option was cut short without reaching its own target. Distinct
+#:              from "reached" on purpose: counting a truncated leg as an edge
+#:              failure would bias p_hat down, and these rows are droppable.
 OPTION_OUTCOMES = ("reached", "timeout", "left_region", "premature", "stuck",
-                   "aborted")
+                   "aborted", "goal")
 
 EPISODE_REASONS = ("success", "timeout", "no_path", "option_budget", "stuck",
-                   "guard_abort")
+                   "guard_abort", "off_plan")
 
 GOAL_SENTINEL = "goal"   # terminal leg targets the true goal, not an interface
 

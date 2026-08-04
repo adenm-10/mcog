@@ -1,7 +1,7 @@
 """Gymnasium env for domains.systems.car.DubinsCarSystem on a maze (SAC/PPO/TD3).
 
 Goal-conditioned: each episode samples a start and a goal; obs carries the
-goal-relative vector, reward is geodesic PBRS + goal bonus, terminate on reach.
+goal-relative vector, reward is sparse: +goal_reward on arrival, -step_pen otherwise, terminate on reach.
 
 Region mode (for the decomposition arm): pass `region_cells` to restrict BOTH
 start and goal sampling to one region, and `region_goals` to add the region's
@@ -67,13 +67,13 @@ class DubinsMazeEnv(gym.Env):
         cell_size: float = 1.0,
         horizon: int = 60,
         dt: float = 0.1,
-        goal_mode: str = "random",            # CHANGED: was "fixed"
+        goal_mode: str = "random",
         randomize_start: bool = True,
         arrival_eps: float = 0.4,
         goal_reward: float = 1.0,
         collision_penalty: float = 0.01,
         step_penalty: float  = 0.1,
-        gamma: float = 0.99,                  # MUST equal the agent's discount (PBRS)
+        gamma: float = 0.99,                  # stored for provenance only; never read (reward is sparse, no PBRS)
         wall_margin: float = 0.0,
         omega_max: float=8.0,
         # --- region mode (None -> whole-maze monolith behavior) ---

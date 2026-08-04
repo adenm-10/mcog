@@ -6,15 +6,9 @@ DubinsMazeEnv serves as the dynamics / collision / observation server for both).
 Only the controller differs:
   * monolith     -> MonolithController (one whole-maze policy driven to the goal)
   * composition  -> CompositionController (per-region policies chained through
-                    inferred interface midpoints)
+                    per-direction interface targets from bundle.by_pair)
 That identity is the fairness anchor: a success-rate gap is the decomposition
 effect, not a metric artifact.
-
-Controllers / interface inference / pair sampling / scoring live in
-rl/dubins_maze_composition.py; this module is the call site the three run scripts
-share at the end of training.
-
-skills/dubins/eval_harness_dubins_rl.py
 """
 
 from __future__ import annotations
@@ -23,24 +17,15 @@ import json
 import math
 import os
 
-from collections import defaultdict, deque
-from typing import Any, Dict, List, Optional, Tuple
-
-from domains.env.gym_env import DubinsMazeEnv
+from typing import Any, Dict
 
 import numpy as np
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
 
+from option_graph.analysis.plots import plot_rollout_grid, _region_layer
+from domains.env.physics import Physics, build_physics_env
 from domains.geodesic import build_geodesic_field
-from option_graph.analysis.plots import plot_rollout, plot_rollout_grid, _region_layer
-
-
-def _build_physics_env(*, maze, dt, omega_max, gamma, horizon, arrival_eps):
-    """One whole-maze env used purely as physics/observation server (goal injected)."""
-    return DubinsMazeEnv(maze=maze, cell_size=maze.cell_size, horizon=horizon, dt=dt,
-                         omega_max=omega_max, gamma=gamma,
-                         goal_mode="fixed", arrival_eps=arrival_eps)
+from domains.geometry import (nearest_free_cell, sample_eval_pairs,
+                              shortest_region_path)
 
 
 def _sanitize(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -89,7 +74,7 @@ def evaluate_monolith(model, *, maze, dt=0.1, omega_max=8.0,
                       gamma=0.99, horizon=150, arrival_eps=0.4, num_pairs=64,
                       eval_seed=2024, output_dir=None, name="eval_monolith",
                       write_json=True):
-    env = _build_physics_env(maze=maze, dt=dt,
+    env = build_physics_env(maze=maze, dt=dt,
                              omega_max=omega_max, gamma=gamma, horizon=horizon,
                              arrival_eps=arrival_eps)
     phys = Physics(env)
@@ -110,7 +95,7 @@ def evaluate_composition(models, bundle, *, dt=0.1, omega_max=8.0,
                          write_json=True, gate="rect"):
     """Decomposition arm: per-direction through-throat targets + HARD line switch."""
     maze = bundle.maze
-    env = _build_physics_env(maze=maze, dt=dt,
+    env = build_physics_env(maze=maze, dt=dt,
                              omega_max=omega_max, gamma=gamma, horizon=horizon,
                              arrival_eps=arrival_eps)
     phys = Physics(env)
@@ -135,102 +120,6 @@ def evaluate_composition(models, bundle, *, dt=0.1, omega_max=8.0,
               "arrival_eps": arrival_eps, "num_pairs": num_pairs,
               "eval_seed": eval_seed, **metrics}))
     return metrics
-
-
-"""Composition eval harness: chain per-region SB3 policies via interface midpoints.
-
-EVAL side of the decomposition arm (training = run_train_dubins_maze_regions_sb3.py).
-Given random (start, goal):
-  1. region_of(start), region_of(goal) -> BFS shortest path over the inferred region
-     adjacency graph -> region sequence [R0..RK].
-  2. per-leg targets: leg i -> midpoint(R_i, R_{i+1}); final leg -> the actual goal.
-  3. step the active region's policy toward its leg target; advance the MONOTONE leg
-     index when the car enters the next planned region or reaches the waypoint;
-     terminate on reaching the final goal within arrival_eps.
-
-Interfaces are INFERRED from the label grid (no interface chars -> inference).
-Both arms are scored by evaluate_controller() on the SAME pairs / eps / horizon /
-rollout code -- only the controller differs. That identity is the fairness anchor.
-"""
-
-# -----------------------------------------------------------------------------
-# Interface inference + region graph
-# -----------------------------------------------------------------------------
-
-def infer_interfaces(maze, table) -> Tuple[Dict[int, set], Dict[frozenset, Tuple[float, float]]]:
-    """From the cell->label table, infer region adjacency and interface midpoints.
-
-    adjacency: label -> set(neighbor labels)
-    midpoints: frozenset({a,b}) -> (mx,my) centroid of the a/b boundary faces.
-    """
-    cs = float(maze.cell_size)
-    faces = defaultdict(list)
-    adjacency: Dict[int, set] = defaultdict(set)
-    for (ix, iy), lab in table.items():
-        for dx, dy in ((1, 0), (0, 1)):          # +x,+y only -> each pair counted once
-            nb = (ix + dx, iy + dy)
-            lab2 = table.get(nb)
-            if lab2 is None or lab2 == lab:
-                continue
-            adjacency[lab].add(lab2)
-            adjacency[lab2].add(lab)
-            cxa, cya = (ix + 0.5) * cs, (iy + 0.5) * cs
-            cxb, cyb = (nb[0] + 0.5) * cs, (nb[1] + 0.5) * cs
-            faces[frozenset((lab, lab2))].append(((cxa + cxb) / 2.0, (cya + cyb) / 2.0))
-    midpoints = {}
-    for key, pts in faces.items():
-        arr = np.asarray(pts, dtype=np.float32)
-        midpoints[key] = (float(arr[:, 0].mean()), float(arr[:, 1].mean()))
-    return dict(adjacency), midpoints
-
-
-def shortest_region_path(adjacency, start_label, goal_label) -> Optional[List[int]]:
-    """BFS hop-count shortest path over the region graph. None if disconnected."""
-    if start_label == goal_label:
-        return [start_label]
-    prev = {start_label: None}
-    q = deque([start_label])
-    while q:
-        cur = q.popleft()
-        if cur == goal_label:
-            break
-        for nb in sorted(adjacency.get(cur, ())):
-            if nb not in prev:
-                prev[nb] = cur
-                q.append(nb)
-    if goal_label not in prev:
-        return None
-    path, node = [], goal_label
-    while node is not None:
-        path.append(node)
-        node = prev[node]
-    return path[::-1]
-
-
-# -----------------------------------------------------------------------------
-# Physics server: reuse the env's EXACT dynamics / walls / observation
-# -----------------------------------------------------------------------------
-
-class Physics:
-    """Borrows one DubinsMazeEnv's step / collision / observation so the composed
-    rollout uses byte-identical dynamics, normalization, and hard-wall handling."""
-
-    def __init__(self, env):
-        self.env = env
-        self.u_max = float(env.system.u_max)
-        self.control_dim = int(env.action_space.shape[0])
-
-    def obs(self, x, target) -> np.ndarray:
-        self.env._goal = (float(target[0]), float(target[1]))   # inject leg target as goal
-        return self.env._observation(x)
-
-    def step(self, x, action):
-        a = np.clip(np.asarray(action, np.float32).reshape(-1), -1.0, 1.0)
-        u_phys = (self.u_max * a).astype(np.float32)
-        x_next = np.asarray(self.env._step_fn(jnp.asarray(x), jnp.asarray(u_phys)), np.float32)
-        x_next, _collided = self.env._resolve_collision(x, x_next)
-        return x_next, u_phys
-
 
 # -----------------------------------------------------------------------------
 # Controllers (uniform .rollout interface)
@@ -312,50 +201,8 @@ class CompositionController:
                 "success": success, "steps": steps, "legs": len(seq),
                 "plan": seq, "transitions": transitions}
 
-
-# -----------------------------------------------------------------------------
-# Shared eval (both arms, identical pairs)
-# -----------------------------------------------------------------------------
-
-def sample_eval_pairs(maze, num: int, seed: int, wall_margin: float = 0.25):
-    """Deterministic (start_state, goal_xy) pairs, continuous over free space.
-
-    Matches the training samplers: pick a free cell uniformly, then jitter
-    uniformly within the cell keeping `margin` clear of the cell edge so points
-    don't land inside a wall. Position is therefore continuous over the maze
-    free space (minus a thin wall band), not snapped to cell centers.
-    """
-    rng = np.random.RandomState(int(seed))
-    free = np.asarray(maze.free_cells, np.int32)
-    cs = float(maze.cell_size)
-    margin = min(0.45 * cs, float(wall_margin))
-    half = 0.5 * cs - margin
-    pairs = []
-    for _ in range(int(num)):
-        i = rng.randint(free.shape[0]); j = rng.randint(free.shape[0])
-        while j == i:
-            j = rng.randint(free.shape[0])
-        jx0, jy0 = rng.uniform(-half, half, size=2)
-        jx1, jy1 = rng.uniform(-half, half, size=2)
-        ang = rng.uniform(0.0, 2.0 * np.pi)
-        x0 = np.array([(free[i, 0] + 0.5) * cs + jx0,
-                       (free[i, 1] + 0.5) * cs + jy0,
-                       np.cos(ang), np.sin(ang)], np.float32)
-        goal = ((free[j, 0] + 0.5) * cs + jx1,
-                (free[j, 1] + 0.5) * cs + jy1)
-        pairs.append((x0, goal))
-    return pairs
-
-def _nearest_free_cell(maze, px, py):
-    free = np.asarray(maze.free_cells, dtype=np.int32)
-    cs = float(maze.cell_size)
-    cx = (free[:, 0] + 0.5) * cs; cy = (free[:, 1] + 0.5) * cs
-    j = int(np.argmin((cx - px) ** 2 + (cy - py) ** 2))
-    return int(free[j, 0]), int(free[j, 1])
-
-
 def _geo_dist(maze, start_xy, goal_xy, cache):
-    key = _nearest_free_cell(maze, goal_xy[0], goal_xy[1])
+    key = nearest_free_cell(maze, goal_xy[0], goal_xy[1])
     geo = cache.get(key)
     if geo is None:
         geo = build_geodesic_field(maze, goal_cell=key); cache[key] = geo

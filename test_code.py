@@ -28,6 +28,13 @@ JULY_MONOLITH = 0.28125
 
 EXPECTED_INTERIOR_WALLS = {1: 9, 2: 9, 3: 4, 4: 9, 5: 9, 6: 4, 7: 4, 8: 4, 9: 0}
 
+# --- Phase A acceptance bands (handoff §5.1) --------------------------------
+ACCEPT_BANDS = {                      # mode -> (lo, hi, July reference)
+    "regions":  (0.94, 1.00, JULY_COMPOSITION),
+    "monolith": (0.22, 0.35, JULY_MONOLITH),
+}
+PHASE_A_HORIZON = {"regions": 200, "monolith": 600}
+
 _results: list[tuple[bool, str, str]] = []
 
 
@@ -114,6 +121,7 @@ def cmd_static() -> None:
     section("import graph")
     for mod in ["config.loader", "domains.geometry", "domains.partitions",
                 "domains.systems.sdf", "domains.systems.maze",
+                "domains.env.gym_env", "domains.env.physics",
                 "domains.env.gym_env", "option_graph.records",
                 "option_graph.callbacks", "option_graph.analysis.plots",
                 "option_graph._port_eval"]:
@@ -282,6 +290,20 @@ def cmd_geometry() -> None:
     print("        -> nine_rooms doorways are 1-cell corridors, so walls do the")
     print("           gating the halfplane does not. D4 is a giant-only defect.")
 
+    section("arrival test agrees with the hand-authored targets")
+    import numpy as np
+    from domains.contact_templates import score_arrival
+    bad = []
+    for i in bundle.interfaces:
+        for src, direction in ((i.a, "ab"), (i.b, "ba")):
+            t = i.target(direction)
+            x = np.array([t[0], t[1], *i.approach_normal(direction)], np.float32)
+            a = score_arrival(x, target=t, arrival_eps=0.4, iface=i,
+                              direction=direction)
+            if not (a.reached_position and a.reached_interface):
+                bad.append(f"{i.id}/{direction}")
+    check(not bad, "all 24 targets register as arrivals", f"bad: {bad[:6]}")
+
 
 # =========================================================================== #
 # smoke
@@ -297,7 +319,6 @@ def cmd_smoke(dirs: list[str]) -> None:
             continue
         s = json.load(open(sp))
         want = _partition_ascii(_read_yaml(MAZE_YAML), s.get("partition", ""))
-        got = open(os.path.join(d, "partition.txt")).read().rstrip("\n")
         for fn in ("resolved_config.yaml", "partition.txt", "training.log"):
             check(os.path.isfile(os.path.join(d, fn)), f"{fn} exists")
 
@@ -366,18 +387,17 @@ def cmd_accept(pattern: str) -> None:
               f"geo={m.get('mean_geodesic_dist')} n={m.get('n')}  ({p})")
 
     section("headline success rates (n=32, SE ~ 8pp; band is ~1 SE)")
-    for mode, want_h in (("regions", 200), ("monolith", 600)):
-        if mode in seen:
-            h = seen[mode][0].get("config", {}).get("horizon")
-            check(h is not None and int(h) == want_h,
-                  f"{mode}: horizon still {want_h} (Phase B item 2)", f"got {h!r}")
+    for mode, (lo, hi, ref) in ACCEPT_BANDS.items():
+        if mode not in seen:
+            check(False, f"{mode}: summary present in the glob")
+            continue
         sr = seen[mode][1].get("success_rate")
         if not isinstance(sr, (int, float)):
             check(False, f"{mode}: success_rate is numeric", f"got {sr!r}")
             continue
         check(lo <= float(sr) <= hi, f"{mode} in [{lo}, {hi}] (July {ref:.5f})",
               f"got {float(sr):.5f}")
-    
+
     section("per-region local success")
     if "regions" in seen:
         pr = seen["regions"][0].get("per_region", {})
@@ -417,11 +437,13 @@ def cmd_accept(pattern: str) -> None:
         wm = c.get("wall_margin")
         check(isinstance(wm, (int, float)) and close(wm, 0.0),
               f"{mode}: wall_margin still 0.0 (D8 is Phase B item 1)", f"got {wm!r}")
-    if "regions" in seen:
-        h = seen["regions"][0].get("config", {}).get("horizon")
-        check(h is not None and int(h) == 200,
-              "regions: horizon still 200 (160 is Phase B item 2)", f"got {h!r}")
-
+    for mode, want_h in PHASE_A_HORIZON.items():
+        if mode in seen:
+            h = seen[mode][0].get("config", {}).get("horizon")
+            check(h is not None and int(h) == want_h,
+                  f"{mode}: horizon still {want_h} (160/640 is Phase B item 2)",
+                  f"got {h!r}")
+                  
 # =========================================================================== #
 
 def main() -> int:
@@ -437,7 +459,7 @@ def main() -> int:
         cmd_smoke(args or ["logs/smoke/regions", "logs/smoke/monolith"])
     elif cmd == "fixtures":
         from tests.fixture_eval import cmd_fixtures
-        _results.extend(cmd_fixtures(args[0] if args else "tests/fixtures"))
+        _results.extend(cmd_fixtures(args[0] if args else "tests/fixtures_smoke"))
     elif cmd == "accept":
         cmd_accept(args[0] if args else "logs/phaseA_*/*/*/summary.json")
     else:

@@ -64,5 +64,6 @@ python train.py \
   --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
   --switch-gate halfplane \
   --n-envs 8 --gradient-steps 4 --learning-starts ${LSTART} --buffer-size ${BUDGET} \
-  --output-dir "${RUN_DIR}/${MODE}_${ALGO}_s${SEED}"
+  --output-dir "${RUN_DIR}/${MODE}_${ALGO}_s${SEED}" \
+  --eval-seed 123
 exit $?
