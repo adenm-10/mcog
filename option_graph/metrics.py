@@ -49,11 +49,13 @@ class Group:
 
     @property
     def noise(self) -> float:
-        """E|obs - true| under the binomial, normal approximation."""
-        p = self.obs
-        return (math.sqrt(2.0 * p * (1.0 - p) / (math.pi * self.n))
-                if self.n else float("nan"))
-
+        """E|obs - true| under a Jeffreys posterior. Never 0 at the boundary."""
+        if not self.n:
+            return float("nan")
+        a, b = 0.5 + self.n_pos, 0.5 + (self.n - self.n_pos)
+        sd = math.sqrt(a * b / ((a + b) ** 2 * (a + b + 1.0)))
+        return sd * math.sqrt(2.0 / math.pi)
+        
     def err(self, rung: str) -> float:
         return abs(float(self.pred.get(rung, float("nan"))) - self.obs)
 
@@ -128,6 +130,10 @@ def scored(groups: Sequence[Group], rungs: Sequence[str]) -> List[Group]:
     return [g for g in groups if g.n
             and all(np.isfinite(g.pred.get(r, np.nan)) for r in rungs)]
 
+def coverage(groups: Sequence[Group], rung: str) -> List[Group]:
+    """Groups where one rung is finite. An oracle rung must never gate the test."""
+    return [g for g in groups if g.n
+            and np.isfinite(g.pred.get(rung, np.nan))]
 
 def mae(groups: Sequence[Group], rung: str) -> float:
     """Equal-weighted over groups: the hop quota is a design choice, not a weight."""
@@ -264,45 +270,64 @@ def load_model_json(path: str):
 # --------------------------------------------------------------------------- #
 
 def print_report(groups, gs, boot, verdict) -> None:
-    """Per-stratum then pooled. The pooled line is the preregistered test."""
-    print(f"\n[metrics] {len(groups)} route groups, {len(gs)} scored on all "
-          f"four rungs, {sum(g.n for g in groups)} pairs")
+    """gs is the decision-rule sample: marginal and handoff both finite. The
+    oracle rung is reported on its own coverage subset and never gates gs."""
+    tot = sum(g.n for g in groups)
+    print(f"\n[metrics] {len(groups)} route groups, {tot} pairs")
+    print(f"\n{'rung':>10} {'groups':>7} {'pairs':>7}")
+    for r in RUNGS:
+        c = coverage(groups, r)
+        print(f"{r:>10} {len(c):>7} {sum(g.n for g in c):>7}")
+    print(f"[metrics] decision-rule sample: {len(gs)}/{len(groups)} groups, "
+          f"{sum(g.n for g in gs)} pairs")
     cut = sum(g.n_cut for g in groups)
     print(f"[metrics] {cut} pairs hit the goal mid-doorway-leg "
-          f"({cut / max(sum(g.n for g in groups), 1):.1%}); the terminal leg "
-          "never ran, so every rung is biased DOWN by the same amount")
+          f"({cut / max(tot, 1):.1%}); the terminal leg never ran, so every "
+          "rung is biased DOWN by the same amount")
 
     hdr = f"{'hops':>5} {'grp':>4} {'obs':>6} {'noise':>6}"
-    print("\n" + hdr + "".join(f"{r[:8]:>10}" for r in RUNGS))
-    print("-" * (len(hdr) + 10 * len(RUNGS)))
+    print("\n" + hdr + "".join(f"{r[:8]:>10}" for r in PLAN_RUNGS))
+    print("-" * (len(hdr) + 10 * len(PLAN_RUNGS)))
     for h, gg in by_stratum(gs).items():
-        obs = float(np.mean([g.obs for g in gg]))
-        print(f"{h:>5} {len(gg):>4} {obs:>6.3f} {noise_floor(gg):>6.3f}"
-              + "".join(f"{mae(gg, r):>10.4f}" for r in RUNGS))
+        print(f"{h:>5} {len(gg):>4} {float(np.mean([g.obs for g in gg])):>6.3f} "
+              f"{noise_floor(gg):>6.3f}"
+              + "".join(f"{mae(gg, r):>10.4f}" for r in PLAN_RUNGS))
     print(f"{'all':>5} {len(gs):>4} "
-          f"{float(np.mean([g.obs for g in gs])):>6.3f} "
-          f"{noise_floor(gs):>6.3f}"
-          + "".join(f"{mae(gs, r):>10.4f}" for r in RUNGS))
-    print("        MAE by rung, equal-weighted over groups. noise is the pooled "
-          "binomial floor every rung sits above.")
+          f"{float(np.mean([g.obs for g in gs])):>6.3f} {noise_floor(gs):>6.3f}"
+          + "".join(f"{mae(gs, r):>10.4f}" for r in PLAN_RUNGS))
+    print("        Plan-time rungs, equal-weighted over groups. noise is the "
+          "pooled binomial floor every rung sits above.")
 
     print(f"\n{'rung':>10} {'MAE':>8} {'Brier':>8} {'slope':>8}")
-    for r in RUNGS:
+    for r in PLAN_RUNGS:
         print(f"{r:>10} {mae(gs, r):>8.4f} {brier_pairs(gs, r):>8.4f} "
               f"{slope(gs, r):>8.3f}")
     print("        Brier is per-pair and proper; MAE can cancel signed error "
           "within a group. slope 1.0 is perfect.")
 
-    v = verdict
-    print(f"\n[metrics] marginal {v['mae_a']:.4f} vs handoff {v['mae_b']:.4f}: "
-          f"R={v['ratio']:.2f} (CI {v['ratio_ci'][0]:.2f}-{v['ratio_ci'][1]:.2f})")
-    print(f"[metrics] D=MAE_marg-MAE_hand = {v['d_mean']:+.4f} "
-          f"95% CI [{v['d_ci'][0]:+.4f}, {v['d_ci'][1]:+.4f}]")
-    nf = noise_floor(gs)
+    ch = scored(groups, ("handoff", "chained"))
+    if ch:
+        print(f"\n[metrics] oracle rung, on the {len(ch)}/{len(groups)} groups "
+              f"where it is defined: handoff {mae(ch, 'handoff'):.4f} vs "
+              f"chained {mae(ch, 'chained'):.4f}")
+        print("        chained is undefined where a planned leg never executed "
+              "in any episode of that route. That is a coverage fact about the "
+              "observation and belongs in the write-up, not a property of the "
+              "plan-time rungs.")
+
+    v, nf = verdict, noise_floor(gs)
     if v["mae_b"] <= nf:
-        print(f"  NOISE-LIMITED: MAE_handoff {v['mae_b']:.4f} <= noise floor "
+        print(f"\n  NOISE-LIMITED: MAE_handoff {v['mae_b']:.4f} <= noise floor "
               f"{nf:.4f}. handoff is as accurate as this pair count can show, "
               "so R is uninterpretable. Report a ceiling, not a margin.")
+    print(f"\n[metrics] marginal {v['mae_a']:.4f} vs handoff {v['mae_b']:.4f}: "
+          f"R={v['ratio']:.2f}")
+    print(f"[metrics] D=MAE_marg-MAE_hand = {v['d_mean']:+.4f} "
+          f"95% CI [{v['d_ci'][0]:+.4f}, {v['d_ci'][1]:+.4f}]  <- the inference")
+    print(f"[metrics] bootstrap ratio percentiles {v['ratio_ci'][0]:.2f}-"
+          f"{v['ratio_ci'][1]:.2f}: DIAGNOSTIC ONLY, biased low. The bootstrap "
+          "adds noise on top of the noise already in the rates, inflating the "
+          "smaller denominator proportionally more (stage0_power.md P1).")
     if v["passed"]:
         print("  VERDICT PASS: handoff-aware tracks route reliability where a "
               "product of local rates does not. Interfaces are the bottleneck (H5).")
@@ -314,8 +339,6 @@ def print_report(groups, gs, boot, verdict) -> None:
         print("  VERDICT marginal already suffices. Then the local 1.0 was "
               "measured on the wrong distribution and the fix is the training "
               "reset distribution, not the abstraction. Also publishable.")
-
-
 def _json_safe(o):
     if isinstance(o, dict):
         return {str(k): _json_safe(v) for k, v in o.items()}
@@ -377,8 +400,8 @@ def main(argv=None) -> int:
                    p_bar=p_bar, p_bar_first=p_bar_first, H=H)
     add_chained(groups, episodes, model, desc, regions)
 
-    gs = scored(groups, RUNGS)
-    boot = bootstrap(gs, RUNGS, draws=int(args.draws), seed=int(args.seed))
+    gs = scored(groups, ("marginal", "handoff"))
+    boot = bootstrap(gs, PLAN_RUNGS, draws=int(args.draws), seed=int(args.seed))
     verdict = pass_condition(gs, boot, ratio_min=float(args.ratio_min))
     print_report(groups, gs, boot, verdict)
 
@@ -401,16 +424,19 @@ def main(argv=None) -> int:
                "draws": int(args.draws), "ratio_min": float(args.ratio_min),
                "seed": int(args.seed), "n_pairs": sum(g.n for g in groups),
                "n_groups": len(groups), "n_scored": len(gs),
+               "coverage": {r: len(coverage(groups, r)) for r in RUNGS},
                "n_cut_short": sum(g.n_cut for g in groups),
                "noise_floor": noise_floor(gs), "verdict": verdict,
-               "mae": {r: mae(gs, r) for r in RUNGS},
-               "brier": {r: brier_pairs(gs, r) for r in RUNGS},
-               "slope": {r: slope(gs, r) for r in RUNGS},
-               "by_stratum": {h: {"n_groups": len(gg),
+               "mae": {r: mae(gs, r) for r in PLAN_RUNGS},
+               "brier": {r: brier_pairs(gs, r) for r in PLAN_RUNGS},
+               "slope": {r: slope(gs, r) for r in PLAN_RUNGS},
+               "oracle": {r: mae(scored(groups, ("handoff", "chained")), r)
+                          for r in ("handoff", "chained")},
+                "by_stratum": {h: {"n_groups": len(gg),
                                   "n_pairs": sum(g.n for g in gg),
                                   "obs": float(np.mean([g.obs for g in gg])),
                                   "noise_floor": noise_floor(gg),
-                                  "mae": {r: mae(gg, r) for r in RUNGS}}
+                                  "mae": {r: mae(gg, r) for r in PLAN_RUNGS}}
                               for h, gg in by_stratum(gs).items()},
                "groups": [{"plan": list(g.plan), "hops": g.hops, "n": g.n,
                            "obs": g.obs, "n_cut": g.n_cut, "noise": g.noise,

@@ -168,6 +168,10 @@ def build_matrix(rows: Sequence[Dict[str, Any]],
 
 def _beta_cdf(x: float, a: int, b: int) -> float:
     """Regularized incomplete beta for integer a, b, via the binomial identity."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
     n = a + b - 1
     lf = np.concatenate(([0.0], np.cumsum(np.log(np.arange(1, n + 2)))))
     j = np.arange(a, n + 1)
