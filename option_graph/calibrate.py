@@ -397,10 +397,11 @@ def print_report(by_stratum: Dict[str, Tally], *, top: int = 0) -> None:
 # CLI
 # --------------------------------------------------------------------------- #
 
-def _load_run_cfg(run_dir: str, config_dir: str = "config") -> dict:
-    """Rebuild a runnable cfg from a frozen run. dump_resolved strips {walls,
-    regions, partitions, interfaces} and _-keys, so re-read base + algo + maze,
-    then overlay the frozen scalars."""
+def _load_run_cfg(run_dir: str, config_dir: str = "config",
+                  mode: str = "regions") -> dict:
+    """Rebuild a runnable cfg from a frozen run. dump_resolved strips structured
+    keys, so re-read base + algo + maze then overlay the frozen scalars. mode is
+    asserted, not inferred."""
     from config.loader import _merge, _read_yaml
 
     p = os.path.join(run_dir, "resolved_config.yaml")
@@ -416,8 +417,8 @@ def _load_run_cfg(run_dir: str, config_dir: str = "config") -> dict:
     cfg = _merge(cfg, _read_yaml(os.path.join(config_dir, "maze",
                                               f"{frozen['maze_name']}.yaml")))
     cfg.update(frozen)
-    if str(cfg["mode"]) != "regions":
-        raise SystemExit(f"{run_dir}: mode={cfg['mode']!r}, need per-region policies")
+    if str(cfg["mode"]) != mode:
+        raise SystemExit(f"{run_dir}: mode={cfg['mode']!r}, want {mode!r}")
     return cfg
 
 
