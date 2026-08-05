@@ -113,16 +113,20 @@ def run_monolith(cfg, bundle, base_dir):
     plot_training_diagnostics(os.path.join(train, "progress.csv"),
                               os.path.join(train, "training_diagnostics.png"),
                               title=f"{cfg['algo'].upper()} {cfg['maze_name']}")
-    metrics = evaluate_monolith(model, maze=bundle.maze, dt=float(cfg["dt"]),
-        omega_max=float(cfg["omega_max"]),
-        gamma=float(cfg["gamma"]), horizon=int(cfg["eval_horizon"]),
-        arrival_eps=float(cfg["arrival_eps"]), num_pairs=int(cfg["eval_episodes"]),
-        eval_seed=int(cfg["eval_seed"]), output_dir=ev, name="monolith_eval",
-        write_json=False)
-    _write_summary(base_dir, cfg, {"train_time_s": rt,
-                                   "eval_env_steps": int(eval_cb.env_steps_consumed),
-                                   "metrics": metrics})
-
+    metrics = evaluate_monolith(model, bundle=bundle, dt=float(cfg["dt"]),
+        omega_max=float(cfg["omega_max"]), gamma=float(cfg["gamma"]),
+        horizon=int(cfg["flat_horizon"]), option_budget=int(cfg["flat_horizon"]),
+        arrival_eps=float(cfg["arrival_eps"]), num_pairs=int(cfg["composition_eval_pairs"]),
+        eval_seed=int(cfg["eval_seed"]), gate=str(cfg["switch_gate"]),
+        output_dir=ev, name="monolith_eval", write_json=False,
+        stratify=bool(cfg["eval_stratify"]), min_hops=int(cfg["eval_min_hops"]))
+    _write_summary(base_dir, cfg, {
+          "train_time_s": rt,
+          "train_env_steps": int(cfg["total_steps"]),
+          "eval_env_steps": int(eval_cb.env_steps_consumed),
+          "eval_env_steps_periodic": int(eval_cb.env_steps_consumed),
+          "eval_env_steps_terminal": int(metrics.get("eval_env_steps_terminal", 0)),
+          "metrics": metrics})
 
 # ------------------------------------------------------------------ regions
 def _region_success(env, model, episodes, seed):
@@ -180,7 +184,7 @@ def run_regions(cfg, bundle, base_dir):
 
         ev = _env_fn(cfg, bundle, rank=9_999, goal_mode="random",
                      randomize_start=True, region_cells=rc, region_goals=rg)()
-        succ = _region_success(ev, model, int(cfg["eval_episodes"]),
+        succ = _region_success(ev, model, int(cfg["region_eval_episodes"]),
                                int(cfg["eval_seed"]) + int(lab))
         summary[lab] = {"region": int(lab), "train_time_s": rt,
                         "cells": int(rc.shape[0]), "success_rate": succ,
@@ -195,16 +199,21 @@ def run_regions(cfg, bundle, base_dir):
         os.path.join(train, "regions_training.png"),
         title=f"{cfg['algo'].upper()} regions {cfg['maze_name']}")
     composition = evaluate_composition(models_by_label, bundle, dt=float(cfg["dt"]),
-        omega_max=float(cfg["omega_max"]), gate=str(cfg["switch_gate"]),
-        gamma=float(cfg["gamma"]), horizon=int(cfg["eval_horizon"]),
-        arrival_eps=float(cfg["arrival_eps"]), num_pairs=int(cfg["eval_episodes"]),
-        eval_seed=int(cfg["eval_seed"]), output_dir=comp, name="composition_eval",
-        write_json=False)
+        omega_max=float(cfg["omega_max"]), gamma=float(cfg["gamma"]),
+        horizon=int(cfg["flat_horizon"]), option_budget=int(cfg["h_region"]),
+        arrival_eps=float(cfg["arrival_eps"]), num_pairs=int(cfg["composition_eval_pairs"]),
+        eval_seed=int(cfg["eval_seed"]), gate=str(cfg["switch_gate"]),
+        output_dir=comp, name="composition_eval", write_json=False,
+        stratify=bool(cfg["eval_stratify"]), min_hops=int(cfg["eval_min_hops"]),)
+
     _write_summary(base_dir, cfg, {
-        "train_time_s": train_time_total,                                  # fair vs monolith: sequential compute
-        "train_time_parallel_s": max(train_times) if train_times else 0.0, # wall-clock IF regions run concurrently
-        "eval_env_steps": eval_steps_total, 
-        "per_region": summary, "composition": composition})
+          "train_time_s": train_time_total,                    # sequential compute
+          "train_time_parallel_s": max(train_times) if train_times else 0.0,
+          "train_env_steps": int(per_region * len(labels)),    # actual, not total_steps
+          "eval_env_steps": eval_steps_total,                  # alias, kept
+          "eval_env_steps_periodic": eval_steps_total,
+          "eval_env_steps_terminal": int(composition.get("eval_env_steps_terminal", 0)),
+          "per_region": summary, "composition": composition})
 
 # ------------------------------------------------------------------ main
 def main():

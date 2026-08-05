@@ -19,9 +19,15 @@ _XCOL = "time/total_timesteps"
 
 # ---- progress.csv helpers ---------------------------------------------------
 
-def _load(csv_path: str):
-    import pandas as pd
-    return pd.read_csv(csv_path)
+def _load(csv_path):
+    """None when the CSV is missing or has no rows yet (smoke-scale runs)."""
+    if not os.path.isfile(csv_path) or os.path.getsize(csv_path) == 0:
+        return None
+    try:
+        df = pd.read_csv(csv_path)
+    except pd.errors.EmptyDataError:
+        return None
+    return df if len(df) else None
 
 
 def _series(df, col: str):
@@ -62,6 +68,9 @@ def plot_training_diagnostics(csv_path: str, out_path: str, title: str = "") -> 
         print(f"[diag] no progress.csv at {csv_path}; skipping")
         return None
     df = _load(csv_path)
+    if df is None:
+        print(f"[plots] skipping {csv_path}: no rows logged yet")
+        return
 
     # geodesic bins are dynamic column names eval/succ_d{b}
     dist_cols = sorted([c for c in df.columns if c.startswith("eval/succ_d")])
@@ -106,9 +115,12 @@ def plot_training_diagnostics(csv_path: str, out_path: str, title: str = "") -> 
     return out_path
 
 
-def plot_regions_training(region_csvs: Dict[int, str], out_path: str,
-                          title: str = "regions training") -> Optional[str]:
-    """One PNG overlaying per-region eval success and return curves."""
+def plot_regions_training(paths, out_path, title=""):
+    paths = {k: p for k, p in paths.items() if _load(p) is not None}
+    if not paths:
+        print("[plots] no region CSVs with rows yet; skipping")
+        return    """One PNG overlaying per-region eval success and return curves."""
+    
     items = [(lab, p) for lab, p in sorted(region_csvs.items()) if os.path.exists(p)]
     if not items:
         print("[diag] no region progress.csv found; skipping regions curve")
@@ -116,7 +128,6 @@ def plot_regions_training(region_csvs: Dict[int, str], out_path: str,
 
     fig, (axS, axR) = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
     for lab, path in items:
-        df = _load(path)
         x, y = _series(df, "eval/success_rate")
         if x is None:
             x, y = _series(df, "rollout/success_rate")

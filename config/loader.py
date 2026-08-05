@@ -157,6 +157,38 @@ def _rmin_gate(cfg, bundle):
                   f"({2 * r_min:.2f}); receiver may lack runway to re-align heading")
     cfg["_v0"], cfg["_r_min"] = v0, r_min
 
+def _derive_clocks(cfg, bundle):
+    """Compute h_region / flat_horizon / both gammas from geometry."""
+    from domains.geometry import region_hop_table
+    from domains.partitions import region_diameter
+
+    spc = float(cfg["cell_size"]) / (float(cfg["_v0"]) * float(cfg["dt"]))
+    diam = max(region_diameter(bundle.maze, bundle.table, l) for l in bundle.labels)
+    hops = max(region_hop_table(bundle.adjacency).values())
+    h = int(round(2 * diam * spc))
+    flat = int(hops * h)
+    cfg["_steps_per_cell"] = spc
+    cfg["h_region"], cfg["flat_horizon"] = h, flat
+    cfg["region_gamma"], cfg["flat_gamma"] = 1.0 - 1.0 / h, 1.0 - 1.0 / flat
+    print(f"[clock] spc={spc:.1f} diam={diam} hops={hops} -> "
+          f"h_region={h} flat={flat}")
+
+
+def _apply_clocks(cfg, explicit):
+    """Point horizon / gamma / eval_horizon at the derived values.
+
+    An explicit flag still wins but warns: both arms share one eval clock, and a
+    silent mismatch there corrupts the comparison rather than degrading it.
+    """
+    reg = cfg["mode"] == "regions"
+    want = {"horizon": cfg["h_region"] if reg else cfg["flat_horizon"],
+            "gamma": cfg["region_gamma"] if reg else cfg["flat_gamma"],
+            "eval_horizon": cfg["flat_horizon"]}
+    for k, v in want.items():
+        if k in explicit:
+            print(f"[clock][warn] {k}={cfg[k]} overrides derived {v}")
+        else:
+            cfg[k] = v
 
 # ------------------------------------------------------------------ argparse
 def _add_flags(parser, scalars):
@@ -199,6 +231,7 @@ def resolve(argv=None) -> Tuple[dict, MazeBundle]:
     p.add_argument("--partition", dest="partition", default=None)
     _add_flags(p, cfg)                       # unknown --flags error here (typo guard)
     ns = p.parse_args(argv)
+    explicit = {k for k in vars(ns) if k not in _SEL}
 
     cfg.update({kk: vv for kk, vv in vars(ns).items() if kk not in _SEL})
     for s in _SEL: cfg[s] = getattr(ns, s)
@@ -211,6 +244,8 @@ def resolve(argv=None) -> Tuple[dict, MazeBundle]:
     bundle = build_maze_bundle(cfg, partition=cfg.get("partition") or "")
     cfg["partition"] = bundle.partition_name        # record what was actually used
     _rmin_gate(cfg, bundle)
+    _derive_clocks(cfg, bundle)
+    _apply_clocks(cfg, explicit)
     return cfg, bundle
 
 def dump_resolved(cfg: dict, path: str):

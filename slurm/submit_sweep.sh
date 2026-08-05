@@ -68,7 +68,7 @@ export JAX_PLATFORMS=cpu; export CUDA_VISIBLE_DEVICES=0; export XLA_PYTHON_CLIEN
 COMMON="--algo ${ALGO} --mode ${MODE} --maze-name ${MAZE} \
         --horizon ${TRAIN_HORIZON} --eval-horizon ${EVAL_HORIZON} --gamma ${TRAIN_GAMMA} \
         --arrival-eps 0.4 --omega-max 8.0 \
-        --total-steps ${BUDGET} --eval-episodes 32 --seed ${SEED} \
+        --total-steps ${BUDGET} --composition-eval-pairs 32 --region-eval-episodes 32 --seed ${SEED} \
         --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
         --output-dir ${RUN_DIR}/${MODE}_${ALGO}_s${SEED}"
 

@@ -121,7 +121,7 @@ class LegSpec:
 
 def run_option(*, physics, policy, hooks: DomainHooks, cfg: ExecConfig,
                leg: LegSpec, x0, goal: Optional[Point] = None,
-               budget: Optional[int] = None
+               budget: Optional[int] = None, trace: Optional[list] = None
                ) -> Tuple[OptionRecord, np.ndarray, bool]:
     """Roll one option. Returns (record, exit_state, goal_reached).
 
@@ -146,6 +146,8 @@ def run_option(*, physics, policy, hooks: DomainHooks, cfg: ExecConfig,
         action, _ = policy.predict(physics.obs(x, leg.target), deterministic=True)
         x, _u = physics.step(x, action)
         steps = t + 1
+        if trace is not None:
+            trace.append((x.copy(), np.asarray(_u, np.float32).copy()))
 
         if not hooks.guard_ok(x, allowed, hooks.cell_size):
             guard_hits += 1
@@ -214,7 +216,8 @@ def run_episode(*, physics, policy_for: Callable[[Node], Any],
                 route_fn: Callable[[Node, Node], Optional[Sequence[Node]]],
                 episode: int = 0, arm: str = "composition", seed: int = 0,
                 maze: str = "", partition: str = "", algo: str = "",
-                budget_steps: int = -1, hops: Optional[int] = None
+                budget_steps: int = -1, hops: Optional[int] = None,
+                trace: Optional[list] = None
                 ) -> EpisodeRecord:
     """Plan a route and execute it. Returns the record; the caller saves.
 
@@ -298,7 +301,8 @@ def run_episode(*, physics, policy_for: Callable[[Node], Any],
         rec, x, goal_reached = run_option(
             physics=physics, policy=policy_for(src), hooks=hooks, cfg=cfg,
             leg=leg, x0=x, goal=goal,
-            budget=min(int(cfg.option_budget), int(cfg.episode_budget) - spent))
+            budget=min(int(cfg.option_budget), int(cfg.episode_budget) - spent),
+            trace=trace)
         if just_replanned:
             rec.replanned_after = True
             just_replanned = False

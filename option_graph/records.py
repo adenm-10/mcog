@@ -38,6 +38,13 @@ EPISODE_REASONS = ("success", "timeout", "no_path", "option_budget", "stuck",
 
 GOAL_SENTINEL = "goal"   # terminal leg targets the true goal, not an interface
 
+def _clean(o):
+    """NaN -> None, recursively, so no bare NaN token reaches the file."""
+    if isinstance(o, dict):
+        return {k: _clean(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_clean(v) for v in o]
+    return None if isinstance(o, float) and o != o else o
 
 def edge_key(source_region: Any, target_region: Optional[Any] = None,
              interface_id: Optional[str] = None) -> str:
@@ -188,7 +195,7 @@ def write_jsonl(path: str, episodes: Iterable[EpisodeRecord],
     n = 0
     with open(path, mode) as f:
         for ep in episodes:
-            f.write(json.dumps(ep.to_dict(), separators=(",", ":")) + "\n")
+            f.write(json.dumps(_clean(ep.to_dict()), separators=(",", ":"), allow_nan=False) + "\n")
             n += 1
     print(f"[records] {n} episodes -> {path}")
     return path

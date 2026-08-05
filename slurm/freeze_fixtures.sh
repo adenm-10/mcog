@@ -47,7 +47,7 @@ python train.py \
   --algo sac --mode regions --maze-name "${MAZE}" \
   --horizon 200 --eval-horizon 600 --gamma 0.995 \
   --arrival-eps 0.4 --omega-max 8.0 --wall-margin 0.0 \
-  --total-steps "${BUDGET}" --eval-episodes "${PAIRS}" \
+  --total-steps "${BUDGET}" --composition-eval-pairs "${PAIRS}" --region-eval-episodes "${PAIRS}" \
   --seed "${SEED}" --eval-seed "${EVAL_SEED}" \
   --diag-eval-freq "${DIAG_FREQ}" --diag-eval-episodes "${DIAG_EPS}" \
   --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
@@ -61,7 +61,7 @@ python train.py \
   --algo sac --mode monolith --maze-name "${MAZE}" \
   --horizon 600 --eval-horizon 600 --gamma 0.99833 \
   --arrival-eps 0.4 --omega-max 8.0 --wall-margin 0.0 \
-  --total-steps "${BUDGET}" --eval-episodes "${PAIRS}" \
+  --total-steps "${BUDGET}" --composition-eval-pairs "${PAIRS}" --region-eval-episodes "${PAIRS}" \
   --seed "${SEED}" --eval-seed "${EVAL_SEED}" \
   --diag-eval-freq 15000 --diag-eval-episodes "${DIAG_EPS}" \
   --goal-reward 10 --step-pen 0.01 --collision-pen 0 \

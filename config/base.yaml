@@ -7,14 +7,14 @@ net_arch: [256, 256]
 
 # --- task / env ---
 dt: 0.1
-horizon: 150
+horizon: 160
 variable_speed: false
 arrival_eps: 0.4
 goal_reward: 10.0
 collision_pen: 0.0
 step_pen: 0.00
-wall_margin: 0.0
-gamma: 0.99               # shared by env PBRS and agent (MUST match)
+wall_margin: 0.25
+gamma: 0.99375               # shared by env PBRS and agent (MUST match)
 omega_max: 8.0
 
 # --- optimization (shared) ---
@@ -22,9 +22,12 @@ learning_rate: 0.0003
 total_steps: 1000000      # monolith: literal; regions: split as total//K
 
 # --- eval / diagnostics ---
-eval_episodes: 32
+region_eval_episodes: 32        # training diagnostic only, never a predictor input
+composition_eval_pairs: 400     # stratified; SE ~2pp pooled over 5 seeds
+eval_stratify: true
+eval_min_hops: 1                # 0 would add a same-region stratum
 eval_seed: 123
-eval_horizon: 150
+eval_horizon: 640
 diag_eval_freq: 25000
 diag_eval_episodes: 16
 
@@ -34,3 +37,4 @@ n_sampled_goal: 4
 her_strategy: final       # final | future
 
 switch_gate: halfplane    # halfplane | rect
+option_budget: 50

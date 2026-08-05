@@ -60,7 +60,7 @@ python train.py \
   --algo ${ALGO} --mode ${MODE} --maze-name ${MAZE} \
   --horizon ${TRAIN_HORIZON} --eval-horizon ${EVAL_HORIZON} --gamma ${TRAIN_GAMMA} \
   --arrival-eps 0.4 --omega-max 8.0 --wall-margin 0.0 \
-  --total-steps ${BUDGET} --eval-episodes 32 --seed ${SEED} \
+  --total-steps ${BUDGET} --composition-eval-pairs 32 --region-eval-episodes 32 \ --seed ${SEED} \
   --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
   --switch-gate halfplane \
   --n-envs 8 --gradient-steps 4 --learning-starts ${LSTART} --buffer-size ${BUDGET} \

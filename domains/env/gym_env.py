@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from domains.systems import maze as maze_mod
 from domains.systems.car import create_dubins_car
 from domains.env.reward import sparse_reward, arrived
+from domains.geometry import sample_state_in_cells, sample_xy_in_cell
 
 import logging
 import sys
@@ -190,7 +191,7 @@ class DubinsMazeEnv(gym.Env):
                 ix, iy = int(self._goal_cells[j, 0]), int(self._goal_cells[j, 1])
                 if (ix, iy) == start_cell:
                     continue
-                gx, gy = self._sample_free_xy_in_cell(ix, iy)
+                gx, gy = sample_xy_in_cell(self._rng, self.maze, (ix, iy), self._wall_margin)
             else:
                 gx, gy = self._goal_waypoints[j - self._n_goal_cells]
                 if self._nearest_free_cell(gx, gy) == start_cell:
@@ -228,28 +229,16 @@ class DubinsMazeEnv(gym.Env):
         # 4. concave corner: no legal translation, keep heading so it can turn out
         return np.array([x[0], x[1], c, s], dtype=np.float32), True
 
-    def _sample_free_xy_in_cell(self, cell_ix, cell_iy, *, max_tries=64):
-        """Continuous (px,py) uniform within the cell, rejecting wall points.
-        Falls back to the cell center (free by construction)."""
-        cs = self.maze.cell_size
-        cx, cy = (cell_ix + 0.5)*cs, (cell_iy + 0.5)*cs
-        half = 0.5*cs
-        for _ in range(max_tries):
-            px = cx + self._rng.uniform(-half, half)
-            py = cy + self._rng.uniform(-half, half)
-            if not self.maze.is_wall(px, py):
-                return px, py
-        return cx, cy
-
     def _sample_start_state(self):
+        """Uniform start in the allowed cells, keeping wall_margin clear of edges."""
         if self.randomize_start:
-            i = self._rng.randint(self._start_cells.shape[0])
-            ix, iy = int(self._start_cells[i, 0]), int(self._start_cells[i, 1])
-        else:
-            ix, iy = self.maze.start_cell
-        px, py = self._sample_free_xy_in_cell(ix, iy)
+            return sample_state_in_cells(self._rng, self.maze, self._start_cells,
+                                         self._wall_margin)
+        ix, iy = self.maze.start_cell
+        px, py = sample_xy_in_cell(self._rng, self.maze, (ix, iy),
+                                   self._wall_margin)
         ang = self._rng.uniform(0.0, 2.0 * np.pi)
-        return np.array([px, py, np.cos(ang), np.sin(ang)], dtype=np.float32), (ix, iy)
+        return np.array([px, py, np.cos(ang), np.sin(ang)], np.float32), (ix, iy)
 
     # --- gym API --------------------------------------------------------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):

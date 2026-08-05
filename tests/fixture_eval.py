@@ -95,6 +95,29 @@ def _same(a, b, tol: float = TOL) -> bool:
         return abs(float(a) - float(b)) <= tol
     return a == b
 
+def _records_digest(records) -> dict:
+    """Structural fingerprint of an eval run. Far stronger than four scalars,
+    and it is what the S9-S11 diagnostics actually consume."""
+    from collections import Counter
+    opts = [o for r in records for o in r.options]
+    tally = lambda vals: {str(k): int(v) for k, v in sorted(Counter(vals).items(),
+                                                            key=lambda kv: str(kv[0]))}
+    return {
+        "n_episodes": len(records),
+        "n_options": len(opts),
+        "reasons": tally(r.reason for r in records),
+        "outcomes": tally(o.outcome for o in opts),
+        "options_per_episode": tally(len(r.options) for r in records),
+        "hops": tally(r.hops for r in records),
+        "edge_keys": tally(o.edge_key for o in opts),
+        "total_steps": int(sum(r.total_steps for r in records)),
+        "reached_position": int(sum(1 for o in opts if o.reached_position)),
+        "reached_interface": int(sum(1 for o in opts if o.reached_interface)),
+        "guard_violations": int(sum(o.guard_violations for o in opts)),
+        "region_matches_target": int(sum(
+            1 for o in opts if o.extras.get("region_matches_target") is True)),
+    }
+
 
 # --------------------------------------------------------------------------- #
 # cfg reconstruction
@@ -127,6 +150,15 @@ def load_frozen_cfg(fixture_dir: str, mode: str, config_dir: str = "config") -> 
     cfg.update(frozen)                     # frozen scalars win; structured survive
     if str(cfg["mode"]) != mode:
         raise ValueError(f"{mode}/resolved_config.yaml says mode={cfg['mode']!r}")
+    cfg.setdefault("h_region", int(cfg["horizon"]))
+    cfg.setdefault("flat_horizon", int(cfg["eval_horizon"]))
+    
+    old = int(frozen.get("eval_episodes", 32))
+    cfg["composition_eval_pairs"] = int(frozen.get("composition_eval_pairs", old))
+    cfg["region_eval_episodes"] = int(frozen.get("region_eval_episodes", old))
+    cfg["eval_stratify"] = bool(frozen.get("eval_stratify", False))
+    cfg["eval_min_hops"] = int(frozen.get("eval_min_hops", 0))
+
     return cfg
 
 
@@ -165,25 +197,22 @@ def load_models(cfg: dict, bundle, run_dir: str):
 # eval, mirroring train.py's call sites exactly
 # --------------------------------------------------------------------------- #
 
-def _eval_arm(cfg: dict, bundle, models) -> dict:
+def _eval_arm(cfg: dict, bundle, models, sink) -> dict:
     """Re-run the terminal eval. Must match run_monolith / run_regions argument
     for argument, or a fixture diff means 'the harness changed', not 'the code
     changed'."""
     from option_graph._port_eval import evaluate_composition, evaluate_monolith
 
-    kw = dict(dt=float(cfg["dt"]), omega_max=float(cfg["omega_max"]),
-              gamma=float(cfg["gamma"]), horizon=int(cfg["eval_horizon"]),
+    kw = dict(bundle=bundle, dt=float(cfg["dt"]), omega_max=float(cfg["omega_max"]),
+              gamma=float(cfg["gamma"]), horizon=int(cfg["flat_horizon"]),
+              option_budget=int(cfg["h_region"]),
               arrival_eps=float(cfg["arrival_eps"]),
-              num_pairs=int(cfg["eval_episodes"]),
-              eval_seed=int(cfg["eval_seed"]),
-              output_dir=None, write_json=False)
+              num_pairs=int(cfg["composition_eval_pairs"]), eval_seed=int(cfg["eval_seed"]),
+              gate=str(cfg["switch_gate"]), output_dir=None, write_json=False, records_sink=sink,
+              stratify=bool(cfg["eval_stratify"]), min_hops=int(cfg["eval_min_hops"]))
     if str(cfg["mode"]) == "monolith":
-        return evaluate_monolith(models, maze=bundle.maze,
-                                 name="fixture_monolith", **kw)
-    # gate passed explicitly: evaluate_composition defaults to "rect" while
-    # CompositionController defaults to "halfplane". Never rely on either.
-    return evaluate_composition(models, bundle, gate=str(cfg["switch_gate"]),
-                                name="fixture_composition", **kw)
+        return evaluate_monolith(models, name="fixture_monolith", **kw)
+    return evaluate_composition(models, name="fixture_composition", **kw)
 
 
 def _eval_per_region(cfg: dict, bundle, models) -> dict:
@@ -198,7 +227,7 @@ def _eval_per_region(cfg: dict, bundle, models) -> dict:
                       region_cells=bundle.region_train_cells[lab],
                       region_goals=bundle.region_goals[lab])()
         out[str(int(lab))] = float(_region_success(
-            env, models[int(lab)], int(cfg["eval_episodes"]),
+            env, models[int(lab)], int(cfg["region_eval_episodes"]),
             int(cfg["eval_seed"]) + int(lab)))
         try:
             env.close()
@@ -226,8 +255,10 @@ def run_arm(fixture_dir: str, mode: str, config_dir: str = "config"):
     cfg = load_frozen_cfg(fixture_dir, mode, config_dir)
     bundle = build_bundle(cfg)
     models = load_models(cfg, bundle, os.path.join(fixture_dir, mode))
-    got = {"metrics": {k: _clean(v) for k, v in _eval_arm(cfg, bundle, models).items()},
-           "fingerprint": _fingerprint(cfg, bundle)}
+    sink = []
+    got = {"metrics": {k: _clean(v) for k, v in _eval_arm(cfg, bundle, models, sink).items()},
+           "fingerprint": _fingerprint(cfg, bundle),
+           "records": _records_digest(sink)}
     if str(cfg["mode"]) == "regions":
         got["per_region"] = _eval_per_region(cfg, bundle, models)
     return cfg, got
@@ -404,6 +435,7 @@ def cmd_fixtures(fixture_dir: str = FIXTURE_DIR, config_dir: str = "config") -> 
             check(_same(got["metrics"].get(k), exp.get("metrics", {}).get(k), 0.0),
                   f"{mode}.{k} reproduces EXACTLY",
                   f"want {exp.get('metrics', {}).get(k)!r} got {got['metrics'].get(k)!r}")
+
         for k in RECORD_KEYS:
             e, g = exp.get("metrics", {}).get(k), got["metrics"].get(k)
             if e is None or g is None:
@@ -421,6 +453,13 @@ def cmd_fixtures(fixture_dir: str = FIXTURE_DIR, config_dir: str = "config") -> 
                   f"{mode}: all {len(exp['per_region'])} per-region rates "
                   "reproduce EXACTLY",
                   "" if not bad else f"want/got {bad}")
+
+        if "records" in exp:
+            bad = {k: (v, got["records"].get(k)) for k, v in exp["records"].items()
+                   if not _same(got["records"].get(k), v)}
+            check(not bad, f"{mode}: record digest reproduces EXACTLY",
+                  "" if not bad else f"want/got {bad}")
+
     return list(_results)
 
 
