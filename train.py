@@ -18,6 +18,34 @@ import numpy as np
 
 _NON_SCALAR = ("walls", "regions", "partitions", "interfaces")
 
+# One line each, next to the values they describe -- shipped to wandb as a
+# glossary table once per run. See option_graph/callbacks.py's METRIC_DOCS for
+# the streamed rollout/*, eval/* training keys; these are train.py's own.
+METRIC_DOCS = {
+    "region": "Region label this run trained (regions mode only) -- lets the "
+        "wandb UI facet the 9 per-region runs under one group.",
+    "region_success_rate": "Terminal per-region eval success (region_eval_episodes "
+        "trials, deterministic policy). The region-local number S9's calibration compares against.",
+    "train_time_s": "Wall-clock training time for this run (one region, or the monolith).",
+    "eval_env_steps": "Env steps spent on this run's periodic (training-time) "
+        "eval callback -- accounting for handoff sec 8.3, distinct from the terminal eval below.",
+    "eval/success_rate": "Terminal eval success rate on frozen weights -- the "
+        "observation metrics.py later scores the four predictors against.",
+    "eval/mean_geodesic_dist": "Mean start-to-goal geodesic distance, the "
+        "fairness anchor shared across arms and seeds.",
+    "eval/time_to_arrival": "Mean control steps to arrival among successes only.",
+    "eval/mean_path_length": "Mean realized path length, successes only.",
+    "eval/mean_efficiency": "mean_path_length / geodesic distance (uses the "
+        "geodesic, not the Euclidean chord -- S7 9b).",
+    "eval/mean_control_cost": "Mean sum of squared control effort per episode.",
+    "eval/eval_env_steps_terminal": "Env steps consumed by the terminal eval itself.",
+}
+
+
+def _wandb_config(cfg: dict) -> dict:
+    return {k: v for k, v in cfg.items()
+            if k not in _NON_SCALAR and not k.startswith("_")}
+
 # ------------------------------------------------------------------ builders
 def _make_model(cfg, env):
     from stable_baselines3 import PPO, SAC
@@ -78,21 +106,34 @@ def _callbacks(cfg, eval_env, seed):
     return CallbackList([TrainMetricsCallback(n_envs=int(cfg["n_envs"])), eval_cb]), eval_cb
 
 def _write_summary(base_dir, cfg, extra):
-    scal = {k: v for k, v in cfg.items()
-            if k not in _NON_SCALAR and not k.startswith("_")}
     with open(os.path.join(base_dir, "summary.json"), "w") as f:
         json.dump({"algo": cfg["algo"], "mode": cfg["mode"],
                    "partition": cfg.get("partition", ""),
-                   "config": scal, **extra}, f, indent=2, default=str)
-                   
+                   "config": _wandb_config(cfg), **extra}, f, indent=2, default=str)
+
+
+def _wandb_init(cfg, base_dir, *, job_type: str, extra_tags=(), extra_config=None):
+    from wandb_logging import init_run, log_glossary
+    run = init_run(enabled=bool(cfg.get("wandb")), job_type=job_type,
+                   name=cfg.get("wandb_run_name"),
+                   project=str(cfg.get("wandb_project") or "mcog"),
+                   group=os.path.basename(base_dir.rstrip("/")),
+                   tags=[cfg["mode"], cfg["algo"], cfg["maze_name"], *extra_tags],
+                   config={**_wandb_config(cfg), **(extra_config or {})})
+    log_glossary(run, METRIC_DOCS)
+    return run
+
 # ------------------------------------------------------------------ monolith
 def run_monolith(cfg, bundle, base_dir):
     from option_graph.callbacks import attach_csv_logger
     from option_graph.analysis.plots import plot_training_diagnostics
     from option_graph._port_eval import evaluate_monolith
+    from wandb_logging import finish, log_image, summary
     models, train, ev, mon = (os.path.join(base_dir, d)
                               for d in ("models", "train", "eval", "monitors"))
     for d in (models, train, ev, mon): os.makedirs(d, exist_ok=True)
+
+    run = _wandb_init(cfg, base_dir, job_type="train")
 
     n = int(cfg["n_envs"])
     term = not bool(cfg.get("use_her"))
@@ -100,7 +141,8 @@ def run_monolith(cfg, bundle, base_dir):
                           randomize_start=True, terminate_on_arrival=term,
                           monitor_path=os.path.join(mon, f"monitor_{i:03d}"))
                           for i in range(n)])
-    model = _make_model(cfg, vec); attach_csv_logger(model, train)
+    model = _make_model(cfg, vec)
+    attach_csv_logger(model, train, wandb_run=run)
     eval_env = _env_fn(cfg, bundle, rank=10_000, goal_mode="random", randomize_start=True)()
     eval_env.seed(int(cfg["eval_seed"]) + 10_000)
 
@@ -110,9 +152,11 @@ def run_monolith(cfg, bundle, base_dir):
     rt = time.time() - t0
     model.save(os.path.join(models, "model")); vec.close()
 
-    plot_training_diagnostics(os.path.join(train, "progress.csv"),
-                              os.path.join(train, "training_diagnostics.png"),
-                              title=f"{cfg['algo'].upper()} {cfg['maze_name']}")
+    diag_png = plot_training_diagnostics(
+        os.path.join(train, "progress.csv"),
+        os.path.join(train, "training_diagnostics.png"),
+        title=f"{cfg['algo'].upper()} {cfg['maze_name']}")
+    log_image(run, "train/diagnostics", diag_png)
     metrics = evaluate_monolith(model, bundle=bundle, dt=float(cfg["dt"]),
         omega_max=float(cfg["omega_max"]), gamma=float(cfg["gamma"]),
         horizon=int(cfg["flat_horizon"]), option_budget=int(cfg["flat_horizon"]),
@@ -127,6 +171,10 @@ def run_monolith(cfg, bundle, base_dir):
           "eval_env_steps_periodic": int(eval_cb.env_steps_consumed),
           "eval_env_steps_terminal": int(metrics.get("eval_env_steps_terminal", 0)),
           "metrics": metrics})
+    summary(run, {"train_time_s": rt,
+                 **{f"eval/{k}": v for k, v in metrics.items()
+                    if f"eval/{k}" in METRIC_DOCS}})
+    finish(run)
 
 # ------------------------------------------------------------------ regions
 def _region_success(env, model, episodes, seed):
@@ -144,6 +192,8 @@ def run_regions(cfg, bundle, base_dir):
     from option_graph.callbacks import attach_csv_logger
     from option_graph.analysis.plots import plot_regions_training
     from option_graph._port_eval import evaluate_composition
+    from wandb_logging import finish, log_image
+    from wandb_logging import summary as wandb_summary  # local `summary` is a per-region dict
     train = os.path.join(base_dir, "train")
     comp = os.path.join(base_dir, "eval", "composition")
     perreg = os.path.join(base_dir, "eval", "per_region")
@@ -164,13 +214,17 @@ def run_regions(cfg, bundle, base_dir):
         mdir = os.path.join(models, f"region_{lab}")
         for d in (rlog, rmon, mdir): os.makedirs(d, exist_ok=True)
 
+        run = _wandb_init(cfg, base_dir, job_type="train-region",
+                          extra_tags=[f"region_{lab}"], extra_config={"region": int(lab)})
+
         term = not bool(cfg.get("use_her"))
         vec = _make_vec(cfg, [_env_fn(cfg, bundle, rank=i, goal_mode="random",
                               randomize_start=True, region_cells=rc, region_goals=rg,
                               terminate_on_arrival=term,
                               monitor_path=os.path.join(rmon, f"monitor_{i:03d}"))
                               for i in range(n)])
-        model = _make_model(cfg, vec); attach_csv_logger(model, rlog)
+        model = _make_model(cfg, vec)
+        attach_csv_logger(model, rlog, wandb_run=run)
         eval_env = _env_fn(cfg, bundle, rank=55_555, goal_mode="random",
                            randomize_start=True, region_cells=rc, region_goals=rg)()
         eval_env.seed(int(cfg["eval_seed"]) + int(lab) + 10_000)
@@ -193,8 +247,12 @@ def run_regions(cfg, bundle, base_dir):
         with open(os.path.join(perreg, f"region_{lab}_metrics.json"), "w") as f:
             json.dump(summary[lab], f, indent=2)
         print(f"[region {lab}] success={succ:.1%} time={rt:.1f}s cells={rc.shape[0]}")
+        wandb_summary(run, {"region": int(lab), "region_success_rate": succ,
+                           "train_time_s": rt,
+                           "eval_env_steps": int(eval_cb.env_steps_consumed)})
+        finish(run)
 
-    plot_regions_training(
+    diag_png = plot_regions_training(
         {int(l): os.path.join(train, f"region_{l}", "progress.csv") for l in labels},
         os.path.join(train, "regions_training.png"),
         title=f"{cfg['algo'].upper()} regions {cfg['maze_name']}")
@@ -214,6 +272,13 @@ def run_regions(cfg, bundle, base_dir):
           "eval_env_steps_periodic": eval_steps_total,
           "eval_env_steps_terminal": int(composition.get("eval_env_steps_terminal", 0)),
           "per_region": summary, "composition": composition})
+
+    comp_run = _wandb_init(cfg, base_dir, job_type="eval-composition")
+    log_image(comp_run, "train/diagnostics", diag_png)
+    wandb_summary(comp_run, {"train_time_s": train_time_total,
+                            **{f"eval/{k}": v for k, v in composition.items()
+                               if f"eval/{k}" in METRIC_DOCS}})
+    finish(comp_run)
 
 # ------------------------------------------------------------------ main
 def main():

@@ -38,3 +38,8 @@ her_strategy: final       # final | future
 
 switch_gate: halfplane    # halfplane | rect
 option_budget: 50
+
+# --- wandb (additive; off by default, never required for the tol=0 gate) ---
+wandb: false
+wandb_project: mcog
+wandb_run_name: null

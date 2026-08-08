@@ -389,6 +389,49 @@ def _json_safe(o):
 # CLI
 # --------------------------------------------------------------------------- #
 
+# One line each, next to the values they describe -- the wandb dashboard ships
+# this as a glossary table so a metric's meaning is a lookup, not a trip to
+# source. Keep language consistent with docs/status.md so the two never drift.
+METRIC_DOCS = {
+    "verdict/ratio": "R = MAE_marginal / MAE_handoff, the headline effect size. "
+        "R>=ratio_min with the CI on D excluding zero is the preregistered pass condition.",
+    "verdict/d_point": "Point difference MAE_marginal - MAE_handoff. This is the "
+        "reported gap, not d_boot_mean -- MAE's convexity biases the bootstrap mean low.",
+    "verdict/d_boot_mean": "Mean of the bootstrap-resampled D. Biased LOW vs d_point "
+        "by the same convexity that biases ratio_ci; diagnostic only.",
+    "verdict/ci_excludes_zero": "Whether the 95% bootstrap CI on raw D excludes zero "
+        "-- the second half of the pass condition.",
+    "verdict/passed": "R>=ratio_min AND ci_excludes_zero, together.",
+    "noise_floor": "Pooled Jeffreys-posterior binomial noise every predictor's MAE "
+        "sits above. At or below this floor, a predictor is noise-limited and R is uninterpretable.",
+    "mae/naive": "Predictor 1 MAE: product of per-region training-distribution rates.",
+    "mae/marginal": "Predictor 2 MAE: product of per-edge p_bar under each edge's own "
+        "design distribution. Ignores composition's entry-state shift.",
+    "mae/handoff": "Predictor 3 MAE: p_bar on the first leg, H(e_prev,e) thereafter. "
+        "The handoff-aware estimate; this is R's denominator.",
+    "brier/naive": "Per-pair proper score, predictor naive.",
+    "brier/marginal": "Per-pair proper score, predictor marginal.",
+    "brier/handoff": "Per-pair proper score, predictor handoff. Orders predictors "
+        "identically to MAE with no grouping choice -- the strongest single line of support.",
+    "brier_parts/handoff/irreducible": "The Brier floor no predictor can beat "
+        "(pair-weighted obs*(1-obs)). Compares handoff's headroom against a hard bound.",
+    "slope/naive": "OLS slope of observed on predicted, predictor naive. 1.0 is perfect.",
+    "slope/marginal": "OLS slope of observed on predicted, predictor marginal. 1.0 is perfect.",
+    "slope/handoff": "OLS slope of observed on predicted, predictor handoff. 1.0 is perfect.",
+    "oracle/handoff": "MAE of handoff restricted to the oracle-coverage subset "
+        "(comparable base for the chained row below).",
+    "oracle/chained": "MAE of predictor 4 (observed-entry-state oracle). Undefined "
+        "where a planned leg never executed; never gates the marginal/handoff decision sample (D1).",
+    "n_pairs": "Total observed route-pairs (episodes) scored.",
+    "n_groups": "Distinct routes (region-sequence plans) observed at least once.",
+    "n_scored": "Routes where marginal AND handoff are both finite -- the decision-rule "
+        "sample size behind R.",
+    "n_cut_short": "Pairs that hit the goal mid-doorway-leg, so the terminal leg never "
+        "ran. Biases every predictor down by the same amount, not predictor-specific.",
+    "table/by_hop_count": "Per-hop-count breakdown of obs/noise_floor/MAE. The ceiling "
+        "effect at high hop counts (MAE_handoff at or below noise_floor) is visible here.",
+}
+
 def main(argv=None) -> int:
     for k, v in (("JAX_PLATFORM_NAME", "cpu"), ("JAX_PLATFORMS", "cpu"),
                  ("XLA_PYTHON_CLIENT_PREALLOCATE", "false"),
@@ -410,11 +453,26 @@ def main(argv=None) -> int:
     ap.add_argument("--ratio-min", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=None, help="default: <records dir>/metrics.json")
+    ap.add_argument("--wandb", action="store_true",
+                    help="mirror the scored result to wandb (additive; off by default)")
+    ap.add_argument("--wandb-project", default="mcog")
+    ap.add_argument("--wandb-run-name", default=None)
     args = ap.parse_args(argv)
 
     from config.loader import build_bundle
     from option_graph.calibrate import _load_run_cfg
     from option_graph.edge_model import nav_descriptors
+    from wandb_logging import (finish, init_run, log_artifact, log_glossary,
+                               log_table, summary)
+
+    run = init_run(enabled=bool(args.wandb), job_type="score",
+                   name=args.wandb_run_name, project=args.wandb_project,
+                   group=os.path.basename(args.run_dir.rstrip("/")),
+                   config={"records": args.records, "model_json": args.model_json,
+                           "probe": args.probe, "region_field": args.region_field,
+                           "draws": int(args.draws), "ratio_min": float(args.ratio_min),
+                           "seed": int(args.seed)})
+    log_glossary(run, METRIC_DOCS)
 
     cfg = _load_run_cfg(args.run_dir, args.config_dir)
     bundle = build_bundle(cfg)
@@ -481,6 +539,28 @@ def main(argv=None) -> int:
         json.dump(_json_safe(payload), f, indent=2, sort_keys=True,
                   allow_nan=False)
     print(f"\n[metrics] wrote {out}")
+
+    summary(run, {
+        "verdict/ratio": verdict["ratio"], "verdict/d_point": verdict["d_point"],
+        "verdict/d_boot_mean": verdict["d_boot_mean"],
+        "verdict/ci_excludes_zero": verdict["ci_excludes_zero"],
+        "verdict/passed": verdict["passed"], "noise_floor": noise_floor(gs),
+        **{f"mae/{r}": payload["mae"][r] for r in PLAN_PREDICTORS},
+        **{f"brier/{r}": payload["brier"][r] for r in PLAN_PREDICTORS},
+        **{f"slope/{r}": payload["slope"][r] for r in PLAN_PREDICTORS},
+        "brier_parts/handoff/irreducible": payload["brier_parts"]["handoff"]["irreducible"],
+        "oracle/handoff": payload["oracle"]["handoff"],
+        "oracle/chained": payload["oracle"]["chained"],
+        "n_pairs": payload["n_pairs"], "n_groups": payload["n_groups"],
+        "n_scored": payload["n_scored"], "n_cut_short": payload["n_cut_short"]})
+    log_table(run, "table/by_hop_count",
+             ["hops", "n_groups", "n_pairs", "obs", "noise_floor",
+              "mae_naive", "mae_marginal", "mae_handoff"],
+             [[h, b["n_groups"], b["n_pairs"], b["obs"], b["noise_floor"],
+               b["mae"]["naive"], b["mae"]["marginal"], b["mae"]["handoff"]]
+              for h, b in payload["by_stratum"].items()])
+    log_artifact(run, out, name="metrics", type_="metrics")
+    finish(run)
     return 0
 
 

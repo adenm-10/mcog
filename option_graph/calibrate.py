@@ -269,10 +269,14 @@ def run_calibration(*, physics, policy_for: Callable[[Node], Any],
                     maze: str = "", partition: str = "", algo: str = "",
                     budget_steps: int = -1,
                     by_condition: Optional[Dict[str, Tally]] = None,
-                    progress_every: int = 0) -> Iterator[EpisodeRecord]:
+                    progress_every: int = 0,
+                    wandb_run=None) -> Iterator[EpisodeRecord]:
     """Yield one single-option EpisodeRecord per trial per entry condition. A
     generator, so write_jsonl streams it; condition i draws from
-    RandomState(seed*stride + i), so a rerun reproduces every entry state."""
+    RandomState(seed*stride + i), so a rerun reproduces every entry state.
+    wandb_run is None by default (no-op) -- purely additive progress logging,
+    at the same cadence as the existing progress_every print."""
+    from wandb_logging import log as wandb_log
     trials = int(trials)
     if trials <= 0:
         raise ValueError(f"trials must be positive, got {trials}")
@@ -302,6 +306,8 @@ def run_calibration(*, physics, policy_for: Callable[[Node], Any],
             if progress_every and episode % int(progress_every) == 0:
                 print(f"[calibrate] {episode} rollouts "
                       f"({i + 1}/{len(conditions)} entry conditions)", flush=True)
+                wandb_log(wandb_run, {"rollouts": episode,
+                                     "conditions_done": i + 1})
 
 
 def _wrap(rec: OptionRecord, *, episode: int, condition: EntryCondition,
@@ -439,6 +445,23 @@ def _json_safe(o):
     return o
 
 
+# One line each, next to the values they describe -- shipped to wandb as a
+# glossary table once per run.
+METRIC_DOCS = {
+    "option_budget": "The option horizon THIS calibration ran at. Must match "
+        "the downstream eval's option_budget, or p_hat is fit against a "
+        "different clock than it is later used to predict (status.md sec 9 gotcha).",
+    "n_conditions": "Total (edge, entry-condition) design cells. Cross-checks "
+        "against the degree-sequence formula sum(deg+1)^2 (status.md sec 3.6).",
+    "n_edges": "Directed edges covered: one leg per directed edge, plus one "
+        "terminal leg per region.",
+    "n_rollouts": "n_conditions * trials -- total calibration episodes this run produced.",
+    "table/by_edge": "Per-edge reach rate, strict rate, and across-condition "
+        "spread. Spread near zero means H collapses onto marginal for that "
+        "edge -- no entry-dependence left to fit.",
+}
+
+
 def main(argv=None) -> int:
     # Before the lazy imports: domains.env.physics pulls jax, and nothing at this
     # module's top level has imported it yet.
@@ -466,6 +489,10 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="logs/calibration/calibration.jsonl")
     ap.add_argument("--dry-run", action="store_true", help="print design, exit")
     ap.add_argument("--progress-every", type=int, default=500)
+    ap.add_argument("--wandb", action="store_true",
+                    help="mirror the calibration result to wandb (additive; off by default)")
+    ap.add_argument("--wandb-project", default="mcog")
+    ap.add_argument("--wandb-run-name", default=None)
     args = ap.parse_args(argv)
 
     from checkpoints import _pin_threads, load_models
@@ -474,6 +501,8 @@ def main(argv=None) -> int:
     from domains.env.physics import Physics, build_physics_env
     from option_graph.executor import by_region, nav_hooks
     from option_graph.records import write_jsonl
+    from wandb_logging import (finish, init_run, log_artifact, log_glossary,
+                               log_table, summary)
 
     cfg = _load_run_cfg(args.run_dir, args.config_dir)
     _pin_threads()
@@ -492,6 +521,17 @@ def main(argv=None) -> int:
     door = [c.n_cells for c in conditions if c.name != UNIFORM]
     uni = [c.n_cells for c in conditions if c.name == UNIFORM]
 
+    run = init_run(enabled=bool(args.wandb), job_type="calibration",
+                   name=args.wandb_run_name, project=args.wandb_project,
+                   group=os.path.basename(args.run_dir.rstrip("/")),
+                   config={"run_dir": args.run_dir, "option_budget": budget,
+                           "entry_hops": int(args.entry_hops), "gate": args.gate,
+                           "alpha_deg": alpha, "seed": seed,
+                           "trials": int(args.trials)})
+    log_glossary(run, METRIC_DOCS)
+    summary(run, {"n_conditions": design["n_conditions"],
+                 "n_edges": design["n_edges"], "n_rollouts": design["n_rollouts"]})
+
     print(f"[calibrate] {args.run_dir}  budget={budget} entry_hops="
           f"{args.entry_hops} gate={args.gate} alpha={alpha} seed={seed}")
     print(f"[calibrate] {design['n_conditions']} conditions / {design['n_edges']} "
@@ -502,6 +542,7 @@ def main(argv=None) -> int:
               f"uniform {min(uni)}-{max(uni)} "
               f"(~{np.mean(uni) / max(np.mean(door), 1e-9):.1f}x concentration)")
     if args.dry_run:
+        finish(run)
         return 0
 
     env = build_physics_env(maze=bundle.maze, dt=float(cfg["dt"]),
@@ -521,7 +562,7 @@ def main(argv=None) -> int:
         trials=int(args.trials), seed=seed, maze=str(bundle.maze.name),
         partition=str(bundle.partition_name), algo=str(cfg["algo"]),
         budget_steps=int(cfg["total_steps"]), by_condition=tally,
-        progress_every=int(args.progress_every)))
+        progress_every=int(args.progress_every), wandb_run=run))
 
     print_report(tally, top=5)
 
@@ -547,6 +588,16 @@ def main(argv=None) -> int:
         json.dump(_json_safe(payload), f, indent=2, sort_keys=True,
                   allow_nan=False)
     print(f"[calibrate] wrote {side}")
+
+    edges, spread = by_edge(tally), condition_spread(tally)
+    log_table(run, "table/by_edge",
+             ["edge", "n", "rate", "se", "strict_rate", "spread", "min", "max"],
+             [[ek, edges[ek].n, edges[ek].rate, edges[ek].se, edges[ek].strict_rate,
+               spread.get(ek, {}).get("spread"), spread.get(ek, {}).get("min"),
+               spread.get(ek, {}).get("max")] for ek in sorted(edges)])
+    log_artifact(run, args.out, name="calibration-rollouts", type_="calibration")
+    log_artifact(run, side, name="calibration-summary", type_="calibration")
+    finish(run)
     return 0
 
 

@@ -12,6 +12,7 @@ import os
 from typing import Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 _XCOL = "time/total_timesteps"
@@ -116,18 +117,15 @@ def plot_training_diagnostics(csv_path: str, out_path: str, title: str = "") -> 
 
 
 def plot_regions_training(paths, out_path, title=""):
-    paths = {k: p for k, p in paths.items() if _load(p) is not None}
-    if not paths:
-        print("[plots] no region CSVs with rows yet; skipping")
-        return    """One PNG overlaying per-region eval success and return curves."""
-    
-    items = [(lab, p) for lab, p in sorted(region_csvs.items()) if os.path.exists(p)]
+    """One PNG overlaying per-region eval success and return curves."""
+    items = [(lab, p) for lab, p in sorted(paths.items()) if _load(p) is not None]
     if not items:
-        print("[diag] no region progress.csv found; skipping regions curve")
+        print("[plots] no region CSVs with rows yet; skipping")
         return None
 
     fig, (axS, axR) = plt.subplots(1, 2, figsize=(13, 5), constrained_layout=True)
     for lab, path in items:
+        df = _load(path)
         x, y = _series(df, "eval/success_rate")
         if x is None:
             x, y = _series(df, "rollout/success_rate")

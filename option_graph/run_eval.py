@@ -17,6 +17,25 @@ from collections import Counter
 
 ARMS = ("composition", "monolith")
 
+# One line each, next to the values they describe -- shipped to wandb as a
+# glossary table. {arm} is filled in per arm (composition/monolith) at log time.
+METRIC_DOCS = {
+    "{arm}/success_rate": "Fraction of eval pairs that reached the goal within "
+        "episode_budget. The observation metrics.py scores the four predictors against.",
+    "{arm}/n": "Number of eval pairs behind {arm}/success_rate.",
+    "{arm}/mean_geodesic_dist": "Mean start-to-goal geodesic distance over the "
+        "sampled pairs. The fairness anchor -- must match across arms/seeds or a "
+        "success-rate diff could be sampling, not policy.",
+    "{arm}/time_to_arrival": "Mean control steps to arrival among successes only "
+        "(nan if zero successes). Undefined, not zero, when nothing succeeded.",
+    "{arm}/mean_path_length": "Mean realized path length (physical units), successes only.",
+    "{arm}/mean_efficiency": "mean_path_length / geodesic distance. 1.0 is a straight line; "
+        "uses the geodesic, not the Euclidean chord (S7 9b).",
+    "{arm}/mean_control_cost": "Mean sum of squared control effort per episode.",
+    "{arm}/eval_env_steps_terminal": "Total physics steps this arm's eval consumed. "
+        "Provenance for N_total accounting (memo Eq 35), not a performance number.",
+}
+
 
 def _arm_dir(base: str, arm: str) -> str:
     """Per-arm subdir: both arms write records.jsonl, so they cannot share one."""
@@ -93,6 +112,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-stratify", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry-run", action="store_true", help="print design, exit")
+    ap.add_argument("--wandb", action="store_true",
+                    help="mirror the eval result to wandb (additive; off by default)")
+    ap.add_argument("--wandb-project", default="mcog")
+    ap.add_argument("--wandb-run-name", default=None)
     args = ap.parse_args(argv)
 
     from checkpoints import _pin_threads, load_models
@@ -101,6 +124,14 @@ def main(argv=None) -> int:
     from option_graph.calibrate import _load_run_cfg
     from option_graph.eval_harness import (evaluate_composition,
                                            evaluate_monolith)
+    from wandb_logging import finish, init_run, log_artifact, log_glossary, summary
+
+    run = init_run(enabled=bool(args.wandb), job_type="eval",
+                   name=args.wandb_run_name, project=args.wandb_project,
+                   group=os.path.basename(args.run_dir.rstrip("/")),
+                   config=vars(args))
+    log_glossary(run, {k.format(arm=a): v for k, v in METRIC_DOCS.items()
+                       for a in args.arms})
 
     _pin_threads()
     alpha = (HEADING_CONE_ALPHA_DEG if args.alpha_deg is None
@@ -124,6 +155,7 @@ def main(argv=None) -> int:
                                    min_hops=args.min_hops)
     print_design(hops, groups)
     if args.dry_run:
+        finish(run)
         return 0
 
     shared = dict(dt=float(cfg["dt"]), omega_max=float(cfg["omega_max"]),
@@ -171,6 +203,15 @@ def main(argv=None) -> int:
     for arm, m in out["arms"].items():
         print(f"[run_eval] {arm:>12}: success={m['success_rate']:.4f} "
               f"n={m['n']} eval_env_steps={m['eval_env_steps_terminal']:,}")
+        summary(run, {f"{arm}/success_rate": m["success_rate"], f"{arm}/n": m["n"],
+                      f"{arm}/mean_geodesic_dist": m["mean_geodesic_dist"],
+                      f"{arm}/time_to_arrival": m["time_to_arrival"],
+                      f"{arm}/mean_path_length": m["mean_path_length"],
+                      f"{arm}/mean_efficiency": m["mean_efficiency"],
+                      f"{arm}/mean_control_cost": m["mean_control_cost"],
+                      f"{arm}/eval_env_steps_terminal": m["eval_env_steps_terminal"]})
+    log_artifact(run, p, name="run_eval", type_="eval")
+    finish(run)
     return 0
 
 

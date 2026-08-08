@@ -81,6 +81,7 @@ traitlets==5.14.3
 treescope==0.1.10
 trimesh==4.10.0
 typing-extensions==4.15.0
+wandb==0.28.1
 warp-lang==1.10.1
 wcwidth==0.2.14
 werkzeug==3.1.4

@@ -6,7 +6,8 @@ PeriodicEvalCallback : deterministic eval every eval_freq env steps; logs overal
                        success/tta plus success binned by start->goal geodesic
                        distance (reuses the env's own geodesic field, zero extra
                        field builds).
-attach_csv_logger    : routes ALL of SB3's train/* + time/fps into train/progress.csv.
+attach_csv_logger    : routes ALL of SB3's train/* + time/fps into train/progress.csv,
+                       and -- if wandb_run is given -- mirrors the same keys to wandb.
 """
 from __future__ import annotations
 
@@ -15,15 +16,56 @@ from collections import deque
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
+# One line each, next to the values they describe -- shipped to wandb as a
+# glossary table once per run (see train.py). SB3's own train/*, time/* keys
+# are not re-documented here; these are the ones this repo's callbacks add.
+METRIC_DOCS = {
+    "rollout/success_rate": "Rolling mean (last 100 episodes) of per-episode "
+        "success. The training-time proxy for the eval success_rate.",
+    "rollout/tta": "Rolling mean time-to-arrival among successful episodes only.",
+    "rollout/collision_rate": "Rolling mean fraction of steps in collision per episode.",
+    "eval/success_rate": "Deterministic held-out eval success rate, run every "
+        "diag_eval_freq env steps. Independent of the training env's exploration noise.",
+    "eval/ep_rew_mean": "Mean episodic return on the same held-out eval.",
+    "eval/tta": "Mean time-to-arrival on the held-out eval, successes only.",
+    "eval/succ_dN": "Success rate binned by start->goal geodesic distance "
+        "(bin N of dist_edges). Separates 'fails because far' from 'fails regardless'.",
+    "eval/env_steps_consumed": "Cumulative env steps spent on periodic eval so far "
+        "-- provenance for the eval_env_steps_periodic accounting (handoff sec 8.3), not a training metric.",
+}
 
-def attach_csv_logger(model, train_dir: str, tensorboard: bool = False, stdout: bool = False):
-    from stable_baselines3.common.logger import configure
+
+class WandbOutputFormat:
+    """Mirrors every key SB3's Logger.record() collects (this file's rollout/*
+    and eval/* plus SB3's own train/*, time/*) into one wandb run. No-op by
+    construction when run is None, so attach_csv_logger can always pass one
+    through without an if/else at every call site."""
+
+    def __init__(self, run):
+        self.run = run
+
+    def write(self, key_values, key_excluded, step: int = 0) -> None:
+        if self.run is None:
+            return
+        self.run.log({k: v for k, v in key_values.items()
+                      if "wandb" not in (key_excluded.get(k) or ())}, step=step)
+
+    def close(self) -> None:
+        pass
+
+
+def attach_csv_logger(model, train_dir: str, tensorboard: bool = False,
+                      stdout: bool = False, wandb_run=None):
+    from stable_baselines3.common.logger import Logger, make_output_format
     fmts = ["csv"]
     if stdout:
         fmts.append("stdout")
     if tensorboard:
         fmts.append("tensorboard")
-    model.set_logger(configure(train_dir, fmts))  # -> train_dir/progress.csv
+    writers = [make_output_format(f, train_dir) for f in fmts]
+    if wandb_run is not None:
+        writers.append(WandbOutputFormat(wandb_run))
+    model.set_logger(Logger(train_dir, writers))  # -> train_dir/progress.csv [+ wandb]
 
 
 class TrainMetricsCallback(BaseCallback):
