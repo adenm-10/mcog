@@ -95,11 +95,12 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print design, exit")
     args = ap.parse_args(argv)
 
+    from checkpoints import _pin_threads, load_models
+    from config.loader import build_bundle
     from domains.contact_templates import HEADING_CONE_ALPHA_DEG
     from option_graph.calibrate import _load_run_cfg
     from option_graph.eval_harness import (evaluate_composition,
                                            evaluate_monolith)
-    from tests.fixture_eval import _pin_threads, build_bundle, load_models
 
     _pin_threads()
     alpha = (HEADING_CONE_ALPHA_DEG if args.alpha_deg is None

@@ -162,35 +162,13 @@ def load_frozen_cfg(fixture_dir: str, mode: str, config_dir: str = "config") -> 
     return cfg
 
 
-def build_bundle(cfg: dict):
-    from config.loader import build_maze_bundle
-    # validate=True on purpose: validate_interfaces is a free geometry check.
-    return build_maze_bundle(cfg, partition=cfg.get("partition") or "")
-
-
-def _pin_threads() -> None:
-    import torch
-    torch.set_num_threads(1)               # tol=0 requires a fixed reduction order
-
-
-def _load_one(algo: str, path: str):
-    from stable_baselines3 import PPO, SAC
-    _pin_threads()
-    cls = SAC if str(algo) == "sac" else PPO
-    return cls.load(path, device="cpu")    # device pin is load-bearing for tol=0
-
-
-def load_models(cfg: dict, bundle, run_dir: str):
-    """monolith -> one model. regions -> {int label: model}.
-
-    Paths mirror train.py: models/model.zip and models/region_<lab>/model.zip.
-    """
-    mdir = os.path.join(run_dir, "models")
-    if str(cfg["mode"]) == "monolith":
-        return _load_one(cfg["algo"], os.path.join(mdir, "model"))
-    return {int(l): _load_one(cfg["algo"],
-                              os.path.join(mdir, f"region_{l}", "model"))
-            for l in bundle.labels}
+# Re-exported, not defined here: build_bundle now lives in config/loader.py
+# (production geometry code), and _pin_threads/load_models in checkpoints.py
+# (production checkpoint loading, sibling of train.py). Both imports are safe at
+# module level -- neither config.loader nor checkpoints imports jax/torch at
+# THEIR module level, so the os.environ.setdefault block above still runs first.
+from config.loader import build_bundle
+from checkpoints import _pin_threads, load_models
 
 
 # --------------------------------------------------------------------------- #

@@ -124,9 +124,9 @@ def state_features(entry: Sequence[float], target: Sequence[float],
 
 
 def reachable_mask(rows: Sequence[Dict[str, Any]]) -> np.ndarray:
-    """True where this start group can occur in composition. calibrate starts each
-    edge from every inbound door including its own reverse; fixed_route uses simple
-    paths, so v->w then w->v cannot happen."""
+    """True where this entry condition can occur in composition. calibrate starts
+    each edge from every inbound door including its own reverse; fixed_route uses
+    simple paths, so v->w then w->v cannot happen."""
     out = np.ones(len(rows), bool)
     for i, r in enumerate(rows):
         prev = r.get("prev_edge_key")
@@ -507,8 +507,8 @@ def aliasing_table(rows, p, descriptors, *, sectors: int = 2,
                    reachable_only: bool = True, min_bin: int = 8
                    ) -> Dict[str, Dict[str, Any]]:
     """A(v,e): Var[p_hat] plus two 1-D W1 terms, reported separately, never summed.
-    Eq 10 needs K_hat conditioned on s, so I_e is binned by (start group x heading
-    sector); too many sectors starves every bin and the W1 terms go nan."""
+    Eq 10 needs K_hat conditioned on s, so I_e is binned by (entry condition x
+    heading sector); too many sectors starves every bin and the W1 terms go nan."""
     keep = reachable_mask(rows) if reachable_only else np.ones(len(rows), bool)
     p = np.asarray(p, float)
     bins: Dict[str, Dict[Tuple[str, int], Dict[str, List[float]]]] = {}
@@ -525,7 +525,7 @@ def aliasing_table(rows, p, descriptors, *, sectors: int = 2,
         ang = math.atan2(float(r["entry_3"]), float(r["entry_2"]))
         sec = int((ang + math.pi) / (2 * math.pi) * int(sectors)) % int(sectors)
         b = bins.setdefault(ek, {}).setdefault(
-            (str(r.get("stratum")), sec), {"tang": [], "head": []})
+            (str(r.get("entry_condition")), sec), {"tang": [], "head": []})
         t = d.get("tangent") or [0.0, 0.0]
         tgt = d.get("target") or [r["target_0"], r["target_1"]]
         # A terminal leg has no exit line, so tangential offset is undefined
@@ -567,7 +567,7 @@ def p_bar(rows, p, *, reachable_only: bool = True,
     p = np.asarray(p, float)
     g: Dict[str, List[float]] = {}
     for i, (r, ok) in enumerate(zip(rows, keep)):
-        if ok and (not uniform_only or str(r.get("stratum")) == "uniform"):
+        if ok and (not uniform_only or str(r.get("entry_condition")) == "uniform"):
             g.setdefault(r["edge_key"], []).append(float(p[i]))
     return {k: float(np.mean(v)) for k, v in g.items()}
 
@@ -582,10 +582,10 @@ def pair_index(descriptors: Dict[str, Dict[str, Any]]) -> Dict[Tuple[str, str], 
     return out
 
 
-def route_edge_keys(route: Sequence[Node], by_pair: Dict[Tuple[str, str], str]
+def route_edge_keys(plan: Sequence[Node], by_pair: Dict[Tuple[str, str], str]
                     ) -> Optional[List[str]]:
-    """Region route -> edge keys plus the terminal leg, or None if an edge is unknown."""
-    r = [str(x) for x in route]
+    """Region plan -> edge keys plus the terminal leg, or None if an edge is unknown."""
+    r = [str(x) for x in plan]
     keys = []
     for a, b in zip(r, r[1:]):
         k = by_pair.get((a, b))
@@ -596,16 +596,18 @@ def route_edge_keys(route: Sequence[Node], by_pair: Dict[Tuple[str, str], str]
     return keys
 
 
-def predict_naive(route, region_rates: Dict[str, float]) -> float:
-    """Rung 1: product of per-region local rates at the TRAINING distribution."""
+def predict_naive(plan, region_rates: Dict[str, float]) -> float:
+    """Predictor 1: product of per-region local rates at the TRAINING distribution."""
     out = 1.0
-    for v in route:
+    for v in plan:
         out *= float(region_rates.get(str(v), float("nan")))
     return out
 
 
 def predict_marginal(keys: Sequence[str], pbar: Dict[str, float]) -> float:
-    """Rung 2: product of p_bar_e under each edge's own design distribution."""
+    """Predictor 2: product of p_bar_e under each edge's own design distribution."""
+    if not keys:
+        return float("nan")
     out = 1.0
     for k in keys:
         out *= float(pbar.get(k, float("nan")))
@@ -614,7 +616,7 @@ def predict_marginal(keys: Sequence[str], pbar: Dict[str, float]) -> float:
 
 def predict_handoff(keys: Sequence[str], pbar_first: Dict[str, float],
                     H: Dict[str, float]) -> float:
-    """Rung 3: p_bar on the first leg, then H(e_prev, e). Plan-time computable."""
+    """Predictor 3: p_bar on the first leg, then H(e_prev, e). Plan-time computable."""
     if not keys:
         return float("nan")
     out = float(pbar_first.get(keys[0], float("nan")))
@@ -675,9 +677,9 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None, help="default: <records>_model.json")
     args = ap.parse_args(argv)
 
+    from config.loader import build_bundle
     from option_graph.calibrate import _load_run_cfg, flatten_calibration
     from option_graph.records import read_jsonl
-    from tests.fixture_eval import build_bundle
 
     cfg = _load_run_cfg(args.run_dir, args.config_dir)
     bundle = build_bundle(cfg)

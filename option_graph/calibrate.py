@@ -39,7 +39,7 @@ _REASON = {"reached": "success", "goal": "success", "timeout": "timeout",
 # --------------------------------------------------------------------------- #
 
 @dataclass(frozen=True)
-class Stratum:
+class EntryCondition:
     """One design cell of an edge's entry distribution. draw(rng) -> (state, leg).
 
     prev_edge_key is what makes H(e_prev, e) a lookup rather than a second sweep.
@@ -67,7 +67,7 @@ def _sampler(maze, cells: Sequence[Any], margin: float, leg_fn):
 
     pool = [tuple(int(v) for v in c) for c in cells]
     if not pool:
-        raise ValueError("empty stratum cell pool")
+        raise ValueError("empty entry-condition cell pool")
 
     def draw(rng: np.random.RandomState):
         cell = pool[rng.randint(len(pool))]
@@ -104,16 +104,16 @@ def _terminal_leg_fn(maze, cells: Sequence[Any], margin: float, src: Node):
     return leg_fn
 
 
-def nav_strata(bundle, *, entry_hops: int = 2, include_terminal: bool = True,
-               wall_margin: Optional[float] = None) -> List[Stratum]:
-    """Full design for one MazeBundle. entry_hops is how deep a doorway stratum
+def nav_entry_conditions(bundle, *, entry_hops: int = 2, include_terminal: bool = True,
+                         wall_margin: Optional[float] = None) -> List[EntryCondition]:
+    """Full design for one MazeBundle. entry_hops is how deep a doorway condition
     reaches, in within-region cell hops from the interface's overlap cells."""
     from domains.geometry import DEFAULT_WALL_MARGIN, bfs_hops, free_set
 
     margin = DEFAULT_WALL_MARGIN if wall_margin is None else float(wall_margin)
     maze = bundle.maze
     free = free_set(maze)
-    strata: List[Stratum] = []
+    conditions: List[EntryCondition] = []
 
     for lab in bundle.labels:
         v = int(lab)
@@ -151,33 +151,33 @@ def nav_strata(bundle, *, entry_hops: int = 2, include_terminal: bool = True,
 
         for ekey, dst, leg_fn in legs:
             for prev_key, cells in inbound:
-                strata.append(Stratum(
+                conditions.append(EntryCondition(
                     edge_key=ekey, source_region=v, target_region=dst,
                     name=f"from:{prev_key}", prev_edge_key=prev_key,
                     draw=_sampler(maze, cells, margin, leg_fn),
                     n_cells=len(cells)))
-            strata.append(Stratum(
+            conditions.append(EntryCondition(
                 edge_key=ekey, source_region=v, target_region=dst,
                 name=UNIFORM, prev_edge_key=None,
                 draw=_sampler(maze, sorted(train), margin, leg_fn),
                 n_cells=len(train)))
 
-    strata.sort(key=lambda s: (str(s.source_region), s.edge_key, s.name))
-    return strata
+    conditions.sort(key=lambda c: (str(c.source_region), c.edge_key, c.name))
+    return conditions
 
 
-def describe_design(strata: Sequence[Stratum], trials: int) -> Dict[str, Any]:
+def describe_design(conditions: Sequence[EntryCondition], trials: int) -> Dict[str, Any]:
     """Size the job before spending it."""
     per_edge: Dict[str, int] = {}
-    for s in strata:
-        per_edge[s.edge_key] = per_edge.get(s.edge_key, 0) + 1
-    return {"n_strata": len(strata), "n_edges": len(per_edge),
-            "n_terminal_legs": sum(1 for s in strata
-                                   if s.is_terminal and s.name == UNIFORM),
-            "trials_per_stratum": int(trials),
-            "n_rollouts": len(strata) * int(trials),
-            "strata_per_edge": dict(sorted(per_edge.items())),
-            "cells_per_stratum": {s.label(): s.n_cells for s in strata}}
+    for c in conditions:
+        per_edge[c.edge_key] = per_edge.get(c.edge_key, 0) + 1
+    return {"n_conditions": len(conditions), "n_edges": len(per_edge),
+            "n_terminal_legs": sum(1 for c in conditions
+                                   if c.is_terminal and c.name == UNIFORM),
+            "trials_per_condition": int(trials),
+            "n_rollouts": len(conditions) * int(trials),
+            "conditions_per_edge": dict(sorted(per_edge.items())),
+            "cells_per_condition": {c.label(): c.n_cells for c in conditions}}
 
 
 # --------------------------------------------------------------------------- #
@@ -224,10 +224,10 @@ class Tally:
                 "guard_violations": self.guard_violations}
 
 
-def by_edge(by_stratum: Dict[str, Tally]) -> Dict[str, Tally]:
-    """Aggregate strata up to their edge. Feeds the Beta counts of Eq 26."""
+def by_edge(by_condition: Dict[str, Tally]) -> Dict[str, Tally]:
+    """Aggregate entry conditions up to their edge. Feeds the Beta counts of Eq 26."""
     out: Dict[str, Tally] = {}
-    for label, t in by_stratum.items():
+    for label, t in by_condition.items():
         agg = out.setdefault(label.split("|", 1)[0], Tally())
         agg.n += t.n
         agg.reached += t.reached
@@ -237,11 +237,11 @@ def by_edge(by_stratum: Dict[str, Tally]) -> Dict[str, Tally]:
     return out
 
 
-def stratum_spread(by_stratum: Dict[str, Tally]) -> Dict[str, Dict[str, Any]]:
-    """Per-edge range of success across strata: a lower bound on how much
+def condition_spread(by_condition: Dict[str, Tally]) -> Dict[str, Dict[str, Any]]:
+    """Per-edge range of success across entry conditions: a lower bound on how much
     p_hat_e(s) can beat a constant. Near zero means H collapses onto marginal."""
     groups: Dict[str, List[Tuple[str, float]]] = {}
-    for label, t in by_stratum.items():
+    for label, t in by_condition.items():
         if t.n:
             ek, _, name = label.partition("|")
             groups.setdefault(ek, []).append((name, t.rate))
@@ -250,6 +250,8 @@ def stratum_spread(by_stratum: Dict[str, Tally]) -> Dict[str, Dict[str, Any]]:
         v = np.asarray([p for _n, p in pairs], float)
         lo = min(pairs, key=lambda kv: kv[1])
         hi = max(pairs, key=lambda kv: kv[1])
+        # "n_strata" is a frozen key inside calibration_summary.json's
+        # stratum_spread block -- do not rename it before F4's wire unification.
         out[ek] = {"n_strata": int(v.size), "min": float(v.min()),
                    "max": float(v.max()), "spread": float(v.max() - v.min()),
                    "sd": float(v.std(ddof=1)) if v.size > 1 else 0.0,
@@ -263,48 +265,48 @@ def stratum_spread(by_stratum: Dict[str, Tally]) -> Dict[str, Dict[str, Any]]:
 
 def run_calibration(*, physics, policy_for: Callable[[Node], Any],
                     hooks: DomainHooks, cfg: ExecConfig,
-                    strata: Sequence[Stratum], trials: int, seed: int = 0,
+                    conditions: Sequence[EntryCondition], trials: int, seed: int = 0,
                     maze: str = "", partition: str = "", algo: str = "",
                     budget_steps: int = -1,
-                    by_stratum: Optional[Dict[str, Tally]] = None,
+                    by_condition: Optional[Dict[str, Tally]] = None,
                     progress_every: int = 0) -> Iterator[EpisodeRecord]:
-    """Yield one single-option EpisodeRecord per trial per stratum. A generator,
-    so write_jsonl streams it; stratum i draws from RandomState(seed*stride + i),
-    so a rerun reproduces every entry state."""
+    """Yield one single-option EpisodeRecord per trial per entry condition. A
+    generator, so write_jsonl streams it; condition i draws from
+    RandomState(seed*stride + i), so a rerun reproduces every entry state."""
     trials = int(trials)
     if trials <= 0:
         raise ValueError(f"trials must be positive, got {trials}")
 
     episode = 0
-    for i, st in enumerate(strata):
+    for i, cond in enumerate(conditions):
         rng = np.random.RandomState((int(seed) * _SEED_STRIDE + i) % (2 ** 32 - 1))
-        tally = None if by_stratum is None else by_stratum.setdefault(st.label(),
-                                                                     Tally())
+        tally = None if by_condition is None else by_condition.setdefault(
+            cond.label(), Tally())
         for trial in range(trials):
-            x0, leg = st.draw(rng)
+            x0, leg = cond.draw(rng)
             rec, _x, _hit = run_option(
-                physics=physics, policy=policy_for(st.source_region),
+                physics=physics, policy=policy_for(cond.source_region),
                 hooks=hooks, cfg=cfg, leg=leg, x0=x0, goal=None,
                 budget=int(cfg.option_budget))
             rec.extras.update(
-                calib_stratum=st.name, calib_prev_edge_key=st.prev_edge_key,
-                calib_trial=int(trial), calib_stratum_cells=int(st.n_cells),
+                calib_stratum=cond.name, calib_prev_edge_key=cond.prev_edge_key,
+                calib_trial=int(trial), calib_stratum_cells=int(cond.n_cells),
                 dist_at_start=float(np.hypot(float(x0[0]) - leg.target[0],
                                              float(x0[1]) - leg.target[1])))
             if tally is not None:
                 tally.add(rec)
-            yield _wrap(rec, episode=episode, stratum=st, cfg=cfg, x0=x0, leg=leg,
-                        seed=seed, maze=maze, partition=partition, algo=algo,
-                        budget_steps=budget_steps)
+            yield _wrap(rec, episode=episode, condition=cond, cfg=cfg, x0=x0,
+                        leg=leg, seed=seed, maze=maze, partition=partition,
+                        algo=algo, budget_steps=budget_steps)
             episode += 1
             if progress_every and episode % int(progress_every) == 0:
                 print(f"[calibrate] {episode} rollouts "
-                      f"({i + 1}/{len(strata)} strata)", flush=True)
+                      f"({i + 1}/{len(conditions)} entry conditions)", flush=True)
 
 
-def _wrap(rec: OptionRecord, *, episode: int, stratum: Stratum, cfg: ExecConfig,
-          x0, leg: LegSpec, seed: int, maze: str, partition: str, algo: str,
-          budget_steps: int) -> EpisodeRecord:
+def _wrap(rec: OptionRecord, *, episode: int, condition: EntryCondition,
+          cfg: ExecConfig, x0, leg: LegSpec, seed: int, maze: str, partition: str,
+          algo: str, budget_steps: int) -> EpisodeRecord:
     """One option becomes a one-option episode, so existing readers work."""
     return EpisodeRecord(
         episode=int(episode), arm=CALIB_ARM, seed=int(seed), maze=str(maze),
@@ -313,27 +315,27 @@ def _wrap(rec: OptionRecord, *, episode: int, stratum: Stratum, cfg: ExecConfig,
         goal=[float(leg.target[0]), float(leg.target[1])],
         success=bool(rec.succeeded), total_steps=int(rec.steps),
         reason=_REASON.get(rec.outcome, "timeout"), options=[rec],
-        plan=([stratum.source_region] if stratum.is_terminal
-              else [stratum.source_region, stratum.target_region]),
-        hops=0 if stratum.is_terminal else 1, budget_steps=int(budget_steps),
-        extras={"stratum": stratum.name, "prev_edge_key": stratum.prev_edge_key,
-                "edge_key": stratum.edge_key, "gate": cfg.gate,
+        plan=([condition.source_region] if condition.is_terminal
+              else [condition.source_region, condition.target_region]),
+        hops=0 if condition.is_terminal else 1, budget_steps=int(budget_steps),
+        extras={"stratum": condition.name, "prev_edge_key": condition.prev_edge_key,
+                "edge_key": condition.edge_key, "gate": cfg.gate,
                 "option_budget": int(cfg.option_budget),
                 "alpha_deg": float(cfg.alpha_deg),
-                "stratum_cells": int(stratum.n_cells)})
+                "stratum_cells": int(condition.n_cells)})
 
 
 def flatten_calibration(episodes) -> List[Dict[str, Any]]:
-    """One row per rollout, with stratum metadata merged in. flatten_options
+    """One row per rollout, with entry-condition metadata merged in. flatten_options
     cannot supply prev_edge_key here: a calibration episode has no predecessor
-    OPTION, only a predecessor EDGE, which the stratum carries."""
+    OPTION, only a predecessor EDGE, which the entry condition carries."""
     rows: List[Dict[str, Any]] = []
     for ep in episodes:
         for o in ep.options:
             row = {"edge_key": o.edge_key, "source_region": o.source_region,
                    "target_region": o.target_region,
                    "is_terminal_leg": o.target_region is None,
-                   "stratum": o.extras.get("calib_stratum"),
+                   "entry_condition": o.extras.get("calib_stratum"),
                    "prev_edge_key": o.extras.get("calib_prev_edge_key"),
                    "trial": o.extras.get("calib_trial"),
                    "dist_at_start": o.extras.get("dist_at_start"),
@@ -354,9 +356,9 @@ def flatten_calibration(episodes) -> List[Dict[str, Any]]:
     return rows
 
 
-def print_report(by_stratum: Dict[str, Tally], *, top: int = 0) -> None:
-    """Per-edge rate, strict rate, and across-strata spread."""
-    edges, spread = by_edge(by_stratum), stratum_spread(by_stratum)
+def print_report(by_condition: Dict[str, Tally], *, top: int = 0) -> None:
+    """Per-edge rate, strict rate, and across-entry-condition spread."""
+    edges, spread = by_edge(by_condition), condition_spread(by_condition)
     order = sorted(edges)
 
     print(f"\n{'edge':>16} {'n':>5} {'rate':>13} {'strict':>7} {'strata':>7} "
@@ -466,11 +468,12 @@ def main(argv=None) -> int:
     ap.add_argument("--progress-every", type=int, default=500)
     args = ap.parse_args(argv)
 
+    from checkpoints import _pin_threads, load_models
+    from config.loader import build_bundle
     from domains.contact_templates import HEADING_CONE_ALPHA_DEG
     from domains.env.physics import Physics, build_physics_env
     from option_graph.executor import by_region, nav_hooks
     from option_graph.records import write_jsonl
-    from tests.fixture_eval import _pin_threads, build_bundle, load_models
 
     cfg = _load_run_cfg(args.run_dir, args.config_dir)
     _pin_threads()
@@ -482,20 +485,20 @@ def main(argv=None) -> int:
              else float(args.alpha_deg))
     seed = int(cfg["eval_seed"] if args.seed is None else args.seed)
 
-    strata = nav_strata(bundle, entry_hops=int(args.entry_hops),
-                        include_terminal=not args.no_terminal,
-                        wall_margin=float(cfg["wall_margin"]))
-    design = describe_design(strata, args.trials)
-    door = [s.n_cells for s in strata if s.name != UNIFORM]
-    uni = [s.n_cells for s in strata if s.name == UNIFORM]
+    conditions = nav_entry_conditions(bundle, entry_hops=int(args.entry_hops),
+                                      include_terminal=not args.no_terminal,
+                                      wall_margin=float(cfg["wall_margin"]))
+    design = describe_design(conditions, args.trials)
+    door = [c.n_cells for c in conditions if c.name != UNIFORM]
+    uni = [c.n_cells for c in conditions if c.name == UNIFORM]
 
     print(f"[calibrate] {args.run_dir}  budget={budget} entry_hops="
           f"{args.entry_hops} gate={args.gate} alpha={alpha} seed={seed}")
-    print(f"[calibrate] {design['n_strata']} strata / {design['n_edges']} legs "
-          f"x {args.trials} trials = {design['n_rollouts']:,} rollouts, "
+    print(f"[calibrate] {design['n_conditions']} conditions / {design['n_edges']} "
+          f"legs x {args.trials} trials = {design['n_rollouts']:,} rollouts, "
           f"<= {design['n_rollouts'] * budget:,} transitions, 0 gradient steps")
     if door:
-        print(f"[calibrate] doorway strata {min(door)}-{max(door)} cells vs "
+        print(f"[calibrate] doorway conditions {min(door)}-{max(door)} cells vs "
               f"uniform {min(uni)}-{max(uni)} "
               f"(~{np.mean(uni) / max(np.mean(door), 1e-9):.1f}x concentration)")
     if args.dry_run:
@@ -512,11 +515,12 @@ def main(argv=None) -> int:
 
     tally: Dict[str, Tally] = {}
     write_jsonl(args.out, run_calibration(
-        physics=Physics(env), hooks=nav_hooks(bundle), cfg=ecfg, strata=strata,
+        physics=Physics(env), hooks=nav_hooks(bundle), cfg=ecfg,
+        conditions=conditions,
         policy_for=by_region(load_models(cfg, bundle, args.run_dir)),
         trials=int(args.trials), seed=seed, maze=str(bundle.maze.name),
         partition=str(bundle.partition_name), algo=str(cfg["algo"]),
-        budget_steps=int(cfg["total_steps"]), by_stratum=tally,
+        budget_steps=int(cfg["total_steps"]), by_condition=tally,
         progress_every=int(args.progress_every)))
 
     print_report(tally, top=5)
@@ -532,10 +536,12 @@ def main(argv=None) -> int:
                "n_envs": cfg.get("n_envs"),
                "gradient_steps": cfg.get("gradient_steps"),
                "learning_starts": cfg.get("learning_starts"), "design": design,
+               # "by_stratum"/"stratum_spread" are frozen top-level keys in
+               # calibration_summary.json -- only the function names change.
                "by_stratum": {k: t.to_dict() for k, t in sorted(tally.items())},
                "by_edge": {k: t.to_dict()
                            for k, t in sorted(by_edge(tally).items())},
-               "stratum_spread": stratum_spread(tally)}
+               "stratum_spread": condition_spread(tally)}
     os.makedirs(os.path.dirname(side) or ".", exist_ok=True)
     with open(side, "w") as f:
         json.dump(_json_safe(payload), f, indent=2, sort_keys=True,

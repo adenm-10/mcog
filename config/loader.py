@@ -129,6 +129,11 @@ def build_maze_bundle(mcfg: dict, *, partition: str = "",
         interfaces=ifaces, by_pair=by_pair, region_of=make_region_of(maze, table))
 
 
+def build_bundle(cfg: dict) -> MazeBundle:
+    # validate=True on purpose: validate_interfaces is a free geometry check.
+    return build_maze_bundle(cfg, partition=cfg.get("partition") or "")
+
+
 # ------------------------------------------------------------------ r_min gate
 def _probe_v0(bundle, cfg) -> float:
     from domains.systems.car import create_dubins_car
