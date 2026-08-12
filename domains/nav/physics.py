@@ -1,4 +1,4 @@
-# domains/env/physics.py
+# domains/nav/physics.py
 """Shared dynamics server.
 
 Both arms — one policy for the whole maze, and chained room policies — step
@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import jax.numpy as jnp
 
-from domains.env.gym_env import DubinsMazeEnv
+from domains.nav.gym_env import DubinsMazeEnv
 
 
 def build_physics_env(*, maze, dt=0.1, omega_max=8.0, gamma=0.99, horizon=150,

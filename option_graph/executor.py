@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import (Any, Callable, FrozenSet, Hashable, List, Optional, Sequence,
-                    Tuple)
+                    Tuple, Union)
 
 import numpy as np
 
@@ -30,9 +30,18 @@ Point = Tuple[float, float]
 MODES = ("fixed_route", "replan")
 GATES = ("rect", "halfplane")
 
+# left_region/stuck were reserved here before any guard used them (see
+# run_option's guard_ok handling below); contact_lost/forbidden_contact/
+# off_board/force_limit are Stage 1's actual instances of that reservation.
+# All four are guard-fired outcomes, so all four fold into the same episode
+# reason as left_region.
 _REASON_FOR_OUTCOME = {"timeout": "timeout", "left_region": "guard_abort",
                        "premature": "off_plan", "stuck": "stuck",
-                       "aborted": "option_budget"}
+                       "aborted": "option_budget",
+                       "contact_lost": "guard_abort",
+                       "forbidden_contact": "guard_abort",
+                       "off_board": "guard_abort",
+                       "force_limit": "guard_abort"}
 
 
 # --------------------------------------------------------------------------- #
@@ -58,8 +67,13 @@ class DomainHooks:
     # doorway cells, or every handoff reports a violation.
     guard_cells: Callable[[Node], FrozenSet[Any]]
 
-    # (state, allowed, cell_size) -> True while inside. Counted, never aborted.
-    guard_ok: Callable[..., bool]
+    # (state, allowed, cell_size, leg) -> True (fine), False (violation,
+    # counted only -- nav's original contract, e.g. guard_region), or a str
+    # naming a records.OPTION_OUTCOMES entry (violation that must terminate
+    # the option -- Stage 1's contact guards, memo Eq 40). `leg` carries
+    # per-edge context a guard may need (e.g. which template parameter is
+    # active); nav's guard_region ignores it.
+    guard_ok: Callable[..., Union[bool, str]]
 
     # The one arrival test, shared with calibrate.py.
     score_arrival: Callable[..., Any]
@@ -149,8 +163,15 @@ def run_option(*, physics, policy, hooks: DomainHooks, cfg: ExecConfig,
         if trace is not None:
             trace.append((x.copy(), np.asarray(_u, np.float32).copy()))
 
-        if not hooks.guard_ok(x, allowed, hooks.cell_size):
+        violation = hooks.guard_ok(x, allowed, hooks.cell_size, leg)
+        if violation is not True:
             guard_hits += 1
+            if isinstance(violation, str):
+                # Terminating guard (Stage 1, memo Eq 40): stop now, labelled
+                # by the outcome the guard named, before score_arrival gets a
+                # chance to overwrite it with "reached" on the same step.
+                outcome = violation
+                break
 
         arr = hooks.score_arrival(
             x, target=leg.target, arrival_eps=cfg.arrival_eps, iface=leg.portal,

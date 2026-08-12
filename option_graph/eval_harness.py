@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from domains.env.physics import Physics, build_physics_env
-from domains.geodesic import build_geodesic_field
+from domains.nav.physics import Physics, build_physics_env
+from domains.nav.geodesic import build_geodesic_field
 from domains.geometry import nearest_free_cell, pair_hops, sample_eval_pairs
 from option_graph.analysis.plots import _region_layer, plot_rollout_grid
 from option_graph.executor import (ExecConfig, by_region, monolith_route,

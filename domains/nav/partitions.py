@@ -1,4 +1,4 @@
-# domains/partitions.py
+# domains/nav/partitions.py
 """Partition CHOICE: which cells belong to which abstract node.
 
 geometry.py answers questions with one right answer given a partition; this
@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Sequence
 from domains.geometry import (Cell, bfs_hops, cells_for_label,
                               connected_components, free_set, infer_adjacency,
                               labels_of)
-from domains.systems.maze import Maze
+from domains.nav.maze import Maze
 
 _LABEL_CHARS = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MAX_LABELS = len(_LABEL_CHARS)

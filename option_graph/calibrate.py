@@ -29,9 +29,15 @@ CALIB_ARM = "calibration"       # never pool with composition eval in one file
 _SEED_STRIDE = 100_003          # prime, so stratum streams do not alias
 
 # executor's private table omits "reached" because there a reach continues.
+# contact_lost/forbidden_contact/off_board/force_limit are Stage 1's guard
+# outcomes (executor.py's run_option, memo Eq 40) -- same "guard fired"
+# episode reason as left_region, or calibrate rows for a guard-aborted option
+# would silently fall through .get()'s "timeout" default and mislabel it.
 _REASON = {"reached": "success", "goal": "success", "timeout": "timeout",
            "left_region": "guard_abort", "premature": "off_plan",
-           "stuck": "stuck", "aborted": "option_budget"}
+           "stuck": "stuck", "aborted": "option_budget",
+           "contact_lost": "guard_abort", "forbidden_contact": "guard_abort",
+           "off_board": "guard_abort", "force_limit": "guard_abort"}
 
 
 # --------------------------------------------------------------------------- #
@@ -463,7 +469,7 @@ METRIC_DOCS = {
 
 
 def main(argv=None) -> int:
-    # Before the lazy imports: domains.env.physics pulls jax, and nothing at this
+    # Before the lazy imports: domains.nav.physics pulls jax, and nothing at this
     # module's top level has imported it yet.
     for k, v in (("JAX_PLATFORM_NAME", "cpu"), ("JAX_PLATFORMS", "cpu"),
                  ("XLA_PYTHON_CLIENT_PREALLOCATE", "false"),
@@ -498,7 +504,7 @@ def main(argv=None) -> int:
     from checkpoints import _pin_threads, load_models
     from config.loader import build_bundle
     from domains.contact_templates import HEADING_CONE_ALPHA_DEG
-    from domains.env.physics import Physics, build_physics_env
+    from domains.nav.physics import Physics, build_physics_env
     from option_graph.executor import by_region, nav_hooks
     from option_graph.records import write_jsonl
     from wandb_logging import (finish, init_run, log_artifact, log_glossary,

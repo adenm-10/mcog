@@ -1,8 +1,8 @@
-# domains/systems/maze.py
+# domains/nav/maze.py
 """Maze layouts for the Dubins-car navigation experiments.
 
 A `Maze` bundles a boolean wall grid with its precomputed differentiable SDF
-(domains.systems.sdf), the free-cell list, and optional start/goal cells.
+(domains.nav.sdf), the free-cell list, and optional start/goal cells.
 
 ASCII convention: '#' wall, '.' free, 'S' start, 'G' goal. Rows are listed
 top-to-bottom and flipped so world y increases upward, which is the convention
@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from domains.systems.sdf import (  # noqa: F401
+from domains.nav.sdf import (  # noqa: F401
     SignedDistanceField, bilinear_sample, build_sdf,
 )
 

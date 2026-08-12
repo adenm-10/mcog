@@ -111,10 +111,10 @@ def cmd_static() -> None:
         print(f"        {h}")
 
     section("import graph")
-    for mod in ["config.loader", "domains.geometry", "domains.partitions",
-                "domains.systems.sdf", "domains.systems.maze",
-                "domains.env.gym_env", "domains.env.physics",
-                "domains.env.gym_env", "option_graph.records",
+    for mod in ["config.loader", "domains.geometry", "domains.nav.partitions",
+                "domains.nav.sdf", "domains.nav.maze",
+                "domains.nav.gym_env", "domains.nav.physics",
+                "domains.nav.gym_env", "option_graph.records",
                 "option_graph.callbacks", "option_graph.analysis.plots",
                 "option_graph._port_eval",
                 "option_graph.planner", "option_graph.executor",
@@ -134,11 +134,12 @@ def cmd_static() -> None:
     check(m is not None and {"walls", "regions", "partitions", "interfaces"} <= names,
           "_NON_SCALAR holds all four structured keys", f"got {sorted(names)}")
 
-    section("callbacks.py double-count")
-    src = open("option_graph/callbacks.py").read()
-    check(src.count("self.env_steps_consumed += 1") == 1,
-          "env_steps_consumed incremented exactly once",
-          f"count={src.count('self.env_steps_consumed += 1')}")
+    section("nav/contact eval callbacks: double-count")
+    for path in ("domains/nav/callbacks.py", "domains/contact/callbacks.py"):
+        src = open(path).read()
+        check(src.count("self.env_steps_consumed += 1") == 1,
+              f"{path}: env_steps_consumed incremented exactly once",
+              f"count={src.count('self.env_steps_consumed += 1')}")
 
     section("loader --partition")
     src = open("config/loader.py").read()
@@ -153,8 +154,8 @@ def cmd_static() -> None:
 
 def cmd_geometry() -> None:
     from config.loader import _read_yaml, build_maze_bundle, _rmin_gate
-    from domains.partitions import (describe_partition, parse_ascii,
-                                    table_to_ascii)
+    from domains.nav.partitions import (describe_partition, parse_ascii,
+                                        table_to_ascii)
     from domains.geometry import cell_center, synthesize_interfaces
 
     mcfg = _read_yaml(MAZE_YAML)
@@ -294,7 +295,7 @@ def cmd_geometry() -> None:
     check(not bad, "all 24 targets register as arrivals", f"bad: {bad[:6]}")
 
     section("wall_margin is read (D16/D17)")
-    from domains.env.gym_env import DubinsMazeEnv
+    from domains.nav.gym_env import DubinsMazeEnv
     cs = float(bundle.maze.cell_size)
     for wm in (0.0, 0.25):
         env = DubinsMazeEnv(maze=bundle.maze, horizon=10, wall_margin=wm,
@@ -310,7 +311,7 @@ def cmd_geometry() -> None:
     
     section("fairness anchor, decoupled from eval config")
     import numpy as np
-    from domains.geodesic import build_geodesic_field
+    from domains.nav.geodesic import build_geodesic_field
     from domains.geometry import nearest_free_cell, pair_hops, sample_eval_pairs
     pairs = sample_eval_pairs(bundle.maze, 32, 123)
     cache, dists = {}, []

@@ -20,18 +20,24 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 SCHEMA_VERSION = 1
 
-#: reached      terminated in its target set (see reached_* for which predicate)
-#: timeout      hit the per-option step budget
-#: left_region  guard fired, state left the source region
-#: premature    crossed a switch surface that was not this option's target
-#: stuck        guard fired, no positional progress over the guard window
-#: aborted      executor stopped it (episode budget exhausted)
-#: goal         the EPISODE goal was reached while this option was running, so the
-#:              option was cut short without reaching its own target. Distinct
-#:              from "reached" on purpose: counting a truncated leg as an edge
-#:              failure would bias p_hat down, and these rows are droppable.
+#: reached           terminated in its target set (see reached_* for which predicate)
+#: timeout           hit the per-option step budget
+#: left_region       guard fired, state left the source region
+#: premature         crossed a switch surface that was not this option's target
+#: stuck             guard fired, no positional progress over the guard window
+#: aborted           executor stopped it (episode budget exhausted)
+#: goal              the EPISODE goal was reached while this option was running, so the
+#:                   option was cut short without reaching its own target. Distinct
+#:                   from "reached" on purpose: counting a truncated leg as an edge
+#:                   failure would bias p_hat down, and these rows are droppable.
+#: contact_lost      guard fired (Stage 1, memo Eq 40): a required contact was
+#:                   absent for more than the guard's grace period
+#: forbidden_contact guard fired: a contact the template excludes occurred
+#: off_board         guard fired: the object left the board
+#: force_limit       guard fired: contact force exceeded the safety threshold
 OPTION_OUTCOMES = ("reached", "timeout", "left_region", "premature", "stuck",
-                   "aborted", "goal")
+                   "aborted", "goal", "contact_lost", "forbidden_contact",
+                   "off_board", "force_limit")
 
 EPISODE_REASONS = ("success", "timeout", "no_path", "option_budget", "stuck",
                    "guard_abort", "off_plan")

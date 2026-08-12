@@ -217,7 +217,7 @@ def _eval_per_region(cfg: dict, bundle, models) -> dict:
 def _fingerprint(cfg: dict, bundle) -> dict:
     """Geometry, separated from metrics. A fingerprint diff EXPLAINS every metric
     diff below it, so it is reported first."""
-    from domains.partitions import table_to_ascii
+    from domains.nav.partitions import table_to_ascii
     return {
         "maze_name": str(cfg["maze_name"]),
         "partition": str(bundle.partition_name),

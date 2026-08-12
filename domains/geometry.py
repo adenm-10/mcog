@@ -2,10 +2,10 @@
 """Maze geometry: cells, regions, interfaces, the region graph, samplers.
 
 Geometric FACTS about a maze and a given partition table. Partition CHOICE lives
-in domains/partitions.py, so the aligned and misaligned H4 arms differ by one
+in domains/nav/partitions.py, so the aligned and misaligned H4 arms differ by one
 config key rather than a code path.
 
-Layering: systems -> geometry -> partitions -> config; option_graph imports
+Layering: nav -> geometry -> partitions -> config; option_graph imports
 domains but never gymnasium or stable_baselines3. Interface lives here, not in
 config/loader.py, because config depends on geometry and not the reverse.
 
@@ -24,7 +24,7 @@ from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Optional,
 
 import numpy as np
 
-from domains.systems.maze import Maze
+from domains.nav.maze import Maze
 
 Cell = Tuple[int, int]
 Rect = Tuple[float, float, float, float]

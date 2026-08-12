@@ -1,4 +1,4 @@
-# systems/geodesic.py
+# domains/nav/geodesic.py
 """Geodesic (in-maze shortest-path) distance field for potential-based shaping.
 
 A geodesic distance is the shortest path between two points that stays in free
@@ -33,7 +33,7 @@ _NEIGHBORS = [
 def build_geodesic_cells(wall: np.ndarray, goal_cell: Tuple[int, int]) -> np.ndarray:
     """Dijkstra geodesic distance (CELL units) from goal over free cells.
 
-    wall: (H,W) bool, True=wall, row=iy, col=ix (matches domains.systems.maze flip).
+    wall: (H,W) bool, True=wall, row=iy, col=ix (matches domains.nav.maze flip).
     Returns (H,W) float32; wall/unreachable cells left as +inf.
     """
     H, W = wall.shape

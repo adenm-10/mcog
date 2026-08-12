@@ -1,7 +1,7 @@
 # config/loader.py
 """Load+merge YAML (base <- algo <- maze), auto-expose scalars as CLI flags,
 and build the maze bundle (Maze + disjoint region grid + transition interfaces).
-Replaces domains.systems.maze.LADDER selection and skills.dubins._LABELS_BY_MAZE as the  [legacy-ref]
+Replaces domains.nav.maze.LADDER selection and skills.dubins._LABELS_BY_MAZE as the  [legacy-ref]
 geometry source. All geometry now lives in config/maze/<name>.yaml.
 """
 from __future__ import annotations
@@ -12,17 +12,17 @@ from typing import Any, Callable, Dict, List, Tuple
 import numpy as np
 import yaml
 
-from domains.systems.maze import make_maze, Maze
+from domains.nav.maze import make_maze, Maze
 from domains.geometry import (
     Interface, cells_for_label, group_by_pair, infer_adjacency, labels_of,
     make_region_of, synthesize_interfaces, validate_interfaces,
 )
-from domains.partitions import resolve_partition, table_to_ascii
+from domains.nav.partitions import resolve_partition, table_to_ascii
 from domains.geometry import (
     Interface, cells_for_label, group_by_pair, infer_adjacency, labels_of,
     make_region_of, synthesize_interfaces, validate_interfaces,
 )
-from domains.partitions import resolve_partition, table_to_ascii
+from domains.nav.partitions import resolve_partition, table_to_ascii
 
 _STRUCTURED = {"walls", "regions", "partitions", "interfaces"}
 
@@ -136,7 +136,7 @@ def build_bundle(cfg: dict) -> MazeBundle:
 
 # ------------------------------------------------------------------ r_min gate
 def _probe_v0(bundle, cfg) -> float:
-    from domains.systems.car import create_dubins_car
+    from domains.nav.car import create_dubins_car
     import jax, jax.numpy as jnp
     sys = create_dubins_car(maze=bundle.maze, dt=float(cfg["dt"]),
                             omega_max=float(cfg["omega_max"]))
@@ -165,7 +165,7 @@ def _rmin_gate(cfg, bundle):
 def _derive_clocks(cfg, bundle):
     """Compute h_region / flat_horizon / both gammas from geometry."""
     from domains.geometry import region_hop_table
-    from domains.partitions import region_diameter
+    from domains.nav.partitions import region_diameter
 
     spc = float(cfg["cell_size"]) / (float(cfg["_v0"]) * float(cfg["dt"]))
     diam = max(region_diameter(bundle.maze, bundle.table, l) for l in bundle.labels)

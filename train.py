@@ -75,7 +75,7 @@ def _env_fn(cfg, bundle, *, rank, goal_mode, randomize_start,
             region_cells=None, region_goals=None, monitor_path=None,
             terminate_on_arrival=True):
     from stable_baselines3.common.monitor import Monitor
-    from domains.env.gym_env import DubinsMazeEnv
+    from domains.nav.gym_env import DubinsMazeEnv
     def _init():
         env = DubinsMazeEnv(
             maze=bundle.maze, cell_size=float(cfg["cell_size"]),
@@ -99,7 +99,8 @@ def _make_vec(cfg, fns):
 
 def _callbacks(cfg, eval_env, seed):
     from stable_baselines3.common.callbacks import CallbackList
-    from option_graph.callbacks import TrainMetricsCallback, PeriodicEvalCallback
+    from option_graph.callbacks import TrainMetricsCallback
+    from domains.nav.callbacks import PeriodicEvalCallback
     eval_cb = PeriodicEvalCallback(eval_env, eval_freq=int(cfg["diag_eval_freq"]),
                                   n_eval_episodes=int(cfg["diag_eval_episodes"]),
                                   seed=int(seed))
@@ -184,7 +185,7 @@ def _region_success(env, model, episodes, seed):
         while not done:
             a, _ = model.predict(obs, deterministic=True)
             obs, _r, term, trunc, info = env.step(a)
-            ok = float(info.get("success", 0.0)); done = bool(term) or bool(trunc)
+            ok = max(ok, float(info.get("success", 0.0))); done = bool(term) or bool(trunc)
         s.append(ok)
     return float(np.mean(s))
 
@@ -291,7 +292,7 @@ def main():
                         level=logging.INFO, format="%(asctime)s | %(message)s")
     dump_resolved(cfg, os.path.join(base_dir, "resolved_config.yaml"))
 
-    from domains.partitions import print_partition, table_to_ascii, describe_partition
+    from domains.nav.partitions import print_partition, table_to_ascii, describe_partition
 
     print_partition(bundle.maze, bundle.table, name=cfg["partition"])
     with open(os.path.join(base_dir, "partition.txt"), "w") as f:

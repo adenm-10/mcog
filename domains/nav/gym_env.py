@@ -1,4 +1,4 @@
-"""Gymnasium env for domains.systems.car.DubinsCarSystem on a maze (SAC/PPO/TD3).
+"""Gymnasium env for domains.nav.car.DubinsCarSystem on a maze (SAC/PPO/TD3).
 
 Goal-conditioned: each episode samples a start and a goal; obs carries the
 goal-relative vector, reward is sparse: +goal_reward on arrival, -step_pen otherwise, terminate on reach.
@@ -26,9 +26,9 @@ except ModuleNotFoundError as e:  # pragma: no cover
 import jax
 import jax.numpy as jnp
 
-from domains.systems import maze as maze_mod
-from domains.systems.car import create_dubins_car
-from domains.env.reward import sparse_reward, arrived
+from domains.nav import maze as maze_mod
+from domains.nav.car import create_dubins_car
+from domains.nav.reward import sparse_reward, arrived
 from domains.geometry import sample_state_in_cells, sample_xy_in_cell
 
 import logging
