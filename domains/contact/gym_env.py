@@ -76,7 +76,8 @@ class ContactEnv(gym.Env):
                 eps_omega_deg_s: Optional[float] = None,
                 speed_aware_goal: bool = False,
                 guard_terminates: bool = True,
-                min_progress_cm: Optional[float] = None):
+                min_progress_cm: Optional[float] = None,
+                same_room_goal_prob: float = 0.0):
         super().__init__()
         if template not in TEMPLATES:
             raise ValueError(f"template must be one of {sorted(TEMPLATES)}, got {template!r}")
@@ -108,6 +109,19 @@ class ContactEnv(gym.Env):
         # OWN start before granting credit -- kills free wins for episodes
         # that never actually moved (sec 7.9). None disables the check.
         self.min_progress_cm = min_progress_cm
+        # Push only: probability the goal room equals the source room
+        # instead of an adjacent one (memo Eq 6's node is finer-grained than
+        # "room," so a same-room push is a legitimate edge, not a
+        # relaxation). 0.0 keeps every existing caller's behavior
+        # unchanged. Motivation: HER can only ever relabel goals from
+        # positions the object actually reached, which for a cross-room-only
+        # curriculum stays almost entirely inside the source room (measured:
+        # 94/100 episodes never leave it) -- this brings the real,
+        # environment-sampled goal distribution into line with what HER
+        # already teaches implicitly, instead of asking the network to
+        # generalize almost entirely out-of-distribution to the cross-room
+        # case it rarely gets real signal for.
+        self.same_room_goal_prob = float(same_room_goal_prob)
         self._episode_start_goal = np.zeros(2, dtype=np.float32)
         self._rng = np.random.RandomState(seed)
         self._t = 0
@@ -201,43 +215,88 @@ class ContactEnv(gym.Env):
         return x, y
 
     # --- curriculum, per-template, private ------------------------------------
-    def _sample_push_edge(self):
-        """A push edge: random source room, destination any bordering room
-        (`Board.adjacency()`); goal sampled from the whole destination room
-        (memo Algorithm 1 line 4), not only the portal. Active finger and
-        contacted face are randomized subject to one constraint: a single
-        non-adhesive contact can only push, never pull, so the leading face
-        is excluded. The active finger starts already touching (a small
-        deliberate overlap); the inactive finger starts at a random
-        disengaged point."""
-        n = self._board.n_regions
-        src = int(self._rng.randint(n))
-        dst = int(self._rng.choice(sorted(self._board.adjacency()[src])))
-        going_east = dst > src
+    _FACE_NORMALS = {"east": (1.0, 0.0), "west": (-1.0, 0.0),
+                     "north": (0.0, 1.0), "south": (0.0, -1.0)}
+    _FACES = ("west", "east", "north", "south")
 
-        active = "L" if self._rng.randint(2) == 0 else "R"
-        inactive = "R" if active == "L" else "L"
-        self._active_finger = active
-
-        excluded_face = "east" if going_east else "west"
-        face = str(self._rng.choice(
-            [f for f in ("west", "east", "north", "south") if f != excluded_face]))
-
+    def _place_object_for_push(self, src, face, active, inactive):
+        """Shared by both branches of `_sample_push_edge` below: given a
+        chosen contact face, sample the object's position (keeping the
+        finger's offset clear of the wall, sec 7.5's generalized margin
+        fix) and place both fingers. Split out only to avoid duplicating
+        this block across the cross-room/same-room branches, which
+        deliberately sample `face` in a different order (see below) and so
+        can't share the code that comes before this point."""
         ow, oh = self.params.object_w_cm, self.params.object_h_cm
         clearance = self.params.finger_radius_cm - 0.02  # deliberate slight overlap
         face_offset = {
             "west": (-(ow / 2.0 + clearance), 0.0), "east": (ow / 2.0 + clearance, 0.0),
             "north": (0.0, oh / 2.0 + clearance), "south": (0.0, -(oh / 2.0 + clearance)),
         }[face]
-
         x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,))
         obj_state = self._place_object(x0, y0)
         obj_state = self._place_finger(obj_state, active,
                                        (x0 + face_offset[0], y0 + face_offset[1]))
         inactive_xy = self._sample_disengaged_point((x0, y0))
         obj_state = self._place_finger(obj_state, inactive, inactive_xy)
+        return obj_state
 
+    def _sample_push_edge(self):
+        """A push edge: random source room, destination either an adjacent
+        room (`Board.adjacency()`) or -- with probability
+        `self.same_room_goal_prob` -- the source room itself (memo Eq 6's
+        node is finer-grained than "room," so a same-room push is a
+        legitimate edge, not a relaxation; see that attribute's docstring).
+        Goal sampled from the whole destination room (memo Algorithm 1 line
+        4), not only the portal. Active finger and contacted face are
+        randomized subject to one constraint: a single non-adhesive contact
+        can only push, never pull, so the face nearest the goal is excluded.
+        The active finger starts already touching (a small deliberate
+        overlap); the inactive finger starts at a random disengaged point."""
+        n = self._board.n_regions
+        src = int(self._rng.randint(n))
+        if self.same_room_goal_prob > 0.0 and self._rng.uniform() < self.same_room_goal_prob:
+            dst = src
+        else:
+            dst = int(self._rng.choice(sorted(self._board.adjacency()[src])))
+
+        active = "L" if self._rng.randint(2) == 0 else "R"
+        inactive = "R" if active == "L" else "L"
+        self._active_finger = active
+
+        if dst != src:
+            # Unchanged from before same_room_goal_prob existed -- bit-
+            # identical RNG stream whenever dst is cross-room (guaranteed
+            # always true at same_room_goal_prob=0.0). The direction is
+            # known in advance here (dst is strictly east or west of src,
+            # Board's rooms are a 1-D left-to-right partition), so face can
+            # be chosen before the object's own position is sampled.
+            going_east = dst > src
+            excluded_face = "east" if going_east else "west"
+            face = str(self._rng.choice([f for f in self._FACES if f != excluded_face]))
+            obj_state = self._place_object_for_push(src, face, active, inactive)
+            goal_xy = self._sample_room_xy(dst)
+            return obj_state, goal_xy
+
+        # dst == src: the goal can be in any direction from the object, not
+        # just east/west, so which face to exclude needs the goal's actual
+        # direction -- meaning the goal must be sampled first, which is why
+        # this branch's RNG order necessarily differs from the one above.
         goal_xy = self._sample_room_xy(dst)
+        # Direction anchor: src room's center, not the object's own
+        # (not-yet-sampled) position -- avoids a circular dependency with
+        # face_offset (object position sampling needs face_offset; that
+        # needs the excluded face; that needs a direction). Rooms span the
+        # full board height here, so board_h_cm/2 is exactly every room's
+        # y-center, and room_edges_x's midpoint is exactly src's x-center --
+        # both exact, not approximations.
+        room_cx = (self._board.room_edges_x[src] + self._board.room_edges_x[src + 1]) / 2.0
+        room_cy = self.params.board_h_cm / 2.0
+        dx, dy = goal_xy[0] - room_cx, goal_xy[1] - room_cy
+        excluded_face = max(self._FACE_NORMALS,
+                            key=lambda f: dx * self._FACE_NORMALS[f][0] + dy * self._FACE_NORMALS[f][1])
+        face = str(self._rng.choice([f for f in self._FACES if f != excluded_face]))
+        obj_state = self._place_object_for_push(src, face, active, inactive)
         return obj_state, goal_xy
 
     def _sample_recontact_task(self):

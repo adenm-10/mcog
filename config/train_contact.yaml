@@ -29,6 +29,7 @@ wandb_run_name: null
 wandb_group: null          # null -> old behavior (out_dir's basename); set explicitly
                             # to group many sweep runs under one wandb "group" banner
 use_her: true              # false -> plain SAC replay buffer, no goal relabeling
+her_n_sampled_goal: 4      # HerReplayBuffer's relabels-per-real-transition (SB3 default 4)
 
 # --- env / arrival ---
 horizon: null                # set per-template in config/contact/*.yaml
@@ -68,6 +69,9 @@ force_max: null
 # --- curriculum constants (formerly bare module-level globals in gym_env.py) ---
 wall_margin_cm: 6.0
 disengaged_reach_mult: 2.0
+same_room_goal_prob: 0.0  # push only -- goal drawn from the source room instead
+                          # of an adjacent one with this probability (0.0 = old
+                          # behavior, always cross-room)
 
 # --- settle thresholds (contact_templates.py) -- null -> module constants
 # (0.5cm/s, 5deg/s). Overridable so they're sweepable.

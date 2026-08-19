@@ -19,7 +19,7 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               wall_margin_cm, disengaged_reach_mult,
               eps_v_cm_s=None, eps_omega_deg_s=None,
               speed_aware_goal=False, guard_terminates=True,
-              min_progress_cm=None):
+              min_progress_cm=None, same_room_goal_prob=0.0):
     def _init():
         from stable_baselines3.common.monitor import Monitor
         from domains.contact.gym_env import ContactEnv
@@ -30,7 +30,8 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          eps_v_cm_s=eps_v_cm_s, eps_omega_deg_s=eps_omega_deg_s,
                          speed_aware_goal=speed_aware_goal,
                          guard_terminates=guard_terminates,
-                         min_progress_cm=min_progress_cm)
+                         min_progress_cm=min_progress_cm,
+                         same_room_goal_prob=same_room_goal_prob)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
         # fired and rollout/ep_rew_mean was silently never logged.
@@ -75,6 +76,7 @@ def main(cfg: DictConfig) -> None:
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     from domains.contact.callbacks import ContactPeriodicEvalCallback
+    from domains.contact.her_buffer import ZeroVelocityGoalHerReplayBuffer
     from option_graph.callbacks import TrainMetricsCallback, attach_csv_logger
 
     env_kwargs = dict(horizon=d["horizon"], arrival_eps=d["arrival_eps"],
@@ -84,7 +86,8 @@ def main(cfg: DictConfig) -> None:
                       eps_v_cm_s=d["eps_v_cm_s"], eps_omega_deg_s=d["eps_omega_deg_s"],
                       speed_aware_goal=d["speed_aware_goal"],
                       guard_terminates=d["guard_terminates"],
-                      min_progress_cm=d["min_progress_cm"])
+                      min_progress_cm=d["min_progress_cm"],
+                      same_room_goal_prob=d["same_room_goal_prob"])
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
     eval_env = _make_env(template, d["seed"] + 10_000, **env_kwargs)()
@@ -95,8 +98,18 @@ def main(cfg: DictConfig) -> None:
     # copy_info_dict lets a relabeled compute_reward call see the original
     # transition's info (its "start_achieved_goal") -- only pay SB3's
     # copy-slowdown cost when min_progress_cm actually needs it.
-    her_kwargs = (dict(replay_buffer_class=HerReplayBuffer,
-                       replay_buffer_kwargs=dict(n_sampled_goal=4, goal_selection_strategy="future",
+    # speed_aware_goal's achieved_goal carries a velocity slot HER would
+    # otherwise leak a relabeled tick's real speed into (both the reward
+    # calc and the network's own input) -- ZeroVelocityGoalHerReplayBuffer
+    # pins that slot to 0.0 on relabel, matching a real desired_goal
+    # (domains/contact/her_buffer.py). Only swapped in when there's a
+    # velocity slot to pin; a plain HerReplayBuffer would crash on
+    # position-only (2-D) goals.
+    her_buffer_cls = (ZeroVelocityGoalHerReplayBuffer if d["speed_aware_goal"]
+                      else HerReplayBuffer)
+    her_kwargs = (dict(replay_buffer_class=her_buffer_cls,
+                       replay_buffer_kwargs=dict(n_sampled_goal=d["her_n_sampled_goal"],
+                                                 goal_selection_strategy="future",
                                                  copy_info_dict=d["min_progress_cm"] is not None))
                  if d["use_her"] else {})
     model = SAC("MultiInputPolicy", train_env, learning_starts=learning_starts,
