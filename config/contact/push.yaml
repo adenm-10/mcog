@@ -1,0 +1,12 @@
+# @package _global_
+# Deltas from config/train_contact.yaml for push: the locked 3-room corridor
+# (docs/stage1_env_spec.md's "First multi-room board") plus the run3 reward
+# shaping (status.md sec 7.6/7.5): literal Eq 14 distance shaping (w_d) and a
+# guard-violation penalty (w_m) on top of the sparse arrival bonus.
+board_w_cm: 90.0
+portals:
+  - {x: 30.0, y_lo: 25.0, y_hi: 35.0}
+  - {x: 60.0, y_lo: 25.0, y_hi: 35.0}
+horizon: 200
+w_d: 0.005
+w_m: 2.0

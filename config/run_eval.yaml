@@ -1,0 +1,30 @@
+# config/run_eval.yaml -- Hydra config for option_graph/run_eval.py.
+# Flat, no groups -- points at one or two already-frozen run directories.
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  run: {dir: .}
+  job: {chdir: false}
+  output_subdir: null   # stops a .hydra/ dump AND a stray run_eval.log
+                         # mirroring stdout into the repo root on every run
+
+run_dir: ???
+monolith_run_dir: null     # needed for arms=[monolith]
+config_dir: config
+arms: [composition]        # composition | monolith
+option_budget: 50          # hierarchy only; must match the calibration budget
+episode_budget: 640        # the fairness anchor; both arms get exactly this
+num_pairs: 4000
+min_hops: 1
+gate: rect                 # rect | halfplane
+alpha_deg: null
+eval_seed: null             # null -> the frozen eval_seed
+no_stratify: false
+out: ???
+dry_run: false
+wandb: false
+wandb_project: mcog
+wandb_run_name: null

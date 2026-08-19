@@ -9,11 +9,14 @@ the monolith stays off the critical path, and writes records.jsonl per arm.
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
 from collections import Counter
+from types import SimpleNamespace
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 ARMS = ("composition", "monolith")
 
@@ -86,37 +89,20 @@ def print_design(hops, groups) -> None:
           "docs/stage0_power.md.")
 
 
-def main(argv=None) -> int:
+@hydra.main(version_base=None, config_path="../config", config_name="run_eval")
+def main(hydra_cfg: DictConfig) -> int:
     for k, v in (("JAX_PLATFORM_NAME", "cpu"), ("JAX_PLATFORMS", "cpu"),
                  ("XLA_PYTHON_CLIENT_PREALLOCATE", "false"),
                  ("MPLBACKEND", "Agg")):
         os.environ.setdefault(k, v)
 
-    ap = argparse.ArgumentParser(
-        description="Composition / monolith eval on frozen weights. No training.")
-    ap.add_argument("--run-dir", required=True, help="frozen mode=regions run")
-    ap.add_argument("--monolith-run-dir", default=None,
-                    help="frozen mode=monolith run; needed for --arms monolith")
-    ap.add_argument("--config-dir", default="config")
-    ap.add_argument("--arms", nargs="+", default=["composition"], choices=ARMS)
-    ap.add_argument("--option-budget", type=int, default=50,
-                    help="hierarchy only; must match the calibration budget")
-    ap.add_argument("--episode-budget", type=int, default=640,
-                    help="the fairness anchor; both arms get exactly this")
-    ap.add_argument("--num-pairs", type=int, default=4000)
-    ap.add_argument("--min-hops", type=int, default=1)
-    ap.add_argument("--gate", default="rect", choices=("rect", "halfplane"))
-    ap.add_argument("--alpha-deg", type=float, default=None)
-    ap.add_argument("--eval-seed", type=int, default=None,
-                    help="default = the frozen eval_seed")
-    ap.add_argument("--no-stratify", action="store_true")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--dry-run", action="store_true", help="print design, exit")
-    ap.add_argument("--wandb", action="store_true",
-                    help="mirror the eval result to wandb (additive; off by default)")
-    ap.add_argument("--wandb-project", default="mcog")
-    ap.add_argument("--wandb-run-name", default=None)
-    args = ap.parse_args(argv)
+    # SimpleNamespace, not a plain dict: every `args.foo` reference below is
+    # unchanged from the pre-Hydra argparse Namespace this replaces.
+    args = SimpleNamespace(**OmegaConf.to_container(hydra_cfg, resolve=True))
+    if not set(args.arms) <= set(ARMS):
+        raise ValueError(f"[cfg] arms must be a subset of {ARMS}, got {args.arms!r}")
+    if args.gate not in ("rect", "halfplane"):
+        raise ValueError(f"[cfg] gate must be rect|halfplane, got {args.gate!r}")
 
     from checkpoints import _pin_threads, load_models
     from config.loader import build_bundle

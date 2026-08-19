@@ -9,14 +9,16 @@ construction. Pure functions over records and numpy -- no env, no gym, no SB3.
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Dict, List, Sequence, Tuple
 
+import hydra
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 
 from option_graph.edge_model import (PHat, build_matrix, pair_index,
                                      predict_handoff, predict_marginal,
@@ -432,32 +434,18 @@ METRIC_DOCS = {
         "effect at high hop counts (MAE_handoff at or below noise_floor) is visible here.",
 }
 
-def main(argv=None) -> int:
+@hydra.main(version_base=None, config_path="../config", config_name="metrics")
+def main(hydra_cfg: DictConfig) -> int:
     for k, v in (("JAX_PLATFORM_NAME", "cpu"), ("JAX_PLATFORMS", "cpu"),
                  ("XLA_PYTHON_CLIENT_PREALLOCATE", "false"),
                  ("MPLBACKEND", "Agg")):
         os.environ.setdefault(k, v)
 
-    ap = argparse.ArgumentParser(
-        description="Score the four predictors against observed route "
-                    "success. No env, no training.")
-    ap.add_argument("--records", required=True, help="composition records.jsonl")
-    ap.add_argument("--model-json", required=True, help="edge_model payload")
-    ap.add_argument("--probe", required=True, help="probe json at the SAME budget")
-    ap.add_argument("--run-dir", required=True, help="frozen run, for geometry")
-    ap.add_argument("--config-dir", default="config")
-    ap.add_argument("--region-field", default="mixed", choices=("mixed", "terminal"))
-    ap.add_argument("--summary-variant", default=None,
-                    help="summary.json for the unmatched-clock predictor-1 variant")
-    ap.add_argument("--draws", type=int, default=10_000)
-    ap.add_argument("--ratio-min", type=float, default=2.0)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default=None, help="default: <records dir>/metrics.json")
-    ap.add_argument("--wandb", action="store_true",
-                    help="mirror the scored result to wandb (additive; off by default)")
-    ap.add_argument("--wandb-project", default="mcog")
-    ap.add_argument("--wandb-run-name", default=None)
-    args = ap.parse_args(argv)
+    # SimpleNamespace, not a plain dict: every `args.foo` reference below is
+    # unchanged from the pre-Hydra argparse Namespace this replaces.
+    args = SimpleNamespace(**OmegaConf.to_container(hydra_cfg, resolve=True))
+    if args.region_field not in ("mixed", "terminal"):
+        raise ValueError(f"[cfg] region_field must be mixed|terminal, got {args.region_field!r}")
 
     from config.loader import build_bundle
     from option_graph.calibrate import _load_run_cfg

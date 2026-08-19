@@ -43,7 +43,8 @@ class ContactPeriodicEvalCallback(BaseCallback):
     straight-line way (contact_templates.dist_to_target)."""
 
     def __init__(self, eval_env, eval_freq: int, n_eval_episodes: int = 16,
-                 dist_edges=(3.0, 6.0, 9.0, 12.0), seed: int = 777):
+                 dist_edges=(3.0, 6.0, 9.0, 12.0), seed: int = 777,
+                 best_model_path=None):
         super().__init__()
         self.env = eval_env
         self.freq = int(eval_freq)
@@ -52,6 +53,8 @@ class ContactPeriodicEvalCallback(BaseCallback):
         self.seed = int(seed)
         self._next = self.freq
         self.env_steps_consumed = 0
+        self.best_model_path = best_model_path
+        self.best_success_rate = -1.0
 
     def _on_step(self) -> bool:
         if self.num_timesteps >= self._next:
@@ -74,7 +77,11 @@ class ContactPeriodicEvalCallback(BaseCallback):
                 done = bool(term) or bool(trunc)
             succ.append(s); rets.append(ret); sd.append((d, s))
             if s > 0.5: tta.append(steps)
-        self.logger.record("eval/success_rate", float(np.mean(succ)))
+        success_rate = float(np.mean(succ))
+        self.logger.record("eval/success_rate", success_rate)
+        if self.best_model_path is not None and success_rate > self.best_success_rate:
+            self.best_success_rate = success_rate
+            self.model.save(self.best_model_path)
         self.logger.record("eval/ep_rew_mean", float(np.mean(rets)))
         self.logger.record("eval/env_steps_consumed", int(self.env_steps_consumed))
         if tta: self.logger.record("eval/tta", float(np.mean(tta)))

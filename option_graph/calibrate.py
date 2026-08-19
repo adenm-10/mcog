@@ -10,14 +10,16 @@ is no new rollout loop. Domain imports are lazy, to keep the layering test green
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import (Any, Callable, Dict, Hashable, Iterator, List, Optional,
                     Sequence, Tuple)
 
+import hydra
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 
 from option_graph.executor import DomainHooks, ExecConfig, LegSpec, run_option
 from option_graph.records import EpisodeRecord, OptionRecord, edge_key
@@ -468,7 +470,8 @@ METRIC_DOCS = {
 }
 
 
-def main(argv=None) -> int:
+@hydra.main(version_base=None, config_path="../config", config_name="calibrate")
+def main(hydra_cfg: DictConfig) -> int:
     # Before the lazy imports: domains.nav.physics pulls jax, and nothing at this
     # module's top level has imported it yet.
     for k, v in (("JAX_PLATFORM_NAME", "cpu"), ("JAX_PLATFORMS", "cpu"),
@@ -476,30 +479,9 @@ def main(argv=None) -> int:
                  ("MPLBACKEND", "Agg")):
         os.environ.setdefault(k, v)
 
-    ap = argparse.ArgumentParser(
-        description="Roll out every graph edge in isolation from a stratified "
-                    "entry design. No training, no gradient steps.")
-    ap.add_argument("--run-dir", required=True, help="a frozen mode=regions run")
-    ap.add_argument("--config-dir", default="config")
-    ap.add_argument("--trials", type=int, default=100, help="per stratum")
-    ap.add_argument("--option-budget", type=int, default=None,
-                    help="default = the frozen horizon")
-    ap.add_argument("--entry-hops", type=int, default=2,
-                    help="doorway stratum depth, in cell hops")
-    ap.add_argument("--gate", default="rect", choices=("rect", "halfplane"))
-    ap.add_argument("--alpha-deg", type=float, default=None)
-    ap.add_argument("--no-terminal", action="store_true",
-                    help="doorway edges only")
-    ap.add_argument("--seed", type=int, default=None,
-                    help="default = the frozen eval_seed")
-    ap.add_argument("--out", default="logs/calibration/calibration.jsonl")
-    ap.add_argument("--dry-run", action="store_true", help="print design, exit")
-    ap.add_argument("--progress-every", type=int, default=500)
-    ap.add_argument("--wandb", action="store_true",
-                    help="mirror the calibration result to wandb (additive; off by default)")
-    ap.add_argument("--wandb-project", default="mcog")
-    ap.add_argument("--wandb-run-name", default=None)
-    args = ap.parse_args(argv)
+    # SimpleNamespace, not a plain dict: every `args.foo` reference below is
+    # unchanged from the pre-Hydra argparse Namespace this replaces.
+    args = SimpleNamespace(**OmegaConf.to_container(hydra_cfg, resolve=True))
 
     from checkpoints import _pin_threads, load_models
     from config.loader import build_bundle

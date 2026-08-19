@@ -179,6 +179,16 @@ CONTACT_EPS_OMEGA_DEG_S = 5.0  # angular-velocity settle threshold
 CONTACT_N_GRACE_STEPS = 5      # contact-loss grace period, in POLICY ticks at
                                # 25 Hz (~0.2s) -- see planar_fingertips.step(),
                                # which counts ticks, not physics substeps.
+RECONTACT_OVERSHOOT_GRACE_STEPS = 5  # consecutive ticks recontact may spend
+                               # inside the loose-arrival radius without
+                               # settling before it's ruled a fly-past, not a
+                               # genuine braking attempt. Lives here with the
+                               # other thresholds, but the check itself is in
+                               # domains/contact/gym_env.py's ContactEnv.step,
+                               # not recontact_guard -- guards here are
+                               # deliberately target-agnostic (see
+                               # recontact_guard's docstring), and this
+                               # condition needs the target to evaluate.
 
 # executor.py's shared score_arrival/guard_ok call sites pass a keyword
 # argument literally named `direction` (nav's crossing-direction slot, "ab"/
@@ -231,12 +241,13 @@ def _other(finger: Finger) -> Finger:
     return "R" if finger == "L" else "L"
 
 
-def _linear_settled(vx: float, vy: float) -> bool:
-    return bool(np.hypot(vx, vy) < CONTACT_EPS_V_CM_S)
+def _linear_settled(vx: float, vy: float, eps_v_cm_s: float = CONTACT_EPS_V_CM_S) -> bool:
+    return bool(np.hypot(vx, vy) < eps_v_cm_s)
 
 
-def _angular_settled(omega_rad_s: float) -> bool:
-    return bool(abs(np.degrees(omega_rad_s)) < CONTACT_EPS_OMEGA_DEG_S)
+def _angular_settled(omega_rad_s: float,
+                     eps_omega_deg_s: float = CONTACT_EPS_OMEGA_DEG_S) -> bool:
+    return bool(abs(np.degrees(omega_rad_s)) < eps_omega_deg_s)
 
 
 def _angle_diff(a: float, b: float) -> float:
@@ -248,7 +259,9 @@ def push_arrival(x: State, *, target, arrival_eps: float,
                  iface=None, direction: Optional[str] = None,
                  gate: str = "rect", alpha_deg: Optional[float] = None,
                  theta_target: Optional[float] = None,
-                 theta_tol_deg: Optional[float] = None) -> Arrival:
+                 theta_tol_deg: Optional[float] = None,
+                 eps_v_cm_s: Optional[float] = None,
+                 eps_omega_deg_s: Optional[float] = None) -> Arrival:
     """Push: target is an object (x, y) position. `gate`/`alpha_deg` are
     accepted only for signature-compatibility with the shared score_arrival
     call in executor.py and unused here. `direction` (which finger is
@@ -280,9 +293,16 @@ def push_arrival(x: State, *, target, arrival_eps: float,
     settled (e.g. a training goal built with `require_settled=True`) should
     read `reached_interface`, not `reached_position` -- both are always
     computed, so no extra flag is needed here to pick between them.
+
+    `eps_v_cm_s`/`eps_omega_deg_s`, when given, override the module-level
+    CONTACT_EPS_V_CM_S/CONTACT_EPS_OMEGA_DEG_S settle thresholds for this call
+    only -- both default to None (use the module constants), so every
+    existing caller is unaffected.
     """
     ox, oy = _obj_xy(x)
-    settled = _linear_settled(*_obj_vel(x)) and _angular_settled(_obj_omega(x))
+    v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
+    w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
+    settled = _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
     if iface is not None:
         # Crossing sign comes from which side of the portal the target sits
         # on (resolve_target always places it past the line), not a second
@@ -304,7 +324,9 @@ def push_arrival(x: State, *, target, arrival_eps: float,
 
 def recontact_arrival(x: State, *, target, arrival_eps: float,
                       iface=None, direction: Optional[str] = None,
-                      gate: str = "rect", alpha_deg: Optional[float] = None) -> Arrival:
+                      gate: str = "rect", alpha_deg: Optional[float] = None,
+                      eps_v_cm_s: Optional[float] = None,
+                      eps_omega_deg_s: Optional[float] = None) -> Arrival:
     """Recontact: target is a position for one fingertip. `direction` is this
     call's only way to learn which one (see the module note above on why it's
     still spelled `direction` here).
@@ -312,6 +334,10 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
     "Object static" (memo sec 3.1.1) is read as low-velocity, not
     zero-displacement-since-option-start: this function only ever sees the
     current state, not the option's entry state.
+
+    `eps_v_cm_s`/`eps_omega_deg_s` override the module-level settle
+    thresholds for this call only, same as push_arrival -- default None
+    (module constants), every existing caller unaffected.
     """
     active_finger = direction
     if active_finger not in ("L", "R"):
@@ -319,8 +345,10 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
     fx, fy = _finger_xy(x, active_finger)
     d = float(np.hypot(fx - float(target[0]), fy - float(target[1])))
     hit = d < float(arrival_eps)
-    finger_settled = _linear_settled(*_finger_vel(x, active_finger))
-    obj_settled = _linear_settled(*_obj_vel(x)) and _angular_settled(_obj_omega(x))
+    v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
+    w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
+    finger_settled = _linear_settled(*_finger_vel(x, active_finger), **v_kw)
+    obj_settled = _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
     return Arrival(reached_position=hit,
                    reached_interface=bool(hit and finger_settled and obj_settled),
                    dist_to_target=d, heading_err=float("nan"))
@@ -388,7 +416,13 @@ def recontact_guard(x: State, allowed, cell_size, leg=None, *, params):
 PUSH = Template(name="push", score_arrival=push_arrival, guard=push_guard,
                 guards=("off_board", "force_limit", "forbidden_contact", "contact_lost"))
 RECONTACT = Template(name="recontact", score_arrival=recontact_arrival,
-                     guard=recontact_guard, guards=("off_board", "force_limit"))
+                     guard=recontact_guard,
+                     # "overshoot" isn't produced by recontact_guard itself
+                     # (target-agnostic by design, see its docstring) -- it's
+                     # ContactEnv.step's own check (RECONTACT_OVERSHOOT_GRACE_STEPS,
+                     # above), listed here since it's a real guard_outcome a
+                     # consumer of this template can observe.
+                     guards=("off_board", "force_limit", "overshoot"))
 TEMPLATES[PUSH.name] = PUSH
 TEMPLATES[RECONTACT.name] = RECONTACT
 K = frozenset(TEMPLATES)

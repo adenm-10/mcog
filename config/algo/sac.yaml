@@ -1,3 +1,4 @@
+# @package _global_
 buffer_size: 500000
 learning_starts: 10000
 batch_size: 256

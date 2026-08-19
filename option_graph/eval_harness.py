@@ -59,17 +59,22 @@ def _geo_dist(maze, start_xy, goal_xy, cache) -> float:
     return float(geo.distance(start_xy[0], start_xy[1]))
 
 
-def rollout_metrics(X: np.ndarray, U: np.ndarray, goal) -> Dict[str, float]:
+def rollout_metrics(X: np.ndarray, U: np.ndarray, geo_dist: float) -> Dict[str, float]:
     """Path length, efficiency and control cost for one trajectory.
 
-    Formulae are unchanged from the old harness so this commit's diff is the
-    executor swap alone. The efficiency numerator is D7 and is fixed in S7 9b.
+    S7 9b fix: efficiency is mean_path_length / geodesic distance (matches
+    run_eval.py's METRIC_DOCS), not the Euclidean chord over path used before.
+    1.0 is optimal (the path was exactly as short as the maze allows); values
+    above 1.0 are expected on any real, imperfect rollout. The old chord/path
+    formula could exceed 1.0 on a failed episode that barely moved, which read
+    as "impossible" only because that formula's own invariant (chord <= path)
+    doesn't hold when the chord is measured to the never-reached goal instead
+    of to the rollout's actual endpoint.
     """
     path = (float(np.sum(np.linalg.norm(X[1:, :2] - X[:-1, :2], axis=1)))
             if len(X) > 1 else 0.0)
-    straight = float(np.linalg.norm(X[0, :2] - np.asarray(goal, dtype=float)))
     return {"path_length": path,
-            "efficiency": straight / max(path, 1e-6),
+            "efficiency": path / max(geo_dist, 1e-6),
             "control_cost": float(np.mean(np.square(U))) if len(U) else 0.0}
 
 
@@ -129,14 +134,15 @@ def _evaluate(bundle, *, policy_for, route_fn, arm, dt, omega_max, gamma,
         X = np.asarray([np.asarray(x0, np.float32)] + [s for s, _ in trace])
         U = (np.asarray([u for _, u in trace]) if trace
              else np.zeros((0, physics.control_dim), np.float32))
-        m = rollout_metrics(X, U, goal)
-        lengths.append(m["path_length"])
-        effs.append(m["efficiency"])
-        ctrls.append(m["control_cost"])
 
         d = _geo_dist(bundle.maze, (x0[0], x0[1]), goal, geo_cache)
         rec.geodesic_dist = d
         dists.append(d)
+
+        m = rollout_metrics(X, U, d)
+        lengths.append(m["path_length"])
+        effs.append(m["efficiency"])
+        ctrls.append(m["control_cost"])
         succ.append(1.0 if rec.success else 0.0)
         times.append(rec.total_steps if rec.success else int(horizon))
         records.append(rec)

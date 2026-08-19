@@ -1,23 +1,30 @@
 # config/loader.py
-"""Load+merge YAML (base <- algo <- maze), auto-expose scalars as CLI flags,
-and build the maze bundle (Maze + disjoint region grid + transition interfaces).
-Replaces domains.nav.maze.LADDER selection and skills.dubins._LABELS_BY_MAZE as the  [legacy-ref]
+"""Load+merge YAML (base <- algo <- maze) via Hydra, and build the maze bundle
+(Maze + disjoint region grid + transition interfaces). Replaces
+domains.nav.maze.LADDER selection and skills.dubins._LABELS_BY_MAZE as the  [legacy-ref]
 geometry source. All geometry now lives in config/maze/<name>.yaml.
+
+Two halves, deliberately: `resolve()` (Hydra-composed DictConfig -> plain
+dict + MazeBundle) is the only CLI-facing piece and has exactly one caller,
+train.py. Everything below it (_read_yaml, _merge, build_maze_bundle,
+build_bundle, _rmin_gate, _derive_clocks, dump_resolved) is pure -- no Hydra,
+no argv -- and is imported directly by six other things (test_code.py,
+tests/fixture_eval.py, tests/test_option_graph.py, option_graph/calibrate.py,
+run_eval.py, metrics.py, edge_model.py) that reload an already-frozen run's
+config. Keep that half's signatures and behavior stable; resolve()'s own
+signature has no other caller to break.
 """
 from __future__ import annotations
-import argparse, copy, os
+import copy, os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import yaml
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf
 
 from domains.nav.maze import make_maze, Maze
-from domains.geometry import (
-    Interface, cells_for_label, group_by_pair, infer_adjacency, labels_of,
-    make_region_of, synthesize_interfaces, validate_interfaces,
-)
-from domains.nav.partitions import resolve_partition, table_to_ascii
 from domains.geometry import (
     Interface, cells_for_label, group_by_pair, infer_adjacency, labels_of,
     make_region_of, synthesize_interfaces, validate_interfaces,
@@ -195,63 +202,51 @@ def _apply_clocks(cfg, explicit):
         else:
             cfg[k] = v
 
-# ------------------------------------------------------------------ argparse
-def _add_flags(parser, scalars):
-    for k, v in scalars.items():
-        if k in _STRUCTURED or k in _SEL:      # <-- added `or k in _SEL`
-            continue
-        flag = "--" + k.replace("_", "-")
-        if isinstance(v, bool):
-            parser.add_argument(flag, dest=k, action=argparse.BooleanOptionalAction,
-                                default=argparse.SUPPRESS)
-        elif isinstance(v, list):
-            parser.add_argument(flag, dest=k, nargs="+",
-                                type=type(v[0]) if v else str, default=argparse.SUPPRESS)
-        else:
-            parser.add_argument(flag, dest=k, type=type(v) if v is not None else str,
-                                default=argparse.SUPPRESS)
+# ------------------------------------------------------------------ hydra
+# Override-provenance keys: always present in every invocation (algo/mode/maze
+# are mandatory `???` defaults, output_dir/partition are plain optional
+# scalars) but never meaningful to _apply_clocks, which only ever checks
+# membership for "horizon"/"gamma"/"eval_horizon" -- excluded here to keep
+# `explicit` a clean "what did the user actually type" set, matching the old
+# argparse.SUPPRESS-based Namespace's intent (not required for _apply_clocks's
+# own correctness, since it only reads three unrelated keys out of this set).
+_SEL = ("algo", "mode", "maze", "output_dir", "partition")
 
-_SEL = ("algo", "mode", "maze_name", "config_dir", "output_dir", "partition")
+def resolve(cfg: DictConfig) -> Tuple[dict, MazeBundle]:
+    """Called from inside an `@hydra.main`-decorated entry point (train.py) --
+    HydraConfig.get() is only reliably populated there, not via the lower-
+    level Compose API. `cfg` is already the fully composed base<-algo<-maze
+    tree (config/base.yaml's `defaults:` list); this converts it to a plain
+    dict before touching any pure function below, since _merge's
+    isinstance(v, dict) check and build_maze_bundle's direct mcfg["walls"]
+    indexing both need native containers, not OmegaConf's wrapper types."""
+    hc = HydraConfig.get()
+    d = OmegaConf.to_container(cfg, resolve=True)
+    d["algo"] = hc.runtime.choices["algo"]
+    d["maze_name"] = hc.runtime.choices["maze"]
 
-def resolve(argv=None) -> Tuple[dict, MazeBundle]:
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--algo", choices=["sac", "ppo"], required=True)
-    pre.add_argument("--mode", choices=["monolith", "regions"], required=True)
-    pre.add_argument("--maze-name", dest="maze_name", required=True)
-    pre.add_argument("--config-dir", dest="config_dir", default="config")
-    pre.add_argument("--output-dir", dest="output_dir", default=None)
-    pre.add_argument("--partition", dest="partition", default=None)
-    k, _ = pre.parse_known_args(argv)
-
-    cfg = _read_yaml(os.path.join(k.config_dir, "base.yaml"))
-    cfg = _merge(cfg, _read_yaml(os.path.join(k.config_dir, "algo", f"{k.algo}.yaml")))
-    cfg = _merge(cfg, _read_yaml(os.path.join(k.config_dir, "maze", f"{k.maze_name}.yaml")))
-
-    p = argparse.ArgumentParser(description="Dubins maze trainer (config-driven).")
-    p.add_argument("--algo", choices=["sac", "ppo"], required=True)
-    p.add_argument("--mode", choices=["monolith", "regions"], required=True)
-    p.add_argument("--maze-name", dest="maze_name", required=True)
-    p.add_argument("--config-dir", dest="config_dir", default="config")
-    p.add_argument("--output-dir", dest="output_dir", default=None)
-    p.add_argument("--partition", dest="partition", default=None)
-    _add_flags(p, cfg)                       # unknown --flags error here (typo guard)
-    ns = p.parse_args(argv)
-    explicit = {k for k in vars(ns) if k not in _SEL}
-
-    cfg.update({kk: vv for kk, vv in vars(ns).items() if kk not in _SEL})
-    for s in _SEL: cfg[s] = getattr(ns, s)
-
-    if bool(cfg.get("use_her")) and cfg["algo"] == "ppo":
+    if d.get("mode") not in ("monolith", "regions"):
+        raise ValueError(f"[cfg] mode must be monolith|regions, got {d.get('mode')!r}")
+    if bool(d.get("use_her")) and d["algo"] == "ppo":
         raise ValueError("[cfg] use_her=True requires SAC (HER needs an off-policy buffer)")
-    if cfg.get("her_strategy") not in ("final", "future"):
-        raise ValueError(f"[cfg] her_strategy must be final|future, got {cfg.get('her_strategy')!r}")
+    if d.get("her_strategy") not in ("final", "future"):
+        raise ValueError(f"[cfg] her_strategy must be final|future, got {d.get('her_strategy')!r}")
 
-    bundle = build_maze_bundle(cfg, partition=cfg.get("partition") or "")
-    cfg["partition"] = bundle.partition_name        # record what was actually used
-    _rmin_gate(cfg, bundle)
-    _derive_clocks(cfg, bundle)
-    _apply_clocks(cfg, explicit)
-    return cfg, bundle
+    bundle = build_maze_bundle(d, partition=d.get("partition") or "")
+    d["partition"] = bundle.partition_name        # record what was actually used
+    _rmin_gate(d, bundle)
+    _derive_clocks(d, bundle)
+
+    # Hydra's own record of exactly the key=value tokens on the raw command
+    # line -- the structural analogue of argparse.SUPPRESS-based Namespace
+    # inspection (both are argv-provenance signals, not value-comparison
+    # signals): a user typing horizon=160 where 160 happens to equal the
+    # derived value still counts as "explicit" and triggers _apply_clocks's
+    # warn branch, exactly as before.
+    explicit = {ov.split("=", 1)[0].split(".")[0].lstrip("+~")
+               for ov in hc.overrides.task} - set(_SEL)
+    _apply_clocks(d, explicit)
+    return d, bundle
 
 def dump_resolved(cfg: dict, path: str):
     scal = {k: v for k, v in cfg.items() if k not in _STRUCTURED and not k.startswith("_")}

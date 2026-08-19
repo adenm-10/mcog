@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Unified Dubins-maze trainer: {sac,ppo} x {monolith,regions}, fully config-driven.
 
-  python train.py --algo sac --mode regions --maze-name four_rooms
+  python train.py algo=sac mode=regions maze=four_rooms
 Every other knob comes from config/{base,algo/<algo>,maze/<name>}.yaml and can be
-overridden by an auto-generated --flag per scalar key (see config/loader.py).
+overridden with key=value on the command line (Hydra; see config/loader.py).
 """
 from __future__ import annotations
 import os
@@ -14,7 +14,9 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import json, time, logging
+import hydra
 import numpy as np
+from omegaconf import DictConfig
 
 _NON_SCALAR = ("walls", "regions", "partitions", "interfaces")
 
@@ -282,9 +284,10 @@ def run_regions(cfg, bundle, base_dir):
     finish(comp_run)
 
 # ------------------------------------------------------------------ main
-def main():
+@hydra.main(version_base=None, config_path="config", config_name="base")
+def main(hydra_cfg: DictConfig) -> None:
     from config.loader import resolve, dump_resolved
-    cfg, bundle = resolve()
+    cfg, bundle = resolve(hydra_cfg)
     tag = f"sb3_dubins_{cfg['mode']}_{cfg['algo']}_{cfg['maze_name']}"
     base_dir = cfg["output_dir"] or os.path.join("media", tag)
     os.makedirs(base_dir, exist_ok=True)

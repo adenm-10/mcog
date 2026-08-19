@@ -1,0 +1,29 @@
+# config/calibrate.yaml -- Hydra config for option_graph/calibrate.py.
+# Flat, no groups -- calibrate.py always points at one already-frozen run
+# directory, not the base<-algo<-maze composition chain.
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  run: {dir: .}
+  job: {chdir: false}
+  output_subdir: null   # stops a .hydra/ dump AND a stray calibrate.log
+                         # mirroring stdout into the repo root on every run
+
+run_dir: ???
+config_dir: config
+trials: 100
+option_budget: null        # null -> the frozen horizon
+entry_hops: 2
+gate: rect                 # rect | halfplane
+alpha_deg: null
+no_terminal: false         # true -> doorway edges only
+seed: null                 # null -> the frozen eval_seed
+out: logs/calibration/calibration.jsonl
+dry_run: false
+progress_every: 500
+wandb: false
+wandb_project: mcog
+wandb_run_name: null

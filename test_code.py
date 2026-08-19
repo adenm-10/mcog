@@ -141,12 +141,21 @@ def cmd_static() -> None:
               f"{path}: env_steps_consumed incremented exactly once",
               f"count={src.count('self.env_steps_consumed += 1')}")
 
-    section("loader --partition")
-    src = open("config/loader.py").read()
-    n_part = src.count('dest="partition"')
-    check(n_part >= 2,
-          "--partition on both pre-parser and main parser",
-          f"count={n_part}")
+    section("loader typo guard")
+    # Was a source-string grep on the old dual-argparse structure
+    # (dest="partition" appearing on both parsers) -- gone once Hydra
+    # replaced that mechanism (config/loader.py's own resolve() docstring).
+    # Replacement is a real regression test of the thing that mattered:
+    # an unregistered key on the command line must still fail loudly, the
+    # same guarantee the old typo guard gave. Hydra's struct-mode behavior
+    # confirmed empirically before writing this check: exit code 1, message
+    # contains "not in struct".
+    r = subprocess.run([sys.executable, "train.py", "algo=sac", "mode=regions",
+                       "maze=four_rooms", "totally_fake_key=1"],
+                       capture_output=True, text=True, cwd=os.path.dirname(__file__) or ".")
+    check(r.returncode != 0 and "not in struct" in (r.stdout + r.stderr),
+          "unregistered key on the CLI fails loudly",
+          f"returncode={r.returncode}")
 
 # =========================================================================== #
 # geometry

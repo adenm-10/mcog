@@ -1,0 +1,10 @@
+# @package _global_
+# Deltas from config/train_contact.yaml for recontact: no board/portal concept
+# (locked scope decision, docs/stage1_env_spec.md) -- board_w_cm/board_h_cm
+# stay at the shared defaults. Reward per status.md sec 7.6/7.5: a per-step
+# time penalty (w_T) and action-effort penalty (w_a) to discourage overshoot,
+# plus the same guard-violation penalty (w_m) as push.
+horizon: 100
+w_T: 0.02
+w_a: 0.01
+w_m: 2.0

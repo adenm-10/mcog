@@ -1,4 +1,29 @@
-# config/base.yaml — shared across algos + mazes. Override any key with --<key>.
+# config/base.yaml — shared across algos + mazes. Override any key with key=value
+# on the command line (Hydra); `defaults:` composes in the selected algo/maze group.
+defaults:
+  - _self_
+  - algo: ???
+  - maze: ???
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  run: {dir: .}
+  job: {chdir: false}
+  output_subdir: null   # train.py's own dump_resolved() -> resolved_config.yaml
+                         # is the single provenance record; Hydra's own .hydra/
+                         # dump and run-dir chdir would otherwise fire on every
+                         # invocation and break every relative path in train.py
+                         # and every slurm script. Disabling job_logging/
+                         # hydra_logging above stops the OTHER default side
+                         # effect: a stray train.py.log mirroring stdout into
+                         # the repo root on every single run.
+
+mode: ???                 # monolith | regions -- was a plain --mode CLI arg,
+                           # not a YAML key, before this migration
+partition: null
+output_dir: null
+
 seed: 0
 n_envs: 8
 vec: subproc              # subproc | dummy

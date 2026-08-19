@@ -1,0 +1,27 @@
+# config/metrics.yaml -- Hydra config for option_graph/metrics.py.
+# Flat, no groups -- scores predictors against already-produced artifacts.
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  run: {dir: .}
+  job: {chdir: false}
+  output_subdir: null   # stops a .hydra/ dump AND a stray metrics.log
+                         # mirroring stdout into the repo root on every run
+
+records: ???
+model_json: ???
+probe: ???
+run_dir: ???
+config_dir: config
+region_field: mixed        # mixed | terminal
+summary_variant: null
+draws: 10000
+ratio_min: 2.0
+seed: 0
+out: null                  # null -> <records dir>/metrics.json
+wandb: false
+wandb_project: mcog
+wandb_run_name: null

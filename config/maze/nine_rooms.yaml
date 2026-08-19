@@ -1,3 +1,4 @@
+# @package _global_
 name: nine_rooms
 cell_size: 1.0
 walls: |

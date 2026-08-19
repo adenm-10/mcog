@@ -43,32 +43,36 @@ DIAG_EPS=16
 mkdir -p tests/fixtures
 
 echo "=== regions arm (${BUDGET} aggregate, $((BUDGET / 9))/region) ==="
+# key=value (Hydra), not --flag value: maze=... (a group selector) replaces
+# --maze-name, not just the punctuation. Every value below is unchanged from
+# the pre-migration argparse+YAML CLI -- this script's whole purpose is
+# reproducing the frozen fixture numbers exactly, so nothing here may drift.
 python train.py \
-  --algo sac --mode regions --maze-name "${MAZE}" \
-  --horizon 200 --eval-horizon 600 --gamma 0.995 \
-  --arrival-eps 0.4 --omega-max 8.0 --wall-margin 0.0 \
-  --total-steps "${BUDGET}" --composition-eval-pairs "${PAIRS}" --region-eval-episodes "${PAIRS}" \
-  --seed "${SEED}" --eval-seed "${EVAL_SEED}" \
-  --diag-eval-freq "${DIAG_FREQ}" --diag-eval-episodes "${DIAG_EPS}" \
-  --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
-  --switch-gate halfplane \
-  --n-envs 8 --train-freq 1 --gradient-steps 32 \
-  --learning-starts 2000 --buffer-size "${BUDGET}" \
-  --output-dir tests/fixtures/regions
+  algo=sac mode=regions maze="${MAZE}" \
+  horizon=200 eval_horizon=600 gamma=0.995 \
+  arrival_eps=0.4 omega_max=8.0 wall_margin=0.0 \
+  total_steps="${BUDGET}" composition_eval_pairs="${PAIRS}" region_eval_episodes="${PAIRS}" \
+  seed="${SEED}" eval_seed="${EVAL_SEED}" \
+  diag_eval_freq="${DIAG_FREQ}" diag_eval_episodes="${DIAG_EPS}" \
+  goal_reward=10 step_pen=0.01 collision_pen=0 \
+  switch_gate=halfplane \
+  n_envs=8 train_freq=1 gradient_steps=32 \
+  learning_starts=2000 buffer_size="${BUDGET}" \
+  output_dir=tests/fixtures/regions
 
 echo "=== monolith arm (matched aggregate) ==="
 python train.py \
-  --algo sac --mode monolith --maze-name "${MAZE}" \
-  --horizon 600 --eval-horizon 600 --gamma 0.99833 \
-  --arrival-eps 0.4 --omega-max 8.0 --wall-margin 0.0 \
-  --total-steps "${BUDGET}" --composition-eval-pairs "${PAIRS}" --region-eval-episodes "${PAIRS}" \
-  --seed "${SEED}" --eval-seed "${EVAL_SEED}" \
-  --diag-eval-freq 15000 --diag-eval-episodes "${DIAG_EPS}" \
-  --goal-reward 10 --step-pen 0.01 --collision-pen 0 \
-  --switch-gate halfplane \
-  --n-envs 8 --train-freq 1 --gradient-steps 32 \
-  --learning-starts 5000 --buffer-size "${BUDGET}" \
-  --output-dir tests/fixtures/monolith
+  algo=sac mode=monolith maze="${MAZE}" \
+  horizon=600 eval_horizon=600 gamma=0.99833 \
+  arrival_eps=0.4 omega_max=8.0 wall_margin=0.0 \
+  total_steps="${BUDGET}" composition_eval_pairs="${PAIRS}" region_eval_episodes="${PAIRS}" \
+  seed="${SEED}" eval_seed="${EVAL_SEED}" \
+  diag_eval_freq=15000 diag_eval_episodes="${DIAG_EPS}" \
+  goal_reward=10 step_pen=0.01 collision_pen=0 \
+  switch_gate=halfplane \
+  n_envs=8 train_freq=1 gradient_steps=32 \
+  learning_starts=5000 buffer_size="${BUDGET}" \
+  output_dir=tests/fixtures/monolith
 
 echo "=== write expected.json, then verify the gate is self-consistent ==="
 python -m tests.fixture_eval freeze tests/fixtures
