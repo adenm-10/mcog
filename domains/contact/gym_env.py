@@ -9,6 +9,7 @@ status.md sec 7.6.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
@@ -29,10 +30,10 @@ from domains.contact.planar_fingertips import (IDX_FINGER_VEL, IDX_FINGER_XY,
                                                IDX_OBJ_XY, IDX_PEAK_FORCE,
                                                PlanarFingertipParams, Portal)
 from domains.contact.reward import RewardWeights, arrived_loose, goal_dist, step_reward
-from domains.contact_templates import (CONTACT_EPS_V_CM_S,
-                                       RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES)
+from domains.contact_templates import (RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
+                                       object_settled)
 
-OBS_DIM = 21             # Physics.obs()'s fixed shape (object-centric state + rel_target)
+OBS_DIM = 17             # Physics.obs()'s fixed shape (object-centric state + rel_target)
 # Bigger than the object's own half-diagonal (~5.8cm for the 10x6cm object)
 # plus a margin, not just a round number.
 _WALL_MARGIN_CM = 6.0
@@ -74,10 +75,11 @@ class ContactEnv(gym.Env):
                 disengaged_reach_mult: float = _DISENGAGED_REACH_MULT,
                 eps_v_cm_s: Optional[float] = None,
                 eps_omega_deg_s: Optional[float] = None,
-                speed_aware_goal: bool = False,
                 guard_terminates: bool = True,
                 min_progress_cm: Optional[float] = None,
-                same_room_goal_prob: float = 0.0):
+                require_settled: bool = True,
+                same_room_goal_prob: float = 0.0,
+                restrict_contact_actions: bool = False):
         super().__init__()
         if template not in TEMPLATES:
             raise ValueError(f"template must be one of {sorted(TEMPLATES)}, got {template!r}")
@@ -98,10 +100,6 @@ class ContactEnv(gym.Env):
         # None -> contact_templates' module-constant settle thresholds.
         self.eps_v_cm_s = eps_v_cm_s
         self.eps_omega_deg_s = eps_omega_deg_s
-        # Widens achieved_goal to (x, y, speed) and requires low recorded
-        # speed in compute_reward -- otherwise a fast fly-through of the
-        # target scores a free HER win (status.md sec 7.9, hypothesis H3).
-        self.speed_aware_goal = bool(speed_aware_goal)
         # False keeps episodes running past a guard violation instead of
         # ending them -- removes the "bail early, cheap" exit (sec 7.9, H1).
         self.guard_terminates = bool(guard_terminates)
@@ -109,6 +107,10 @@ class ContactEnv(gym.Env):
         # OWN start before granting credit -- kills free wins for episodes
         # that never actually moved (sec 7.9). None disables the check.
         self.min_progress_cm = min_progress_cm
+        # Push only: false swaps reached_interface for reached_position (pure
+        # distance, no settledness) in step()'s reward/termination/is_success --
+        # matches compute_reward, which was already position-only for push.
+        self.require_settled = bool(require_settled)
         # Push only: probability the goal room equals the source room
         # instead of an adjacent one (memo Eq 6's node is finer-grained than
         # "room," so a same-room push is a legitimate edge, not a
@@ -122,7 +124,16 @@ class ContactEnv(gym.Env):
         # generalize almost entirely out-of-distribution to the cross-room
         # case it rarely gets real signal for.
         self.same_room_goal_prob = float(same_room_goal_prob)
-        self._episode_start_goal = np.zeros(2, dtype=np.float32)
+        # Push only: clamp only the active finger's outward-normal velocity
+        # component whenever it would open the contact gap faster than the
+        # object itself recedes (using full oracle state -- object heading
+        # plus both finger positions/velocities -- not a new observation).
+        # Tangential motion and the inactive finger are never touched. Aimed
+        # at push's dominant failure mode, contact_lost: with one circle
+        # touching one flat face, most of the raw action space breaks
+        # contact on the very next tick. False reproduces old behavior
+        # exactly (see _restrict_push_action below).
+        self.restrict_contact_actions = bool(restrict_contact_actions)
         self._rng = np.random.RandomState(seed)
         self._t = 0
         self._active_finger = "L"
@@ -136,14 +147,20 @@ class ContactEnv(gym.Env):
         # same violation would recharge w_m every remaining tick instead of
         # once, as guard_terminates=True's behavior does.
         self._guard_charged = False
+        # Recontact-only: once the object moves at all, stays True for the
+        # rest of the episode -- catches "bulldoze then let it settle right
+        # before arriving," which a settled-at-arrival-only check can't see.
+        self._object_disturbed = False
 
-        if self.speed_aware_goal:
-            g_lo = np.zeros(3, dtype=np.float32)
-            g_hi = np.array([self.params.board_w_cm, self.params.board_h_cm, _OBS_BOUND],
-                            dtype=np.float32)
-        else:
+        if template == "push":
             g_lo = np.zeros(2, dtype=np.float32)
             g_hi = np.array([self.params.board_w_cm, self.params.board_h_cm], dtype=np.float32)
+        else:
+            # recontact's goal is object-frame (see _achieved_xy/_sample_recontact_task),
+            # so it isn't bounded by the board -- reuse the same generous,
+            # non-tight bound "observation" already uses.
+            g_lo = np.full(2, -_OBS_BOUND, dtype=np.float32)
+            g_hi = np.full(2, _OBS_BOUND, dtype=np.float32)
         self.observation_space = spaces.Dict(dict(
             observation=spaces.Box(-_OBS_BOUND, _OBS_BOUND, shape=(OBS_DIM,), dtype=np.float32),
             achieved_goal=spaces.Box(g_lo, g_hi, dtype=np.float32),
@@ -313,15 +330,14 @@ class ContactEnv(gym.Env):
         self._active_finger = active
 
         # Target: a point just outside a random face, in the object's own
-        # frame, rotated into the world by theta.
+        # frame -- stays this same local offset for the whole episode (goal
+        # is object-frame, see _achieved_xy), so it's never rotated to world.
         clearance = self.params.finger_radius_cm + 0.3
         face = int(self._rng.randint(4))
         along = float(self._rng.uniform(-1.0, 1.0))
         half_w, half_h = ow / 2.0 + clearance, oh / 2.0 + clearance
-        local = {0: (half_w, along * oh / 2.0), 1: (-half_w, along * oh / 2.0),
-                2: (along * ow / 2.0, half_h), 3: (along * ow / 2.0, -half_h)}[face]
-        c, s = np.cos(theta), np.sin(theta)
-        target = (ox + c * local[0] - s * local[1], oy + s * local[0] + c * local[1])
+        target = {0: (half_w, along * oh / 2.0), 1: (-half_w, along * oh / 2.0),
+                 2: (along * ow / 2.0, half_h), 3: (along * ow / 2.0, -half_h)}[face]
 
         for side in ("L", "R"):
             obj_state = self._place_finger(obj_state, side,
@@ -329,42 +345,62 @@ class ContactEnv(gym.Env):
         return obj_state, target
 
     # --- observation / reward -------------------------------------------------
+    def _world_to_object_frame(self, x, world_xy) -> np.ndarray:
+        theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
+        c, s = float(np.cos(theta)), float(np.sin(theta))
+        rel = np.asarray(world_xy, dtype=np.float32) - x[IDX_OBJ_XY]
+        return np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]], dtype=np.float32)
+
     def _achieved_xy(self, x) -> np.ndarray:
         if self.template == "push":
-            xy, speed = x[IDX_OBJ_XY], np.hypot(*x[IDX_OBJ_VEL])
-        else:
-            xy, speed = x[IDX_FINGER_XY[self._active_finger]], \
-                np.hypot(*x[IDX_FINGER_VEL[self._active_finger]])
-        if not self.speed_aware_goal:
-            return np.asarray(xy, dtype=np.float32)
-        return np.array([xy[0], xy[1], speed], dtype=np.float32)
+            return np.asarray(x[IDX_OBJ_XY], dtype=np.float32)
+        # recontact: finger position in the OBJECT's frame, not world -- stays
+        # a valid HER-relabel target even if the object moved/rotated between
+        # the two ticks a relabel pairs together (world-frame would not).
+        return self._world_to_object_frame(x, x[IDX_FINGER_XY[self._active_finger]])
 
     def _observation(self, x) -> Dict[str, np.ndarray]:
         return {"observation": self._physics.obs(x, self._goal_xy[:2]),
                 "achieved_goal": self._achieved_xy(x),
                 "desired_goal": self._goal_xy.copy()}
 
-    def compute_reward(self, achieved_goal, desired_goal, info):
-        # HER calls this on batches. Action/guard/force are goal-independent
-        # and dropped on relabel -- see reward.py's RewardWeights docstring.
+    def _her_arrived(self, achieved_goal, desired_goal, info) -> np.ndarray:
+        """Whether a (possibly relabeled) transition counts as arrived --
+        shared by compute_reward (below) and the push HER buffer's done-patch
+        (her_buffer.py), so the two never disagree about what "arrived"
+        means on a relabeled transition."""
         ag, dg = np.asarray(achieved_goal), np.asarray(desired_goal)
-        if self.speed_aware_goal:
-            # Speed comes ONLY from achieved_goal (never relabeled), so a
-            # relabeled desired_goal's speed can't define "settled."
-            eps_v = self.eps_v_cm_s if self.eps_v_cm_s is not None else CONTACT_EPS_V_CM_S
-            ag_pos, dg_pos = ag[..., :2], dg[..., :2]
-            arrived = arrived_loose(ag_pos, dg_pos, self.arrival_eps) & (ag[..., 2] < eps_v)
-        else:
-            ag_pos, dg_pos = ag, dg
-            arrived = arrived_loose(ag_pos, dg_pos, self.arrival_eps)
+        arrived = arrived_loose(ag, dg, self.arrival_eps)
+        if self.template == "recontact":
+            # The object must be settled now AND never disturbed earlier in
+            # the episode -- both goal-independent, so (like min_progress_cm
+            # below) a relabeled transition reads them from info rather than
+            # the goal arrays. Requires copy_info_dict=True (wired
+            # automatically in train_contact.py).
+            settled = np.asarray([d["obj_settled"] for d in info], dtype=bool)
+            disturbed = np.asarray([d["object_disturbed"] for d in info], dtype=bool)
+            arrived = arrived & settled & ~disturbed
         if self.min_progress_cm is not None:
-            # Gate on the (possibly relabeled) goal's own distance from
-            # episode start, not achieved-vs-desired distance, so an episode
-            # that moves away early and holds position still scores later
-            # transitions correctly. Requires copy_info_dict=True.
-            starts = np.asarray([d["start_achieved_goal"] for d in info], dtype=np.float32)
-            arrived = arrived & (goal_dist(dg_pos, starts) > self.min_progress_cm)
-        r = self.weights.goal_reward * arrived - self.weights.w_d * goal_dist(ag_pos, dg_pos)
+            # Per-pair, not per-episode: gate on how far the (possibly
+            # relabeled) goal is from THIS transition's own pre-action
+            # position, not the episode's start. HER's free-win failure mode
+            # is a property of the (transition, relabeled-goal) pair -- a
+            # goal set to wherever the object already was sitting is trivial
+            # regardless of how far the episode moved overall, and a goal far
+            # from the object's position right before this transition is
+            # informative regardless of how little the episode moved
+            # elsewhere. Requires copy_info_dict=True.
+            pre = np.asarray([d["pre_achieved_goal"] for d in info], dtype=np.float32)
+            arrived = arrived & (goal_dist(dg, pre) > self.min_progress_cm)
+        return arrived
+
+    def compute_reward(self, achieved_goal, desired_goal, info):
+        # HER calls this on batches, on stored (position-only) goal arrays --
+        # action/guard/force are goal-independent and dropped on relabel
+        # (see reward.py's RewardWeights docstring).
+        ag, dg = np.asarray(achieved_goal), np.asarray(desired_goal)
+        arrived = self._her_arrived(achieved_goal, desired_goal, info)
+        r = self.weights.goal_reward * arrived - self.weights.w_d * goal_dist(ag, dg)
         return r.astype(np.float32)
 
     # --- gym API ---------------------------------------------------------------
@@ -378,21 +414,62 @@ class ContactEnv(gym.Env):
             x0, goal_xy = self._sample_recontact_task()
         self._physics.world.write_state(x0)
         self._x = self._physics.world.read_state()
-        if self.speed_aware_goal:
-            # Desired speed is always "stopped," but compute_reward never
-            # reads this slot -- it's here only so achieved/desired_goal
-            # share a shape.
-            self._goal_xy = np.array([goal_xy[0], goal_xy[1], 0.0], dtype=np.float32)
-        else:
-            self._goal_xy = np.asarray(goal_xy, dtype=np.float32)
+        self._goal_xy = np.asarray(goal_xy, dtype=np.float32)
         self._t = 0
         self._close_not_settled_steps = 0
         self._guard_charged = False
-        self._episode_start_goal = self._achieved_xy(self._x)[:2].copy()
+        self._object_disturbed = False
         return self._observation(self._x), {"t": 0}
 
+    def _restrict_push_action(self, a: np.ndarray) -> np.ndarray:
+        """Clamp the active finger's outward-normal velocity component to
+        the object's own normal-direction velocity whenever the raw command
+        would open the contact gap faster than the object recedes -- using
+        the current state's object heading and both finger
+        positions/velocities, all already in `x` (no new observation).
+        Tangential motion and the inactive finger's command pass through
+        unchanged. Same face-normal geometry as `_place_object_for_push`'s
+        `face_offset`, computed live instead of fixed at reset so a finger
+        that has drifted (e.g. towards a corner) is still handled."""
+        x = self._x
+        active = self._active_finger
+        theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
+        c, s = float(np.cos(theta)), float(np.sin(theta))
+        rel = x[IDX_FINGER_XY[active]] - x[IDX_OBJ_XY]
+        local = np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]])
+        ow, oh = self.params.object_w_cm, self.params.object_h_cm
+        if abs(local[0]) / (ow / 2.0) >= abs(local[1]) / (oh / 2.0):
+            local_normal = np.array([1.0 if local[0] >= 0.0 else -1.0, 0.0])
+        else:
+            local_normal = np.array([0.0, 1.0 if local[1] >= 0.0 else -1.0])
+        normal = np.array([c * local_normal[0] - s * local_normal[1],
+                          s * local_normal[0] + c * local_normal[1]])
+
+        i = 0 if active == "L" else 2
+        v_cmd = self.params.v_max_cm_s * a[i:i + 2]
+        cmd_n, obj_n = float(np.dot(v_cmd, normal)), float(np.dot(x[IDX_OBJ_VEL], normal))
+        if cmd_n > obj_n:
+            v_cmd = v_cmd + (obj_n - cmd_n) * normal
+            a = a.copy()
+            a[i:i + 2] = np.clip(v_cmd / self.params.v_max_cm_s, -1.0, 1.0)
+        return a
+
     def step(self, action):
+        # Pre-action achieved_goal, for compute_reward's per-pair
+        # min_progress_cm check -- must be read before physics.step below
+        # overwrites self._x.
+        pre_achieved = self._achieved_xy(self._x)
         a = np.clip(np.asarray(action, dtype=np.float32).reshape(-1), -1.0, 1.0)
+        if self.template == "push":
+            # The inactive finger has no task-relevant signal -- unmasked,
+            # its own exploration noise can wander into forbidden_contact
+            # independent of the active finger's actual behavior.
+            other = "R" if self._active_finger == "L" else "L"
+            i = 0 if other == "L" else 2
+            a = a.copy()
+            a[i:i + 2] = 0.0
+            if self.restrict_contact_actions:
+                a = self._restrict_push_action(a)
         x_next, u_phys = self._physics.step(self._x, a)
 
         leg = SimpleNamespace(direction=self._active_finger)
@@ -402,6 +479,8 @@ class ContactEnv(gym.Env):
                                        direction=self._active_finger,
                                        eps_v_cm_s=self.eps_v_cm_s,
                                        eps_omega_deg_s=self.eps_omega_deg_s)
+        if self.template == "push" and not self.require_settled:
+            arr = replace(arr, reached_interface=arr.reached_position)
 
         if self.template == "recontact":
             if arr.reached_position and not arr.reached_interface:
@@ -411,6 +490,10 @@ class ContactEnv(gym.Env):
             if guard_outcome is True and \
                     self._close_not_settled_steps > RECONTACT_OVERSHOOT_GRACE_STEPS:
                 guard_outcome = "overshoot"
+            # Sticky: once disturbed, stays disturbed for the rest of the
+            # episode, even if the object settles back down before arrival.
+            obj_settled_now = object_settled(x_next, self.eps_v_cm_s, self.eps_omega_deg_s)
+            self._object_disturbed = self._object_disturbed or not obj_settled_now
 
         # guard_terminates=False latch: charge w_m at most once per episode.
         guard_for_reward = guard_outcome
@@ -433,5 +516,11 @@ class ContactEnv(gym.Env):
                "guard_outcome": guard_outcome if isinstance(guard_outcome, str)
                                 else bool(guard_outcome),
                "u_phys": u_phys,
-               "start_achieved_goal": self._episode_start_goal}
+               "pre_achieved_goal": pre_achieved}
+        if self.template == "recontact":
+            # Both goal-independent, so compute_reward reads them back off a
+            # HER-relabeled transition's info instead of the (position-only)
+            # goal arrays -- same passthrough as start_achieved_goal above.
+            info["obj_settled"] = obj_settled_now
+            info["object_disturbed"] = self._object_disturbed
         return self._observation(x_next), float(reward), terminated, truncated, info

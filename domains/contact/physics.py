@@ -75,28 +75,29 @@ class Physics:
         one edge's board coordinates -- the whole point of training a
         template-shared policy rather than one network per edge.
 
-        Heading, velocities, and the guard telemetry (contact flags,
-        no-contact-step counts, peak force) are already frame-independent --
-        none of them encode a board position -- so they pass through
-        unchanged.
+        Positions are scaled by the board's own extent and velocities by
+        v_max so the network doesn't see a mix of ~[-1,1] and ~[-90,90]
+        inputs (heading/contact are already unit-scale; omega has no
+        analogous reference constant, left as-is).
 
-        Not done here: mirroring L/R into an "active finger" / "other
-        finger" pair for full left-right symmetry sharing (memo sec 4.2's
-        other stated benefit). This board's push edges all use "L" (see
-        board.py's resolve_target), so that symmetry is never exercised yet;
-        a board that pushes with both fingers would need it.
+        no_contact_steps/peak_force are dropped: guard_ok/score_arrival read
+        them from the raw physics state directly (never from this vector),
+        so a policy never needs them, and no_contact_steps in particular is
+        an unbounded tick counter with no upper reference scale.
         """
         x = np.asarray(x, dtype=np.float32).reshape(-1)
         obj_xy = x[IDX_OBJ_XY]
-        rel_target = np.array([float(target[0]), float(target[1])],
-                              dtype=np.float32) - obj_xy
-        rel_L = x[IDX_FINGER_XY["L"]] - obj_xy
-        rel_R = x[IDX_FINGER_XY["R"]] - obj_xy
+        pos_scale = max(self.params.board_w_cm, self.params.board_h_cm)
+        v_scale = self.params.v_max_cm_s
+        rel_target = (np.array([float(target[0]), float(target[1])], dtype=np.float32)
+                     - obj_xy) / pos_scale
+        rel_L = (x[IDX_FINGER_XY["L"]] - obj_xy) / pos_scale
+        rel_R = (x[IDX_FINGER_XY["R"]] - obj_xy) / pos_scale
         return np.concatenate([
-            x[IDX_OBJ_HEADING], x[IDX_OBJ_VEL], [x[IDX_OBJ_OMEGA]],
-            rel_L, x[IDX_FINGER_VEL["L"]],
-            rel_R, x[IDX_FINGER_VEL["R"]],
-            x[15:21],  # contact_L, contact_R, no_contact_L/R, peak_force_L/R
+            x[IDX_OBJ_HEADING], x[IDX_OBJ_VEL] / v_scale, [x[IDX_OBJ_OMEGA]],
+            rel_L, x[IDX_FINGER_VEL["L"]] / v_scale,
+            rel_R, x[IDX_FINGER_VEL["R"]] / v_scale,
+            x[15:17],  # contact_L, contact_R
             rel_target,
         ]).astype(np.float32)
 

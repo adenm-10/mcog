@@ -18,8 +18,8 @@ from omegaconf import DictConfig, OmegaConf
 def _make_env(template, seed, horizon, arrival_eps, params, weights,
               wall_margin_cm, disengaged_reach_mult,
               eps_v_cm_s=None, eps_omega_deg_s=None,
-              speed_aware_goal=False, guard_terminates=True,
-              min_progress_cm=None, same_room_goal_prob=0.0):
+              guard_terminates=True, min_progress_cm=None, require_settled=True,
+              same_room_goal_prob=0.0, restrict_contact_actions=False):
     def _init():
         from stable_baselines3.common.monitor import Monitor
         from domains.contact.gym_env import ContactEnv
@@ -28,10 +28,11 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          wall_margin_cm=wall_margin_cm,
                          disengaged_reach_mult=disengaged_reach_mult,
                          eps_v_cm_s=eps_v_cm_s, eps_omega_deg_s=eps_omega_deg_s,
-                         speed_aware_goal=speed_aware_goal,
                          guard_terminates=guard_terminates,
                          min_progress_cm=min_progress_cm,
-                         same_room_goal_prob=same_room_goal_prob)
+                         require_settled=require_settled,
+                         same_room_goal_prob=same_room_goal_prob,
+                         restrict_contact_actions=restrict_contact_actions)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
         # fired and rollout/ep_rew_mean was silently never logged.
@@ -76,7 +77,7 @@ def main(cfg: DictConfig) -> None:
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     from domains.contact.callbacks import ContactPeriodicEvalCallback
-    from domains.contact.her_buffer import ZeroVelocityGoalHerReplayBuffer
+    from domains.contact.her_buffer import PushRelabelSafeHerReplayBuffer
     from option_graph.callbacks import TrainMetricsCallback, attach_csv_logger
 
     env_kwargs = dict(horizon=d["horizon"], arrival_eps=d["arrival_eps"],
@@ -84,10 +85,11 @@ def main(cfg: DictConfig) -> None:
                       wall_margin_cm=d["wall_margin_cm"],
                       disengaged_reach_mult=d["disengaged_reach_mult"],
                       eps_v_cm_s=d["eps_v_cm_s"], eps_omega_deg_s=d["eps_omega_deg_s"],
-                      speed_aware_goal=d["speed_aware_goal"],
                       guard_terminates=d["guard_terminates"],
                       min_progress_cm=d["min_progress_cm"],
-                      same_room_goal_prob=d["same_room_goal_prob"])
+                      require_settled=d["require_settled"],
+                      same_room_goal_prob=d["same_room_goal_prob"],
+                      restrict_contact_actions=d["restrict_contact_actions"])
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
     eval_env = _make_env(template, d["seed"] + 10_000, **env_kwargs)()
@@ -96,21 +98,21 @@ def main(cfg: DictConfig) -> None:
                        else d["horizon"] + 50)
 
     # copy_info_dict lets a relabeled compute_reward call see the original
-    # transition's info (its "start_achieved_goal") -- only pay SB3's
-    # copy-slowdown cost when min_progress_cm actually needs it.
-    # speed_aware_goal's achieved_goal carries a velocity slot HER would
-    # otherwise leak a relabeled tick's real speed into (both the reward
-    # calc and the network's own input) -- ZeroVelocityGoalHerReplayBuffer
-    # pins that slot to 0.0 on relabel, matching a real desired_goal
-    # (domains/contact/her_buffer.py). Only swapped in when there's a
-    # velocity slot to pin; a plain HerReplayBuffer would crash on
-    # position-only (2-D) goals.
-    her_buffer_cls = (ZeroVelocityGoalHerReplayBuffer if d["speed_aware_goal"]
-                      else HerReplayBuffer)
+    # transition's info (its "start_achieved_goal", and for recontact its
+    # "obj_settled"/"object_disturbed") -- only pay SB3's copy-slowdown cost
+    # when one of those actually needs it.
+    copy_info_dict = d["min_progress_cm"] is not None or template == "recontact"
+    # Push's observation bakes in a target-relative feature that goes stale
+    # on HER's relabel (her_buffer.py); recontact's goal is already
+    # object-frame and doesn't need this.
+    her_buffer_cls = PushRelabelSafeHerReplayBuffer if template == "push" else HerReplayBuffer
+    her_buffer_extra = (dict(pos_scale=max(d["board_w_cm"], d["board_h_cm"]))
+                        if template == "push" else {})
     her_kwargs = (dict(replay_buffer_class=her_buffer_cls,
                        replay_buffer_kwargs=dict(n_sampled_goal=d["her_n_sampled_goal"],
                                                  goal_selection_strategy="future",
-                                                 copy_info_dict=d["min_progress_cm"] is not None))
+                                                 copy_info_dict=copy_info_dict,
+                                                 **her_buffer_extra))
                  if d["use_her"] else {})
     model = SAC("MultiInputPolicy", train_env, learning_starts=learning_starts,
                verbose=1, seed=d["seed"], **her_kwargs)

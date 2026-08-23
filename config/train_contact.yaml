@@ -72,6 +72,9 @@ disengaged_reach_mult: 2.0
 same_room_goal_prob: 0.0  # push only -- goal drawn from the source room instead
                           # of an adjacent one with this probability (0.0 = old
                           # behavior, always cross-room)
+restrict_contact_actions: false  # push only -- clamp the active finger's
+                          # outward-normal velocity to the object's own when
+                          # it would otherwise open the contact gap
 
 # --- settle thresholds (contact_templates.py) -- null -> module constants
 # (0.5cm/s, 5deg/s). Overridable so they're sweepable.
@@ -79,9 +82,6 @@ eps_v_cm_s: null
 eps_omega_deg_s: null
 
 # --- H1/H3 ablations (status.md sec 7.9) ---
-# true: HER's compute_reward also requires low recorded speed (achieved
-# goal widened to x,y,speed) -- else a fast fly-through scores a free win.
-speed_aware_goal: false
 # false: episodes run the full horizon past a guard violation instead of
 # ending early (the "bail early, cheap" exit).
 guard_terminates: true
@@ -89,3 +89,9 @@ guard_terminates: true
 # before HER grants credit -- null disables. Needs copy_info_dict=True
 # (wired automatically in train_contact.py).
 min_progress_cm: null
+# Push only -- true requires the object to be settled (low velocity, not
+# just close) for reached_interface/is_success/termination/reward, matching
+# push_arrival's own definition. false uses reached_position instead (pure
+# distance, no velocity check) for those same four things, closing the gap
+# with HER's compute_reward, which was already position-only for push.
+require_settled: true

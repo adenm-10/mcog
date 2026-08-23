@@ -215,13 +215,19 @@ def _obj_omega(x: State) -> float:
     return float(x[6])
 
 
+def _to_object_frame(x: State, world_xy: Tuple[float, float]) -> Tuple[float, float]:
+    """World point -> the object's own current frame (same convention as
+    ContactEnv._world_to_object_frame in gym_env.py). recontact's target is
+    object-frame (see that file), so this is how its arrival test compares
+    against a fingertip's live world position."""
+    ox, oy = _obj_xy(x)
+    ch, sh = float(x[2]), float(x[3])
+    dx, dy = float(world_xy[0]) - ox, float(world_xy[1]) - oy
+    return (ch * dx + sh * dy, -sh * dx + ch * dy)
+
+
 def _finger_xy(x: State, finger: Finger) -> Tuple[float, float]:
     i = 7 if finger == "L" else 11
-    return float(x[i]), float(x[i + 1])
-
-
-def _finger_vel(x: State, finger: Finger) -> Tuple[float, float]:
-    i = 9 if finger == "L" else 13
     return float(x[i]), float(x[i + 1])
 
 
@@ -253,6 +259,21 @@ def _angular_settled(omega_rad_s: float,
 def _angle_diff(a: float, b: float) -> float:
     """Unsigned angular gap between two radian angles, wrapped to [0, pi]."""
     return abs((float(a) - float(b) + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def object_settled(x: State, eps_v_cm_s: Optional[float] = None,
+                   eps_omega_deg_s: Optional[float] = None) -> bool:
+    """Memo sec 3.1.1's "object static," read as low-velocity (both linear
+    and angular), not zero-displacement-since-option-start. Shared by
+    push_arrival and recontact_arrival; public (not `_`-prefixed) since
+    ContactEnv also needs it directly, to know -- independent of any goal --
+    whether the object was undisturbed on a given real tick (see gym_env.py's
+    `compute_reward`, which needs that as goal-independent info for a
+    HER-relabeled transition, the same way `min_progress_cm` needs the
+    episode's start position)."""
+    v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
+    w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
+    return _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
 
 
 def push_arrival(x: State, *, target, arrival_eps: float,
@@ -300,9 +321,7 @@ def push_arrival(x: State, *, target, arrival_eps: float,
     existing caller is unaffected.
     """
     ox, oy = _obj_xy(x)
-    v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
-    w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
-    settled = _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
+    settled = object_settled(x, eps_v_cm_s, eps_omega_deg_s)
     if iface is not None:
         # Crossing sign comes from which side of the portal the target sits
         # on (resolve_target always places it past the line), not a second
@@ -327,13 +346,20 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
                       gate: str = "rect", alpha_deg: Optional[float] = None,
                       eps_v_cm_s: Optional[float] = None,
                       eps_omega_deg_s: Optional[float] = None) -> Arrival:
-    """Recontact: target is a position for one fingertip. `direction` is this
-    call's only way to learn which one (see the module note above on why it's
+    """Recontact: `target` is a position for one fingertip, in the OBJECT's
+    frame (not world) -- stays valid as a HER-relabel target even if the
+    object moves/rotates between the two ticks a relabel pairs together,
+    which a fixed world-frame point would not. `direction` is this call's
+    only way to learn which finger (see the module note above on why it's
     still spelled `direction` here).
 
     "Object static" (memo sec 3.1.1) is read as low-velocity, not
     zero-displacement-since-option-start: this function only ever sees the
-    current state, not the option's entry state.
+    current state, not the option's entry state. Only the OBJECT's velocity
+    gates success -- an earlier version also required the finger itself to
+    be settled, which is not in the memo's spec (sec 6.3: the guard bounds
+    object speed, not fingertip speed) and made arrival strictly harder than
+    intended for a training signal that already struggled to fire at all.
 
     `eps_v_cm_s`/`eps_omega_deg_s` override the module-level settle
     thresholds for this call only, same as push_arrival -- default None
@@ -342,15 +368,11 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
     active_finger = direction
     if active_finger not in ("L", "R"):
         raise ValueError(f"recontact needs direction in ('L', 'R'), got {direction!r}")
-    fx, fy = _finger_xy(x, active_finger)
-    d = float(np.hypot(fx - float(target[0]), fy - float(target[1])))
+    lx, ly = _to_object_frame(x, _finger_xy(x, active_finger))
+    d = float(np.hypot(lx - float(target[0]), ly - float(target[1])))
     hit = d < float(arrival_eps)
-    v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
-    w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
-    finger_settled = _linear_settled(*_finger_vel(x, active_finger), **v_kw)
-    obj_settled = _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
-    return Arrival(reached_position=hit,
-                   reached_interface=bool(hit and finger_settled and obj_settled),
+    settled = object_settled(x, eps_v_cm_s, eps_omega_deg_s)
+    return Arrival(reached_position=hit, reached_interface=bool(hit and settled),
                    dist_to_target=d, heading_err=float("nan"))
 
 
