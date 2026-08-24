@@ -1,23 +1,18 @@
 # config/loader.py
 """Load+merge YAML (base <- algo <- maze) via Hydra, and build the maze bundle
-(Maze + disjoint region grid + transition interfaces). Replaces
-domains.nav.maze.LADDER selection and skills.dubins._LABELS_BY_MAZE as the  [legacy-ref]
-geometry source. All geometry now lives in config/maze/<name>.yaml.
+(Maze + disjoint region grid + transition interfaces). All geometry lives in
+config/maze/<name>.yaml.
 
-Two halves, deliberately: `resolve()` (Hydra-composed DictConfig -> plain
-dict + MazeBundle) is the only CLI-facing piece and has exactly one caller,
-train.py. Everything below it (_read_yaml, _merge, build_maze_bundle,
-build_bundle, _rmin_gate, _derive_clocks, dump_resolved) is pure -- no Hydra,
-no argv -- and is imported directly by six other things (test_code.py,
-tests/fixture_eval.py, tests/test_option_graph.py, option_graph/calibrate.py,
-run_eval.py, metrics.py, edge_model.py) that reload an already-frozen run's
-config. Keep that half's signatures and behavior stable; resolve()'s own
-signature has no other caller to break.
+Two halves, deliberately. `resolve()` is the only CLI-facing piece and has
+exactly one caller, train.py, so its signature has nothing else to break.
+Everything below it is pure -- no Hydra, no argv -- and is imported directly by
+everything that reloads an already-frozen run's config, so keep that half's
+signatures and behavior stable.
 """
 from __future__ import annotations
 import copy, os
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Tuple
 
 import numpy as np
 import yaml
@@ -29,7 +24,7 @@ from domains.geometry import (
     Interface, cells_for_label, group_by_pair, infer_adjacency, labels_of,
     make_region_of, synthesize_interfaces, validate_interfaces,
 )
-from domains.nav.partitions import resolve_partition, table_to_ascii
+from domains.nav.partitions import resolve_partition
 
 _STRUCTURED = {"walls", "regions", "partitions", "interfaces"}
 

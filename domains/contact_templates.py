@@ -1,14 +1,9 @@
 # domains/contact_templates.py
 """One place that answers "did this option reach its target?"
 
-Today that question has two different answers. Tested on its own, a room policy
-succeeds when the car lands inside a small circle around a point. Run as one step
-of a chain, it succeeds when the car gets across the doorway line. Two tests means
-two sets of numbers that can't be compared to each other. From here on, everything
-asks this file.
-
-The car has one template ("drive"). The file is short on purpose: it is the seam
-where the manipulation templates plug in later.
+Standalone, a policy succeeds by landing near a point; chained, by crossing the
+doorway line. Two tests would mean two sets of numbers that can't be compared, so
+every caller asks this file instead.
 """
 
 from __future__ import annotations
@@ -20,8 +15,7 @@ import numpy as np
 
 from domains.geometry import Interface
 
-# How far off-straight the car may be pointing when it arrives (half-angle).
-# Much wider than this and every arrival passes, so the test stops meaning anything.
+# Arrival heading half-angle. Much wider and every arrival passes.
 HEADING_CONE_ALPHA_DEG = 45.0
 
 State = Sequence[float]          # [x, y, cos(heading), sin(heading)]
@@ -35,15 +29,15 @@ def position(x: State) -> Point:
 
 
 def heading(x: State) -> np.ndarray:
-    """Which way the car points, as a unit vector. Rescaled because the stored
-    value drifts slightly and that is enough to upset the angle test below."""
+    """Heading as a unit vector. Renormalized: the stored value drifts enough to
+    upset the angle test below."""
     h = np.array([float(x[2]), float(x[3])], dtype=np.float64)
     n = float(np.linalg.norm(h))
     return h / n if n > 1e-12 else np.array([1.0, 0.0])
 
 
 def heading_error(x: State, desired) -> float:
-    """Angle between where the car points and where we wanted it to, in radians."""
+    """Angle between actual and desired heading, in radians."""
     d = np.asarray(desired, dtype=np.float64)
     d = d / (float(np.linalg.norm(d)) + 1e-12)
     return float(np.arccos(np.clip(float(heading(x) @ d), -1.0, 1.0)))
@@ -61,23 +55,21 @@ def dist_to_target(x: State, target) -> float:
 # --- arrival ---------------------------------------------------------------
 
 def arrived_position(x: State, target, arrival_eps: float) -> bool:
-    """Close enough to a point. Must stay identical to the version in reward.py,
-    or the environment and this harness will disagree about the same episode."""
+    """Must stay identical to reward.py's version, or env and harness disagree
+    about the same episode."""
     return bool(dist_to_target(x, target) < float(arrival_eps))
 
 
 def crossed(x: State, iface: Interface, direction: str, *,
             gate: str = "rect", pad: float = 0.0) -> bool:
-    """Got across a doorway. Wrapped so callers never touch the geometry directly
-    and the default gate is set in one place."""
+    """Wrapped so the default gate lives in one place."""
     return bool(iface.crossed(float(x[0]), float(x[1]), direction,
                               gate=gate, pad=pad))
 
 
 @dataclass(frozen=True)
 class Arrival:
-    """Both versions of the answer, always. The gap between them then becomes a
-    column we can look at rather than a second run."""
+    """Both answers, always: the gap between them is a column, not a second run."""
     reached_position: bool
     reached_interface: bool
     dist_to_target: float
@@ -89,14 +81,10 @@ def score_arrival(x: State, *, target, arrival_eps: float,
                   direction: Optional[str] = None,
                   gate: str = "rect",
                   alpha_deg: float = HEADING_CONE_ALPHA_DEG) -> Arrival:
-    """The arrival test. Loose version ignores which way the car points; strict
-    version also requires it to be pointing roughly the right way.
+    """Loose ignores heading; strict also requires pointing roughly the right way.
 
-    Heading to a doorway: getting across the line counts, since a doorway is
-    something to pass through rather than somewhere to stop.
-
-    Heading to the final goal: the small circle counts, and there is no direction
-    to face, so both versions agree.
+    A doorway is passed through, so crossing the line counts. A final goal has no
+    direction to face, so both answers agree there.
     """
     d = dist_to_target(x, target)
     if iface is None:
@@ -111,32 +99,24 @@ def score_arrival(x: State, *, target, arrival_eps: float,
 
 
 # --- guards ----------------------------------------------------------------
-# guard_ok's contract (widened for Stage 1, executor.py's run_option): True
-# means fine; False means a violation that is only ever counted (nav's
-# original behaviour, unchanged); a str means "stop now," naming one of
-# records.OPTION_OUTCOMES for run_option to adopt and break on. nav's
-# guard_region below always returns a plain bool, so it is untouched by the
-# str branch -- see docs/stage1_env_spec.md's Guards section for why contact
-# needs the terminating case and nav does not.
+# guard_ok's contract (executor.py's run_option): True is fine, False is a
+# violation that is only counted, and a str is "stop now" naming a
+# records.OPTION_OUTCOMES value. nav returns only bools; contact needs the
+# terminating case (docs/stage1_env_spec.md, Guards).
 
 def as_cell_set(cells) -> FrozenSet[Tuple[int, int]]:
-    """Cell array -> set, so the check below is cheap to run every step."""
+    """Cell array -> set, so the per-step check below is cheap."""
     return frozenset((int(c[0]), int(c[1]))
                      for c in np.asarray(cells).reshape(-1, 2))
 
 
 def guard_region(x: State, allowed_cells: FrozenSet[Tuple[int, int]],
                  cell_size: float, leg: Any = None) -> bool:
-    """True while the car is in the cells this option is allowed to use.
+    """True while the car is in the cells this option may use.
 
-    Pass a room's cells plus its doorway cells, not the room alone. The handoff
-    happens in the middle of the doorway, so a leg legitimately starts just
-    outside its own room and a room-only check would trip on every handoff.
-
-    `leg` is unused: nav's guard needs no per-edge context. It exists only so
-    run_option can call every domain's guard_ok with the same four positional
-    arguments; a contact guard reads leg.direction to learn which fingertip
-    the current edge is manipulating.
+    Pass a room's cells PLUS its doorway cells: the handoff happens mid-doorway,
+    so a room-only check trips on every one. `leg` is unused here and exists only
+    to keep one guard_ok signature across domains.
     """
     cs = float(cell_size)
     cell = (int(np.floor(float(x[0]) / cs)), int(np.floor(float(x[1]) / cs)))
@@ -144,9 +124,8 @@ def guard_region(x: State, allowed_cells: FrozenSet[Tuple[int, int]],
 
 
 def _guard_noop(x, allowed, cell_size, leg=None, **kwargs) -> bool:
-    """Default Template.guard: always fine. DRIVE doesn't route through this
-    -- nav_hooks wires guard_region directly -- so this only exists to give
-    Template a safe default before a real template sets its own."""
+    """Template.guard default. DRIVE bypasses it (nav_hooks wires guard_region
+    directly); it just keeps Template safe before a template sets its own."""
     return True
 
 
@@ -154,8 +133,8 @@ def _guard_noop(x, allowed, cell_size, leg=None, **kwargs) -> bool:
 
 @dataclass(frozen=True)
 class Template:
-    """A kind of option: which arrival test it uses and which guard it runs.
-    The executor never needs to know which one it is holding."""
+    """A kind of option: its arrival test and its guard. The executor never needs
+    to know which one it holds."""
     name: str
     score_arrival: Callable[..., Arrival] = score_arrival
     guard: Callable[..., Any] = _guard_noop
@@ -168,37 +147,26 @@ K: FrozenSet[str] = frozenset(TEMPLATES)
 
 
 # --- contact templates (planar fingertips) ----------------------------------
-# State layout here is domains.contact.planar_fingertips.STATE_DIM (17,); see
-# that module's IDX_* constants and docs/stage1_env_spec.md. Deliberately
-# separate accessors from the car's `position`/`heading` above: same names
-# would invite reading the wrong floats, since the two State layouts share
-# nothing but a type alias.
+# State layout is planar_fingertips.STATE_DIM; see its IDX_* constants. The
+# accessors below are deliberately named apart from the car's `position`/
+# `heading`: the two State layouts share nothing but a type alias, so reusing
+# names would invite reading the wrong floats.
 
 CONTACT_EPS_V_CM_S = 0.5       # linear-velocity settle threshold
 CONTACT_EPS_OMEGA_DEG_S = 5.0  # angular-velocity settle threshold
-CONTACT_N_GRACE_STEPS = 5      # contact-loss grace period, in POLICY ticks at
-                               # 25 Hz (~0.2s) -- see planar_fingertips.step(),
-                               # which counts ticks, not physics substeps.
-RECONTACT_OVERSHOOT_GRACE_STEPS = 5  # consecutive ticks recontact may spend
-                               # inside the loose-arrival radius without
-                               # settling before it's ruled a fly-past, not a
-                               # genuine braking attempt. Lives here with the
-                               # other thresholds, but the check itself is in
-                               # domains/contact/gym_env.py's ContactEnv.step,
-                               # not recontact_guard -- guards here are
-                               # deliberately target-agnostic (see
-                               # recontact_guard's docstring), and this
-                               # condition needs the target to evaluate.
+CONTACT_N_GRACE_STEPS = 5      # contact-loss grace, in POLICY ticks at 25 Hz
+                               # (~0.2s), not physics substeps.
+RECONTACT_OVERSHOOT_GRACE_STEPS = 5  # ticks recontact may sit inside the loose
+                               # radius without settling before it counts as a
+                               # fly-past. Enforced in ContactEnv.step, not in
+                               # recontact_guard: the guards here are
+                               # target-agnostic and this needs the target.
 
-# executor.py's shared score_arrival/guard_ok call sites pass a keyword
-# argument literally named `direction` (nav's crossing-direction slot, "ab"/
-# "ba" -- see DomainHooks in executor.py). Contact repurposes that same
-# opaque per-template slot to carry which fingertip is doing the work, since
-# widening the shared signature for one domain's naming preference isn't
-# worth it. Every function below immediately rebinds it to `active_finger` (or
-# an equally concrete finger name) and never touches the word "direction"
-# again -- the "direction" spelling exists only where it has to, at the
-# keyword-argument boundary with generic code above.
+# executor.py's shared call sites pass a keyword named `direction` (nav's
+# "ab"/"ba" slot). Contact reuses that opaque slot to carry the active
+# fingertip rather than widening the shared signature, so the functions below
+# rebind it to `active_finger` immediately; "direction" survives only at the
+# keyword boundary.
 
 Finger = str  # "L" or "R"
 
@@ -216,10 +184,8 @@ def _obj_omega(x: State) -> float:
 
 
 def _to_object_frame(x: State, world_xy: Tuple[float, float]) -> Tuple[float, float]:
-    """World point -> the object's own current frame (same convention as
-    ContactEnv._world_to_object_frame in gym_env.py). recontact's target is
-    object-frame (see that file), so this is how its arrival test compares
-    against a fingertip's live world position."""
+    """World point -> the object's current frame (same convention as
+    ContactEnv._world_to_object_frame). recontact's target is object-frame."""
     ox, oy = _obj_xy(x)
     ch, sh = float(x[2]), float(x[3])
     dx, dy = float(world_xy[0]) - ox, float(world_xy[1]) - oy
@@ -263,14 +229,9 @@ def _angle_diff(a: float, b: float) -> float:
 
 def object_settled(x: State, eps_v_cm_s: Optional[float] = None,
                    eps_omega_deg_s: Optional[float] = None) -> bool:
-    """Memo sec 3.1.1's "object static," read as low-velocity (both linear
-    and angular), not zero-displacement-since-option-start. Shared by
-    push_arrival and recontact_arrival; public (not `_`-prefixed) since
-    ContactEnv also needs it directly, to know -- independent of any goal --
-    whether the object was undisturbed on a given real tick (see gym_env.py's
-    `compute_reward`, which needs that as goal-independent info for a
-    HER-relabeled transition, the same way `min_progress_cm` needs the
-    episode's start position)."""
+    """"Object static" as low velocity (linear and angular), not
+    zero-displacement-since-option-start. Public because ContactEnv needs it
+    directly, as goal-independent info for HER-relabeled transitions."""
     v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
     w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
     return _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
@@ -283,49 +244,19 @@ def push_arrival(x: State, *, target, arrival_eps: float,
                  theta_tol_deg: Optional[float] = None,
                  eps_v_cm_s: Optional[float] = None,
                  eps_omega_deg_s: Optional[float] = None) -> Arrival:
-    """Push: target is an object (x, y) position. `gate`/`alpha_deg` are
-    accepted only for signature-compatibility with the shared score_arrival
-    call in executor.py and unused here. `direction` (which finger is
-    pushing) isn't needed for arrival either -- only the guard below cares
-    which finger is active.
+    """Object position against `target`, or against `iface`'s portal line when
+    given (a portal is passed through, not stopped at). `theta_target` plus
+    `theta_tol_deg` add an orientation requirement. Strict arrival additionally
+    requires the object settled, which is what makes it safe to hand off from.
+    `gate`/`alpha_deg` are signature-compat only and unused.
 
-    `iface`, when given (a domains.contact.planar_fingertips.Portal, duck
-    typed -- this module doesn't import that one to avoid a needless
-    dependency), switches arrival from a point test to a crossing test: the
-    object's edge over the portal's line, within its y-gap, not "close to an
-    exact point." This is memo sec 2.1's "a doorway policy aims for a portal
-    set," not a point target -- iface=None (a terminal edge) keeps the point
-    test, matching nav's own score_arrival split.
-
-    `theta_target`/`theta_tol_deg`, when both given, add an orientation
-    requirement (memo Eq 7's edge-parameter "desired terminal orientation")
-    on top of whichever position test above applies -- this is what lets a
-    training goal be a specific object *pose*, not just a position, per
-    docs/stage1_env_spec.md's "Learned-policy training design" section. Both
-    default to None (no orientation requirement), so every existing caller
-    (executor.py's generic score_arrival call) is unaffected. The result is
-    reported in `heading_err`, otherwise unused by push (nan when no
-    orientation target is given).
-
-    Loose arrival ignores velocity. Strict arrival additionally requires the
-    object to be settled (memo sec 2.4's canonical-interface requirement:
-    terminate at low velocity), which is what makes it safe for the next
-    option to start from. Callers that need "arrived" to itself imply
-    settled (e.g. a training goal built with `require_settled=True`) should
-    read `reached_interface`, not `reached_position` -- both are always
-    computed, so no extra flag is needed here to pick between them.
-
-    `eps_v_cm_s`/`eps_omega_deg_s`, when given, override the module-level
-    CONTACT_EPS_V_CM_S/CONTACT_EPS_OMEGA_DEG_S settle thresholds for this call
-    only -- both default to None (use the module constants), so every
-    existing caller is unaffected.
+    `iface` is duck-typed as planar_fingertips.Portal to avoid the import.
     """
     ox, oy = _obj_xy(x)
     settled = object_settled(x, eps_v_cm_s, eps_omega_deg_s)
     if iface is not None:
-        # Crossing sign comes from which side of the portal the target sits
-        # on (resolve_target always places it past the line), not a second
-        # direction parameter -- direction already means "active finger" here.
+        # Crossing sign comes from which side the target sits on -- resolve_target
+        # always places it past the line -- since `direction` is the finger here.
         sign = 1.0 if float(target[0]) >= iface.x else -1.0
         hit = bool(sign * (ox - iface.x) >= 0.0 and iface.y_lo <= oy <= iface.y_hi)
     else:
@@ -346,24 +277,10 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
                       gate: str = "rect", alpha_deg: Optional[float] = None,
                       eps_v_cm_s: Optional[float] = None,
                       eps_omega_deg_s: Optional[float] = None) -> Arrival:
-    """Recontact: `target` is a position for one fingertip, in the OBJECT's
-    frame (not world) -- stays valid as a HER-relabel target even if the
-    object moves/rotates between the two ticks a relabel pairs together,
-    which a fixed world-frame point would not. `direction` is this call's
-    only way to learn which finger (see the module note above on why it's
-    still spelled `direction` here).
-
-    "Object static" (memo sec 3.1.1) is read as low-velocity, not
-    zero-displacement-since-option-start: this function only ever sees the
-    current state, not the option's entry state. Only the OBJECT's velocity
-    gates success -- an earlier version also required the finger itself to
-    be settled, which is not in the memo's spec (sec 6.3: the guard bounds
-    object speed, not fingertip speed) and made arrival strictly harder than
-    intended for a training signal that already struggled to fire at all.
-
-    `eps_v_cm_s`/`eps_omega_deg_s` override the module-level settle
-    thresholds for this call only, same as push_arrival -- default None
-    (module constants), every existing caller unaffected.
+    """One fingertip's position against `target`, which is in the OBJECT's frame:
+    a world-frame point would go stale as a HER-relabel target whenever the object
+    moved between the two ticks a relabel pairs. Only the OBJECT's velocity gates
+    success -- the guard bounds object speed, not fingertip speed.
     """
     active_finger = direction
     if active_finger not in ("L", "R"):
@@ -376,24 +293,16 @@ def recontact_arrival(x: State, *, target, arrival_eps: float,
                    dist_to_target=d, heading_err=float("nan"))
 
 
-# --- contact guards (memo Eq 40 / sec 3.1.3) --------------------------------
-# Four conditions, exactly the memo's sentence: a required contact lost for
-# more than n_grace steps, a forbidden contact appearing, the object leaving
-# the board, or force over a safety threshold. Unlike guard_region above,
-# these terminate the option (return a str outcome) rather than only counting
-# -- see the "guard_ok's contract" note further up this file.
+# --- contact guards --------------------------------------------------------
+# Four conditions: required contact lost past n_grace steps, a forbidden
+# contact appearing, the object leaving the board, force over the safety
+# threshold. Unlike guard_region these terminate the option (str outcome).
 #
-# off_board and force_limit are universal (checked by every contact
-# template); contact_lost and forbidden_contact are push-specific, since push
-# is the only template with a defined "this finger must/must-not be touching"
-# invariant. Recontact skips both: it has no required contact (the point of
-# the option is to get one without the object moving first), and per-step
-# tracking of whether the object drifted during the move was deliberately
-# left out to avoid the added state/overhead for a guard condition the sim
-# isn't expected to need -- fixed, deterministic dynamics, no domain
-# randomization this pass (see spec doc).
+# off_board and force_limit are universal. contact_lost and forbidden_contact
+# are push-only: push is the only template with a "this finger must/must-not
+# touch" invariant, since recontact exists precisely to acquire a contact.
 
-def _off_board(x: State, board_w_cm: float, board_h_cm: float) -> bool:
+def _on_board(x: State, board_w_cm: float, board_h_cm: float) -> bool:
     ox, oy = _obj_xy(x)
     return bool(0.0 <= ox <= board_w_cm and 0.0 <= oy <= board_h_cm)
 
@@ -406,11 +315,9 @@ def _force_ok(x: State, params) -> bool:
 
 
 def push_guard(x: State, allowed, cell_size, leg=None, *, params):
-    """`allowed`/`cell_size` are accepted only for call-compatibility with
-    run_option's guard_ok(x, allowed, cell_size, leg) contract -- push has no
-    cell-grid concept, see domains/contact/hooks.py. `leg.direction` names
-    the active (pushing) finger; see the module note above for why."""
-    if not _off_board(x, params.board_w_cm, params.board_h_cm):
+    """`allowed`/`cell_size` are signature-compat only -- push has no cell grid.
+    `leg.direction` names the active (pushing) finger."""
+    if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
     if not _force_ok(x, params):
         return "force_limit"
@@ -426,9 +333,8 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params):
 
 
 def recontact_guard(x: State, allowed, cell_size, leg=None, *, params):
-    """Only the two universal checks -- see the section note above for why
-    recontact has no required/forbidden-finger check."""
-    if not _off_board(x, params.board_w_cm, params.board_h_cm):
+    """Only the two universal checks; see the section note above."""
+    if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
     if not _force_ok(x, params):
         return "force_limit"
@@ -439,11 +345,8 @@ PUSH = Template(name="push", score_arrival=push_arrival, guard=push_guard,
                 guards=("off_board", "force_limit", "forbidden_contact", "contact_lost"))
 RECONTACT = Template(name="recontact", score_arrival=recontact_arrival,
                      guard=recontact_guard,
-                     # "overshoot" isn't produced by recontact_guard itself
-                     # (target-agnostic by design, see its docstring) -- it's
-                     # ContactEnv.step's own check (RECONTACT_OVERSHOOT_GRACE_STEPS,
-                     # above), listed here since it's a real guard_outcome a
-                     # consumer of this template can observe.
+                     # "overshoot" comes from ContactEnv.step, not from
+                     # recontact_guard, but it is a real observable outcome.
                      guards=("off_board", "force_limit", "overshoot"))
 TEMPLATES[PUSH.name] = PUSH
 TEMPLATES[RECONTACT.name] = RECONTACT

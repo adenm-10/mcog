@@ -10,13 +10,11 @@ Exit code 0 iff every check passes.
 """
 from __future__ import annotations
 
-import glob as globmod
 import json
 import os
 import re
 import subprocess
 import sys
-import textwrap
 
 MAZE_YAML = "config/maze/nine_rooms.yaml"
 

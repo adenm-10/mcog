@@ -1,16 +1,11 @@
 # domains/nav/physics.py
-"""Shared dynamics server.
+"""Shared dynamics server, and the only reason it exists: both arms -- one
+policy for the whole maze, and chained room policies -- step through it, so a
+gap in success rate is a difference between approaches, not between physics.
 
-Both arms — one policy for the whole maze, and chained room policies — step
-through this, so a gap in success rate is a difference between the two approaches
-and not a difference in physics. That is the only reason it exists.
-
-It borrows a real environment rather than reimplementing anything: same step,
-same wall handling, same observation scaling.
-
-The executor takes one of these as an argument and only ever calls obs(), step(),
-and control_dim. Nothing car-specific appears in those three, so a later domain
-supplies its own server and the executor is unchanged.
+It borrows a real environment rather than reimplementing one. The executor only
+ever calls obs(), step(), and control_dim, none of which are car-specific, so a
+later domain supplies its own server unchanged.
 """
 
 from __future__ import annotations

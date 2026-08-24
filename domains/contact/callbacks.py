@@ -1,15 +1,10 @@
 # domains/contact/callbacks.py
-"""Held-out eval callback for contact-rich manipulation envs.
+"""Held-out eval callback for contact envs: pause training, run the policy
+deterministic on fresh episodes, report the real success rate.
 
-The contact sibling of domains/nav/callbacks.py's PeriodicEvalCallback: same
-idea (pause training, run the current policy deterministic and noise-free on
-fresh episodes, report the real success rate), but reads only the public
-Dict-obs contract every ContactEnv exposes for HER (achieved_goal/
-desired_goal) instead of any simulator's internals. That means it works
-unchanged for push, recontact, or any later contact template or simulator
-(a MuJoCo substrate, say) that keeps that contract -- it never touches
-`env.maze`, a portal, or a PyMunk body the way the nav version touches
-DubinsMazeEnv's internals.
+Unlike its nav sibling, which reaches into DubinsMazeEnv's internals, this
+reads only the achieved_goal/desired_goal contract every ContactEnv already
+exposes for HER -- so it works unchanged for any later template or simulator.
 """
 from __future__ import annotations
 
@@ -29,18 +24,15 @@ METRIC_DOCS = {
 
 
 def _goal_dist(obs) -> float:
-    """Straight-line distance between achieved and desired goal, position
-    components only (the first two floats): every contact template's goal
-    leads with (x, y), even when push's also carries (cos theta, sin theta)."""
+    """Straight-line distance, position components only: every contact
+    template's goal leads with (x, y)."""
     ag, dg = np.asarray(obs["achieved_goal"]), np.asarray(obs["desired_goal"])
     return float(np.hypot(ag[0] - dg[0], ag[1] - dg[1]))
 
 
 class ContactPeriodicEvalCallback(BaseCallback):
-    """Deterministic eval on a held env every eval_freq env steps. Bins by
-    plain distance-to-goal rather than nav's maze geodesic -- there is no
-    maze here, and every contact template already measures arrival the same
-    straight-line way (contact_templates.dist_to_target)."""
+    """Deterministic eval every eval_freq env steps, binned by straight-line
+    distance rather than nav's maze geodesic: there is no maze here."""
 
     def __init__(self, eval_env, eval_freq: int, n_eval_episodes: int = 16,
                  dist_edges=(3.0, 6.0, 9.0, 12.0), seed: int = 777,

@@ -1,25 +1,20 @@
 # domains/geometry.py
 """Maze geometry: cells, regions, interfaces, the region graph, samplers.
 
-Geometric FACTS about a maze and a given partition table. Partition CHOICE lives
-in domains/nav/partitions.py, so the aligned and misaligned H4 arms differ by one
-config key rather than a code path.
+Geometric FACTS about a maze and a given partition table; partition CHOICE lives
+in domains/nav/partitions.py. Interface lives here rather than in
+config/loader.py because config depends on geometry, not the reverse.
 
-Layering: nav -> geometry -> partitions -> config; option_graph imports
-domains but never gymnasium or stable_baselines3. Interface lives here, not in
-config/loader.py, because config depends on geometry and not the reverse.
-
-Point vs set: targets stay POINTS because desired_goal and HER need one. What
-became a SET is the arrival predicate (domains/contact_templates.py, which
-consumes Interface.approach_normal for the heading cone) and the switch test
-(Interface.crossed, which gates the half-plane on rect containment).
+Targets stay POINTS, because desired_goal and HER need one. What became a SET is
+the arrival predicate and the switch test (Interface.crossed, which gates the
+half-plane on rect containment).
 """
 
 from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Optional,
+from typing import (Callable, Dict, FrozenSet, Iterable, List, Optional,
                     Sequence, Set, Tuple)
 
 import numpy as np
@@ -176,11 +171,7 @@ class Face:
 def boundary_faces(maze: Maze, table: Dict[Cell, int]) -> Dict[FrozenSet, List[Face]]:
     """All boundary faces grouped by unordered label pair, canonicalized so
     label_a is the smaller label and normal points a -> b. Every target_ab /
-    target_ba convention downstream derives from that.
-
-    Keeps the per-face detail the old infer_interfaces averaged away; that detail
-    is what interface synthesis needs.
-    """
+    target_ba convention downstream derives from that."""
     cs = float(maze.cell_size)
     faces: Dict[FrozenSet, List[Face]] = defaultdict(list)
     for (ix, iy), lab in table.items():
@@ -470,10 +461,10 @@ def validate_interfaces(maze: Maze, table: Dict[Cell, int],
                         *, strict_targets: bool = True) -> None:
     """Consistency checks between a partition and its interfaces.
 
-    Supersedes loader._validate. Two changes: the one-per-pair requirement is
-    gone (multi-throat boundaries are legitimate), and the wall check on targets
-    is live rather than commented out, because a target one arrival_eps past the
-    line can land in a wall and then reads as a mysterious edge failure.
+    There is deliberately no one-interface-per-pair requirement: multi-throat
+    boundaries are legitimate. The wall check on targets is live because a target
+    one arrival_eps past the line can land inside a wall, which then reads as a
+    mysterious edge failure.
     """
     adj = infer_adjacency(table)
     adj_pairs = {frozenset((a, b)) for a, nbs in adj.items() for b in nbs}

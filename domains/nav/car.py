@@ -1,38 +1,21 @@
 # domains/nav/car.py
-"""
-Dubins car with differentiable dynamics
+"""Dubins car with differentiable dynamics.
 
-State (SO(2) heading to avoid angle-wrap discontinuities, mirroring the
-variational pendulum's S^1 representation):
+State is x = [px, py, cos(theta), sin(theta)]: an SO(2) heading, to avoid
+angle-wrap discontinuities. Integrated with RK4 then renormalized onto S^1,
+which keeps the adjoint's A_t = df/dx, B_t = df/du well-conditioned.
 
-    x = [px, py, c, s],  with c = cos(theta), s = sin(theta)
+Three separate smoothness fronts are handled here, so HMC gradients stay
+informative: the dynamics are branch-free (RK4, not the closed-form arc, so no
+v/omega singularity), actuator limits use a tanh clamp rather than jnp.clip,
+and the cost uses a softplus SDF wall barrier.
 
-Control
-    - fixed_speed:           u = [omega]        -> control_dim = 1
-      canonical 1-D-control Dubins, for paper-parity ablations.
-
-Continuous dynamics (smooth, polynomial in state, bilinear in control):
-    px_dot = v * c
-    py_dot = v * s
-    c_dot  = -s * omega
-    s_dot  =  c * omega
-
-Discretization: RK4 then renormalize (c, s) onto S^1. Smooth everywhere; the
-adjoint (TSMC Theorem 2) gets well-conditioned A_t = df/dx, B_t = df/du.
-
-Why three smoothness fronts are handled here (so HMC gradients stay informative):
-    1. dynamics f       -> smooth by construction (no branches, no v/omega
-                            singularity since we use RK4, not the closed-form arc)
-    2. actuator limits  -> tanh clamp (clamp_control), not hard jnp.clip
-    3. cost             -> goal term + softplus SDF wall barrier (see _wall_penalty)
-
-The goal lives in the cost weights as *settable fields* (gx, gy, optional
-g_theta), so a skill graph can rewrite the goal per leg without touching this
-class. Use `set_goal(...)`.
+The goal lives in the cost weights as settable fields, so a skill graph can
+rewrite it per leg via set_goal() without touching this class.
 """
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -92,18 +75,13 @@ class DubinsCarSystem(DynamicalSystem):
     # Control handling
     # ------------------------------------------------------------------ #
     def _unpack_control(self, u: jnp.ndarray):
-        """Map the MLP-head output to PHYSICAL (v, omega).
+        """Map the MLP-head output to physical (v, omega).
 
-        The head emits u_max*tanh(.) per dim with u_max = omega_max, so each
-        component is already in (-omega_max, omega_max). This is the one
-        chokepoint shared by dynamics + stage_cost, so remapping here makes the
-        policy rollout (which calls step/stage_cost without a separate
-        clamp) receive physical controls.
-
-          fixed_speed: u = [omega] in (-omega_max, omega_max)  -> (v0, omega)   [identity]
-        
-        NOTE: assumes u is the *un-clamped* head output (true on the policy
-        path). Don't also call clamp_control before step on this path.
+        The head emits u_max*tanh(.) with u_max = omega_max, so components arrive
+        already in range. This is the one chokepoint shared by dynamics and
+        stage_cost, so the policy rollout gets physical controls without its own
+        clamp -- which means `u` here must be UN-clamped. Don't also call
+        clamp_control before step on this path.
         """
         P = self._params
         return P.v0, u[0]

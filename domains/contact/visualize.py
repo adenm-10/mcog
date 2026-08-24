@@ -14,7 +14,7 @@ this module uploads anything anywhere -- no wandb import at all.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Sequence, Tuple
 
 import numpy as np
 

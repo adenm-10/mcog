@@ -29,6 +29,11 @@ wandb_run_name: null
 wandb_group: null          # null -> old behavior (out_dir's basename); set explicitly
                             # to group many sweep runs under one wandb "group" banner
 use_her: true              # false -> plain SAC replay buffer, no goal relabeling
+target_clip: null          # clamp the critic's TD target to [0, this]. null -> stock
+                           # SAC. With a one-shot terminal bonus and every other
+                           # reward weight zeroed, Q* <= goal_reward exactly, so
+                           # target_clip=${goal_reward} is a provable bound, not a
+                           # tuning knob -- see domains/contact/sac_clipped.py.
 her_n_sampled_goal: 4      # HerReplayBuffer's relabels-per-real-transition (SB3 default 4)
 
 # --- env / arrival ---
@@ -72,6 +77,13 @@ disengaged_reach_mult: 2.0
 same_room_goal_prob: 0.0  # push only -- goal drawn from the source room instead
                           # of an adjacent one with this probability (0.0 = old
                           # behavior, always cross-room)
+push_cone_deg: null       # push only -- half-angle (deg) of the cone around the
+                          # contacted face's own push direction that the goal is
+                          # drawn from, so face and goal are consistent and one
+                          # push can reach the goal (memo Eq 7/12). null keeps the
+                          # historical sampler, whose face exclusion misjudges
+                          # "nearest the goal" and puts the finger on the goal side
+                          # in 40-57% of resets -- kept as a faithful control.
 restrict_contact_actions: false  # push only -- clamp the active finger's
                           # outward-normal velocity to the object's own when
                           # it would otherwise open the contact gap
@@ -85,10 +97,17 @@ eps_omega_deg_s: null
 # false: episodes run the full horizon past a guard violation instead of
 # ending early (the "bail early, cheap" exit).
 guard_terminates: true
-# A relabeled goal must be this far (cm) from the episode's own start
-# before HER grants credit -- null disables. Needs copy_info_dict=True
-# (wired automatically in train_contact.py).
+# A relabeled goal must be this far (cm) from the object's position right
+# BEFORE the transition being relabeled (per-pair, not per-episode) before HER
+# grants credit -- null disables. Needs copy_info_dict=True (wired
+# automatically in train_contact.py). Must stay strictly below arrival_eps or
+# the gate goes near-silent -- see status.md's gotcha.
 min_progress_cm: null
+# Preferred over min_progress_cm: a HER-relabeled goal must be drawn at least
+# this many ticks ahead of the transition being relabeled -- null disables.
+# Invariant to object speed, so unlike the cm version it cannot alias with
+# arrival_eps. Push only (needs her_buffer.py's lag capture).
+min_progress_ticks: null
 # Push only -- true requires the object to be settled (low velocity, not
 # just close) for reached_interface/is_success/termination/reward, matching
 # push_arrival's own definition. false uses reached_position instead (pure

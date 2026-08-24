@@ -1,14 +1,9 @@
 # option_graph/callbacks.py
-"""SB3 callbacks that only READ state and record scalars — no effect on training.
+"""SB3 callbacks that only READ state and record scalars -- no effect on training.
 
-Only the pieces with no domain knowledge live here (option_graph/ stays free
-of any specific env's internals — see this package's layering rule). The
-per-domain held-out eval callback that used to live here moved out this
-session, since it reached directly into DubinsMazeEnv internals and could
-never have run against a contact env: domains/nav/callbacks.py's
-PeriodicEvalCallback (geodesic-binned) and domains/contact/callbacks.py's
-ContactPeriodicEvalCallback (distance-binned, works for any contact
-template/simulator) are its two homes now.
+Only domain-agnostic pieces live here, per option_graph/'s layering rule; the
+held-out eval callbacks live in domains/nav/callbacks.py (geodesic-binned) and
+domains/contact/callbacks.py (distance-binned).
 
 TrainMetricsCallback : per-episode success / tta / collision, from the info dict.
 attach_csv_logger    : routes ALL of SB3's train/* + time/fps into train/progress.csv,
@@ -34,39 +29,20 @@ METRIC_DOCS = {
 
 
 class WandbOutputFormat(KVWriter):
-    """Mirrors every key SB3's Logger.record() collects (this file's rollout/*
-    and eval/* plus SB3's own train/*, time/*) into one wandb run. No-op by
-    construction when run is None, so attach_csv_logger can always pass one
-    through without an if/else at every call site.
+    """Mirrors every key Logger.record() collects into one wandb run. A no-op
+    when run is None, so callers never need an if/else.
 
-    MUST subclass KVWriter: Logger.dump() only calls .write() on output
-    formats that pass `isinstance(_format, KVWriter)` -- a plain class with
-    the right methods but the wrong base class is silently skipped every
-    single dump, with no error and no warning. This is exactly what
-    happened before this fix: push_run3/recontact_run3 both produced a full
-    progress.csv (routed through the CSV writer, which does inherit
-    KVWriter) but never sent a single custom metric to wandb (confirmed:
-    their wandb-summary.json contained nothing but the run's wall-clock
-    runtime) -- silent for the whole run, no crash, nothing to notice
-    short of checking wandb-summary.json directly.
+    MUST subclass KVWriter. Logger.dump() only calls .write() on formats
+    passing `isinstance(_format, KVWriter)`, so a class with the right methods
+    and the wrong base is skipped on every dump -- no error, no warning, and a
+    full progress.csv the whole time (the CSV writer does inherit it).
 
-    `prefix` (default "", unchanged behavior for existing callers like
-    train.py) is prepended to every key -- see attach_csv_logger's
-    docstring for why.
-
-    When `prefix` is set, this does NOT use wandb's implicit per-run step
-    (passing `step=` to run.log()) -- confirmed by hand that it silently
-    drops data otherwise: wandb enforces ONE monotonically-increasing step
-    counter for the whole run, shared across every process writing to it,
-    so whichever of two independently-stepping processes (push vs
-    recontact, not in lockstep) falls behind the other's step count at any
-    given moment has its own data discarded ("Tried to log to step N that
-    is less than the current step M... this data will be ignored"), not
-    just misplotted. Fix (wandb's own documented answer to this, linked
-    from that exact warning): give this prefix's keys their OWN step field
-    (f"{prefix}_step") via define_metric, so each training run gets an
-    independent x-axis instead of fighting over the run's one implicit
-    counter."""
+    When `prefix` is set, this must NOT pass `step=` to run.log(). wandb
+    enforces one monotonic step counter per run, shared across every process
+    writing to it, so of two independently-stepping processes whichever falls
+    behind has its data DISCARDED, not misplotted. Instead each prefix gets its
+    own step field via define_metric, and so its own x-axis.
+    """
 
     def __init__(self, run, prefix: str = ""):
         self.run = run

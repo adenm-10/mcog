@@ -18,8 +18,10 @@ from omegaconf import DictConfig, OmegaConf
 def _make_env(template, seed, horizon, arrival_eps, params, weights,
               wall_margin_cm, disengaged_reach_mult,
               eps_v_cm_s=None, eps_omega_deg_s=None,
-              guard_terminates=True, min_progress_cm=None, require_settled=True,
-              same_room_goal_prob=0.0, restrict_contact_actions=False):
+              guard_terminates=True, min_progress_cm=None,
+              min_progress_ticks=None, require_settled=True,
+              same_room_goal_prob=0.0, push_cone_deg=None,
+              restrict_contact_actions=False):
     def _init():
         from stable_baselines3.common.monitor import Monitor
         from domains.contact.gym_env import ContactEnv
@@ -30,8 +32,10 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          eps_v_cm_s=eps_v_cm_s, eps_omega_deg_s=eps_omega_deg_s,
                          guard_terminates=guard_terminates,
                          min_progress_cm=min_progress_cm,
+                         min_progress_ticks=min_progress_ticks,
                          require_settled=require_settled,
                          same_room_goal_prob=same_room_goal_prob,
+                         push_cone_deg=push_cone_deg,
                          restrict_contact_actions=restrict_contact_actions)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
@@ -72,12 +76,13 @@ def main(cfg: DictConfig) -> None:
         "logs", "contact", template, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(out_dir, exist_ok=True)
 
-    from stable_baselines3 import SAC, HerReplayBuffer
     from stable_baselines3.common.callbacks import CallbackList
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     from domains.contact.callbacks import ContactPeriodicEvalCallback
-    from domains.contact.her_buffer import PushRelabelSafeHerReplayBuffer
+    from domains.contact.her_buffer import (DonePatchedHerReplayBuffer,
+                                            PushRelabelSafeHerReplayBuffer)
+    from domains.contact.sac_clipped import TargetClippedSAC
     from option_graph.callbacks import TrainMetricsCallback, attach_csv_logger
 
     env_kwargs = dict(horizon=d["horizon"], arrival_eps=d["arrival_eps"],
@@ -87,8 +92,10 @@ def main(cfg: DictConfig) -> None:
                       eps_v_cm_s=d["eps_v_cm_s"], eps_omega_deg_s=d["eps_omega_deg_s"],
                       guard_terminates=d["guard_terminates"],
                       min_progress_cm=d["min_progress_cm"],
+                      min_progress_ticks=d["min_progress_ticks"],
                       require_settled=d["require_settled"],
                       same_room_goal_prob=d["same_room_goal_prob"],
+                      push_cone_deg=d["push_cone_deg"],
                       restrict_contact_actions=d["restrict_contact_actions"])
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
@@ -98,14 +105,18 @@ def main(cfg: DictConfig) -> None:
                        else d["horizon"] + 50)
 
     # copy_info_dict lets a relabeled compute_reward call see the original
-    # transition's info (its "start_achieved_goal", and for recontact its
-    # "obj_settled"/"object_disturbed") -- only pay SB3's copy-slowdown cost
-    # when one of those actually needs it.
-    copy_info_dict = d["min_progress_cm"] is not None or template == "recontact"
-    # Push's observation bakes in a target-relative feature that goes stale
-    # on HER's relabel (her_buffer.py); recontact's goal is already
-    # object-frame and doesn't need this.
-    her_buffer_cls = PushRelabelSafeHerReplayBuffer if template == "push" else HerReplayBuffer
+    # transition's info (its "pre_achieved_goal"/"her_lag_ticks", and for
+    # recontact its "obj_settled"/"object_disturbed") -- only pay SB3's
+    # copy-slowdown cost when one of those actually needs it.
+    copy_info_dict = (d["min_progress_cm"] is not None
+                      or d["min_progress_ticks"] is not None
+                      or template == "recontact")
+    # Both templates need the done-flag patch (v19 push, v20 recontact). Push
+    # additionally needs its observation's stale target slice repaired and the
+    # relabel tick lag forwarded; recontact's goal is object-frame, so neither
+    # applies there.
+    her_buffer_cls = (PushRelabelSafeHerReplayBuffer if template == "push"
+                      else DonePatchedHerReplayBuffer)
     her_buffer_extra = (dict(pos_scale=max(d["board_w_cm"], d["board_h_cm"]))
                         if template == "push" else {})
     her_kwargs = (dict(replay_buffer_class=her_buffer_cls,
@@ -114,8 +125,12 @@ def main(cfg: DictConfig) -> None:
                                                  copy_info_dict=copy_info_dict,
                                                  **her_buffer_extra))
                  if d["use_her"] else {})
-    model = SAC("MultiInputPolicy", train_env, learning_starts=learning_starts,
-               verbose=1, seed=d["seed"], **her_kwargs)
+    # target_clip=None reproduces stock SAC exactly; see sac_clipped.py for why
+    # goal_reward (not goal_reward/(1-gamma)) is the tight bound here.
+    model = TargetClippedSAC("MultiInputPolicy", train_env,
+                            learning_starts=learning_starts, verbose=1,
+                            seed=d["seed"], target_clip=d["target_clip"],
+                            **her_kwargs)
 
     run = None
     if d["wandb"]:

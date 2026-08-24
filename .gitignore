@@ -28,3 +28,4 @@ media/*
 status.md
 .claude/settings.local.json
 CLAUDE.local.md
+.cleanup-backup/

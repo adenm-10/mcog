@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
-"""Frozen-weight eval reproduction: the per-commit regression gate for Phase B.
-
-Install as `tests/fixture_eval.py`.
-
-DURABLE BY DESIGN. test_code.py is disposable and overwritten between phases;
-this file must survive it, because it is the only tol=0 check in the repo and it
-is the gate every Phase B commit is measured against.
+"""Frozen-weight eval reproduction: the repo's only tol=0 regression gate, and
+DURABLE BY DESIGN -- test_code.py is disposable and overwritten between phases,
+this file must survive it.
 
     python -m tests.fixture_eval freeze [tests/fixtures]   # write expected.json
     python -m tests.fixture_eval fixtures [tests/fixtures] # assert against it
-    python test_code.py fixtures                           # same, via dispatcher
 
-Loads checkpoints frozen at a fixed budget, re-runs composition / monolith eval
-and the per-region eval with NO training, and asserts EXACT equality against
-tests/fixtures/expected.json.
+Loads checkpoints frozen at a fixed budget, re-runs composition/monolith and
+per-region eval with NO training, and asserts EXACT equality against
+expected.json.
 
-Why tol=0 is legitimate here
-----------------------------
-Training is not bit-reproducible (cuDNN, SubprocVecEnv). Eval given fixed weights
-is, provided all five of these hold -- this module enforces the ones it can:
-  * predict(deterministic=True) is argmax / tanh(mu), a pure function of weights
-  * models load with device="cpu", so the forward pass is host arithmetic and is
-    identical across login nodes, compute nodes, and GPU generations
-  * torch.set_num_threads(1), so GEMM blocking and therefore reduction ORDER is
-    fixed. Without this a 32-core node and a 4-core node disagree in the last
-    bits of tanh(mu), and one episode flips at the arrival boundary for a
-    1/32 = 0.03125 jump in success_rate.
-  * sample_eval_pairs is a seeded np.random.RandomState; physics is numpy plus
-    jitted JAX on CPU; _resolve_collision is deterministic
-  * output_dir=None, so no matplotlib runs
+tol=0 is legitimate because although TRAINING is not bit-reproducible (cuDNN,
+SubprocVecEnv), eval on fixed weights is, given five conditions this module
+enforces where it can: predict(deterministic=True) is a pure function of
+weights; models load on CPU, so the forward pass is host arithmetic identical
+across nodes and GPU generations; torch.set_num_threads(1) fixes GEMM blocking
+and therefore reduction ORDER, without which a 32-core and a 4-core node
+disagree in tanh(mu)'s last bits and one episode flipping at the arrival
+boundary moves success_rate by 1/32; sampling and physics are seeded and
+deterministic; and output_dir=None keeps matplotlib out.
 
-If a legitimate float-ordering difference ever appears, set FIXTURE_TOL=1e-12 in
-the environment. Never widen it to a band -- that is what `accept` is for.
+If a legitimate float-ordering difference ever appears, set FIXTURE_TOL=1e-12.
+Never widen it to a band -- that is what `accept` is for.
 """
 from __future__ import annotations
 
@@ -249,13 +239,11 @@ def run_arm(fixture_dir: str, mode: str, config_dir: str = "config"):
 def _a3_report(cfg: dict, summary: dict, n_labels: int) -> None:
     """Print eval_env_steps against BOTH candidate bounds.
 
-    PeriodicEvalCallback either counts on model.num_timesteps (which advances by
-    n_envs per _on_step) or on self.n_calls (which advances by 1). The two differ
-    by n_envs = 8, so the sec 8.3 assertion is 8x apart depending on which. Whichever
-    bound holds identifies the clock; encode THAT one in cmd_accept.
-
-    Not a gate here: eval_env_steps is a training-time artifact, so it is
-    provenance for a frozen checkpoint set, not something a reload reproduces.
+    PeriodicEvalCallback counts either model.num_timesteps (advancing by n_envs
+    per _on_step) or self.n_calls (advancing by 1), which differ by n_envs = 8.
+    Whichever bound holds identifies the clock; encode THAT one in cmd_accept.
+    Not a gate: eval_env_steps is a training-time artifact, so it is provenance
+    for a frozen checkpoint set, not something a reload reproduces.
     """
     ev = summary.get("eval_env_steps")
     n_envs = int(cfg.get("n_envs", 1))

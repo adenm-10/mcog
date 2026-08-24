@@ -1,14 +1,11 @@
 # domains/contact/board.py
-"""Region/edge geometry derived from a board's portal list. Pure geometry --
-no pymunk, no matplotlib. Reads domains.contact.planar_fingertips.Portal,
-the same objects the physics layer builds its walls from, rather than
-duplicating wall positions in a second place that could drift out of sync.
+"""Region/edge geometry derived from a board's portal list. Pure geometry, and
+it reads the same Portal objects the physics layer builds walls from rather
+than duplicating wall positions somewhere they could drift.
 
-Regions are contiguous x-ranges, left to right, numbered 0..N-1. With zero
-portals this is one region and resolve_target refuses any edge -- not a
-special case, just what the general logic below does when there's nothing to
-cross. That's the same placeholder behaviour domains/contact/hooks.py had
-before this module existed.
+Regions are contiguous x-ranges, left to right, 0..N-1. Zero portals gives one
+region and resolve_target refuses every edge -- not a special case, just what
+the general logic does with nothing to cross.
 """
 
 from __future__ import annotations
@@ -20,11 +17,9 @@ from domains.contact.planar_fingertips import Portal
 Node = int
 Point = Tuple[float, float]
 
-# How far past a portal's line the push target sits, inside the destination
-# room. score_arrival's crossing test (domains/contact_templates.py) only
-# needs the object's edge over the line; landing the *target point* strictly
-# past it (not exactly on it) means a hair of numerical noise can't put the
-# option's terminal state back on the wrong side of the boundary.
+# How far past the portal's line the target sits, inside the destination room.
+# Strictly past, not on it, so numerical noise cannot land the terminal state
+# back on the wrong side.
 THROUGH_MARGIN_CM = 3.0
 
 
@@ -64,11 +59,10 @@ class Board:
 
     def resolve_target(self, src: Node, dst: Node, x
                        ) -> Tuple[Point, Portal, Optional[str]]:
-        """(target_point, portal, direction) -- direction here names the
-        active finger (domains/contact_templates.py's convention), not a
-        crossing direction. Hardcoded to "L": this corridor only ever pushes
-        rightward with the left fingertip. A board with pushes in more than
-        one direction needs real per-edge logic here, not a constant.
+        """(target_point, portal, direction), where direction names the active
+        finger, not a crossing direction. Hardcoded "L" because this corridor
+        only pushes rightward; a multi-direction board needs real per-edge
+        logic here, not a constant.
         """
         portal = self.portal_between(src, dst)
         sign = 1.0 if dst > src else -1.0

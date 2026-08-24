@@ -1,18 +1,11 @@
 # domains/contact/physics.py
-"""Physics wrapper for the planar-fingertip contact domain, matching the
-obs()/step()/control_dim contract domains/nav/physics.py established for nav
-(see that file's docstring: the executor only ever calls those three names).
+"""Physics wrapper for the planar-fingertip domain, matching the
+obs()/step()/control_dim contract nav's physics.py established.
 
 The World underneath is a stateful PyMunk Space, unlike nav's pure-function
-DubinsCarSystem -- step() makes that invisible to the caller by writing x in,
-stepping, and reading x back out. See planar_fingertips.py's module docstring
-for why.
-
-domains.contact.planar_fingertips (and therefore pymunk) is the only import
-this module makes into the physics layer -- nothing under option_graph/ or
-tests/ may import this file at module scope; new callers should import it
-lazily inside a function body, mirroring how nav_hooks() imports
-domains.nav.physics.
+DubinsCarSystem; step() hides that by writing x in, stepping, and reading it
+back out. This module pulls in pymunk, so nothing under option_graph/ or tests/
+may import it at module scope -- import it inside a function body instead.
 """
 
 from __future__ import annotations
@@ -34,10 +27,9 @@ CONTROL_DIM = 4  # (vLx, vLy, vRx, vRy), each in [-1, 1]
 
 
 def to_snapshot(x, params: PlanarFingertipParams) -> Snapshot:
-    """The one place that knows both the planar-fingertip state layout and
-    the generic Snapshot contract -- visualize.py never needs to know either
-    side of this mapping. Swapping the underlying sim later means writing a
-    new function like this one, not touching visualize.py."""
+    """The one place that knows both the state layout and the generic Snapshot
+    contract, so swapping the sim means a new function here, not in
+    visualize.py."""
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     angle = math.atan2(float(x[3]), float(x[2]))
     fingers = {side: (float(x[sl][0]), float(x[sl][1]))
@@ -52,9 +44,8 @@ def to_snapshot(x, params: PlanarFingertipParams) -> Snapshot:
 
 
 class Physics:
-    """One World, driven a policy tick at a time. Call reset() between
-    episodes -- see PlanarFingertipWorld.reset()'s docstring for why a hard
-    rebuild, not a reposition, is the right episode boundary here."""
+    """One World, driven a policy tick at a time. reset() hard-rebuilds it
+    between episodes rather than repositioning; see PlanarFingertipWorld."""
 
     def __init__(self, params: PlanarFingertipParams | None = None):
         self.params = params or PlanarFingertipParams()
@@ -67,23 +58,14 @@ class Physics:
         return self.world.read_state()
 
     def obs(self, x, target) -> np.ndarray:
-        """Object-centric observation (memo sec 4.2): every position is
-        expressed relative to the object, and the object's own absolute
-        board position is dropped entirely. This is what lets one shared
-        push policy see near-identical inputs for "push through the door at
-        x=30" and "push through the door at x=60" instead of overfitting to
-        one edge's board coordinates -- the whole point of training a
-        template-shared policy rather than one network per edge.
+        """Object-centric: every position is relative to the object and the
+        object's absolute board position is dropped, so one shared policy sees
+        near-identical inputs for the door at x=30 and the door at x=60.
 
-        Positions are scaled by the board's own extent and velocities by
-        v_max so the network doesn't see a mix of ~[-1,1] and ~[-90,90]
-        inputs (heading/contact are already unit-scale; omega has no
-        analogous reference constant, left as-is).
-
-        no_contact_steps/peak_force are dropped: guard_ok/score_arrival read
-        them from the raw physics state directly (never from this vector),
-        so a policy never needs them, and no_contact_steps in particular is
-        an unbounded tick counter with no upper reference scale.
+        Positions are scaled by board extent and velocities by v_max, to avoid
+        mixing ~[-1,1] and ~[-90,90] inputs. no_contact_steps/peak_force are
+        omitted: guards read those from the raw state, and no_contact_steps is an
+        unbounded counter with no reference scale.
         """
         x = np.asarray(x, dtype=np.float32).reshape(-1)
         obj_xy = x[IDX_OBJ_XY]
@@ -102,8 +84,7 @@ class Physics:
         ]).astype(np.float32)
 
     def step(self, x, action) -> Tuple[np.ndarray, np.ndarray]:
-        """One policy tick: next state and the physical (unnormalized)
-        fingertip velocities actually applied."""
+        """Next state, plus the unnormalized fingertip velocities applied."""
         a = np.clip(np.asarray(action, np.float32).reshape(-1), -1.0, 1.0)
         u_phys = (self.v_max * a).astype(np.float32)
         self.world.write_state(x)

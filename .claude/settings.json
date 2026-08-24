@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(pytest)",
+      "Bash(pytest *)",
+      "Bash(python -m *)",
+      "Bash(ruff *)",
+      "Edit(option_graph/**)",
+      "Edit(domains/**)",
+      "Edit(tests/**)"
+    ],
+    "deny": [
+      "Bash(wandb sync *)",
+      "Edit(docs/prereg_stage0.md)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "F=$(jq -r '.tool_input.file_path // empty'); [ \"${F##*.}\" = py ] && ruff format \"$F\" >/dev/null 2>&1; true"
+          }
+        ]
+      }
+    ]
+  }
+}

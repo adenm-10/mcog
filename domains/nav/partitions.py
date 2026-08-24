@@ -1,28 +1,24 @@
 # domains/nav/partitions.py
 """Partition CHOICE: which cells belong to which abstract node.
 
-geometry.py answers questions with one right answer given a partition; this
-module makes the partition. Keeping them apart lets the aligned and misaligned H4
-arms differ by one config key.
+geometry.py answers questions given a partition; this module makes the
+partition. Keeping them apart lets the aligned and misaligned H4 arms differ by
+one config key.
 
-Why a region must be roughly convex: a region is one policy's domain, so it
-should be a set within which the task is a SINGLE REACH. An interior wall forces
-the local policy to solve a mini-maze, reintroducing the horizon problem the
-decomposition exists to remove. nine_rooms rooms are 5x5 open squares, which is
-much of why the July per-region rates were 1.0.
+A region must be roughly convex, because a region is one policy's domain and so
+should be a set within which the task is a SINGLE REACH. An interior wall makes
+the local policy solve a mini-maze, reintroducing the horizon problem the
+decomposition exists to remove; interior_wall_cells measures that directly.
+This is also the bridge to manipulation: a wall is to navigation what a
+contact-mode boundary is to manipulation, so "room-aligned" and
+"contact-aligned" are the same claim.
 
-That is also the bridge to manipulation. A wall is to navigation what a
-contact-mode boundary is to manipulation, so "room-aligned" and "contact-aligned"
-are the same claim and H4 is the navigation instance of the central hypothesis.
-interior_wall_cells measures the mechanism directly.
+Scope is ASCII blocks only. The H4 tile generator is deliberately absent until
+the switch test is rect-gated, since a half-plane over an open-floor boundary
+produces meaningless premature switches.
 
-Scope: ASCII blocks only. The H4 tile generator is deliberately absent until the
-switch test is rect-gated (geometry.Interface.crossed with gate="rect"), because
-a half-plane over an open-floor boundary produces meaningless premature switches.
-
-Labels: ASCII uses '1'..'9' then 'A'..'Z' but always decodes to INTS, since
-config (`between: [1, 2]`), per-region output dirs, and bundle.labels assume
-ints. The digit-9 ceiling was a parser accident; giant already uses eight.
+Labels are written '1'..'9' then 'A'..'Z' but always decode to INTS, which
+config, per-region output dirs, and bundle.labels all assume.
 """
 
 from __future__ import annotations
@@ -61,13 +57,7 @@ def label_to_char(label: int) -> str:
 def parse_ascii(maze: Maze, label_rows: Sequence[str]) -> Dict[Cell, int]:
     """ASCII block -> {(ix,iy): label}. Rows top-to-bottom, flipped so world y
     increases upward, matching maze._grid_from_ascii so a partition block diffs
-    line-for-line against its `walls` block.
-
-    Replaces build_cell_region_table. label_rows is now required: the old  [legacy-ref]
-    _LABELS_BY_MAZE fallback was dead on the SB3 path and its four_rooms block was
-    11 rows against a 13-row maze, so reaching it raised what looked like a maze
-    bug.
-    """
+    line-for-line against its `walls` block."""
     rows = [r for r in label_rows if r.strip()]
     if not rows:
         raise ValueError("empty partition block")

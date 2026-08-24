@@ -1,9 +1,8 @@
-# systems/base.py
+# domains/nav/base.py
 """Base class for dynamical systems."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Dict, Any, Optional
 import jax.numpy as jnp
 
 class DynamicalSystem(ABC):

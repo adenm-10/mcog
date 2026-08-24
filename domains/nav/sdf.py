@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
 import numpy as np
 import jax.numpy as jnp
@@ -36,7 +35,7 @@ def build_sdf(wall_grid: np.ndarray,
         sdf: (H, W) jnp.float32 array, signed distance in world units, sampled
              at cell centers.
     """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
+    from scipy.ndimage import distance_transform_edt
 
     wall = np.asarray(wall_grid, dtype=bool)
     free = ~wall

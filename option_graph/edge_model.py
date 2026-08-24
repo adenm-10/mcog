@@ -15,7 +15,7 @@ import json
 import math
 import os
 from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, Hashable, List, Optional, Sequence,
+from typing import (Any, Dict, Hashable, List, Optional, Sequence,
                     Tuple)
 
 import numpy as np
