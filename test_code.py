@@ -387,6 +387,11 @@ def cmd_contact() -> None:
           "a +x-face finger on a 30deg object gets the rotated normal",
           f"got ({n[0]:+.4f},{n[1]:+.4f})")
 
+    section("default interface is untouched by the contact_frame plumbing")
+    base = _scripted_states(_contact_env(), 40, [0.6, -0.3, 0.0, 0.0])
+    again = _scripted_states(_contact_env(), 40, [0.6, -0.3, 0.0, 0.0])
+    check(base == again, "finger_velocity is deterministic across two envs")
+
     section("_restrict_push_action is bit-identical after the face_frame refactor")
     from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                    IDX_OBJ_VEL, IDX_OBJ_XY)
@@ -434,6 +439,64 @@ def cmd_contact() -> None:
           f"{mismatch} mismatch(es)")
     check(fired > 100, "and the clamp actually fired on most of them",
           f"fired on {fired}/400 (a low count would make the test vacuous)")
+
+    section("contact_frame constraints hold every substep")
+    env = _contact_env(action_interface="contact_frame", slip_limit=0.5)
+    obs, _ = env.reset(seed=4242)
+    v_max, worst_t, worst_gap = env.params.v_max_cm_s, 0.0, -1e9
+    for _ in range(60):
+        env.step(np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32))
+        x, side = env._x, env._active_finger
+        from domains.contact.planar_fingertips import (IDX_FINGER_VEL, IDX_FINGER_XY,
+                                                       IDX_OBJ_HEADING, IDX_OBJ_VEL,
+                                                       IDX_OBJ_XY)
+        theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
+        n, t = face_frame(x[IDX_OBJ_XY], theta, x[IDX_FINGER_XY[side]],
+                          env.params.object_w_cm, env.params.object_h_cm)
+        v = x[IDX_FINGER_VEL[side]]
+        worst_t = max(worst_t, abs(float(np.dot(v, t))))
+        worst_gap = max(worst_gap, float(np.dot(v, n)) - float(np.dot(x[IDX_OBJ_VEL], n)))
+    # Realized velocities, not commands: the servo is a P controller, so the
+    # body tracks the command with lag rather than matching it exactly.
+    check(worst_t <= 0.5 * v_max + 1.0, "tangential speed respects slip_limit",
+          f"worst |v.t| = {worst_t:.3f} vs ceiling {0.5 * v_max:.1f}")
+    check(worst_gap < v_max, "no runaway gap-opening under a max slide command",
+          f"worst (v-v_obj).n = {worst_gap:+.3f}")
+
+    section("contact_frame moves the object further than the raw interface")
+    def _displacement(**kw):
+        e = _contact_env(**kw)
+        o, _ = e.reset(seed=4242)
+        ag0 = np.asarray(o["achieved_goal"], dtype=float).copy()
+        for _ in range(60):
+            o, _r, term, trunc, _i = e.step(np.array([1.0, 0.0, 0.0, 0.0], np.float32))
+            if term or trunc:
+                break
+        ag = np.asarray(o["achieved_goal"], dtype=float)
+        return float(np.hypot(ag[0] - ag0[0], ag[1] - ag0[1]))
+    raw = _displacement()
+    cf = _displacement(action_interface="contact_frame", slip_limit=0.5)
+    check(cf > raw, "a scripted straight push travels further under contact_frame",
+          f"{cf:.2f}cm vs {raw:.2f}cm")
+
+    section("misconfiguration raises rather than being ignored")
+    for kw, why in (
+            (dict(action_interface="nonsense"), "unknown interface"),
+            (dict(action_interface="contact_frame", restrict_contact_actions=True),
+             "contact_frame + restrict_contact_actions"),
+    ):
+        try:
+            _contact_env(**kw)
+            check(False, f"{why} raises")
+        except ValueError:
+            check(True, f"{why} raises")
+    try:
+        from domains.contact.gym_env import ContactEnv
+        ContactEnv(template="recontact", action_interface="contact_frame")
+        check(False, "contact_frame on recontact raises")
+    except ValueError:
+        check(True, "contact_frame on recontact raises")
+
 
 def main() -> int:
     if len(sys.argv) < 2:

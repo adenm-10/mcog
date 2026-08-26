@@ -26,7 +26,7 @@ from domains.contact.board import Board
 from domains.contact.physics import Physics
 from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
-                                               IDX_PEAK_FORCE,
+                                               IDX_PEAK_FORCE, ContactFrameCommand,
                                                PlanarFingertipParams, Portal,
                                                face_frame)
 from domains.contact.reward import RewardWeights, arrived_loose, goal_dist, step_reward
@@ -37,6 +37,7 @@ OBS_DIM = 17             # Physics.obs()'s fixed shape (object-centric state + r
 _WALL_MARGIN_CM = 6.0    # > the object's half-diagonal (~5.8cm) plus a margin
 _OBS_BOUND = 500.0       # generous, non-tight Box bound; SAC does not clip against it
 _DISENGAGED_REACH_MULT = 2.0  # upper end of the disengaged-finger sampling range
+_ACTION_INTERFACES = ("finger_velocity", "contact_frame")
 
 
 def _default_params(template: str) -> PlanarFingertipParams:
@@ -74,7 +75,9 @@ class ContactEnv(gym.Env):
                 require_settled: bool = True,
                 same_room_goal_prob: float = 0.0,
                 push_cone_deg: Optional[float] = None,
-                restrict_contact_actions: bool = False):
+                restrict_contact_actions: bool = False,
+                action_interface: str = "finger_velocity",
+                slip_limit: float = 0.5):
         super().__init__()
         if template not in TEMPLATES:
             raise ValueError(f"template must be one of {sorted(TEMPLATES)}, got {template!r}")
@@ -123,6 +126,26 @@ class ContactEnv(gym.Env):
         # push's dominant failure mode, contact_lost -- with one circle on one
         # flat face, most of the raw action space breaks contact immediately.
         self.restrict_contact_actions = bool(restrict_contact_actions)
+        # Push only: "contact_frame" reinterprets the active finger's two action
+        # components as (push along the inward face normal, slide along its
+        # tangent) and re-derives them every physics substep, so a 25Hz command
+        # cannot slide the finger 0.8cm across a face before anything reacts.
+        # Errors rather than ignoring: a silently-dropped sweep variable already
+        # cost this project 8 wasted cells (docs/PROGRESS.md, v16).
+        if action_interface not in _ACTION_INTERFACES:
+            raise ValueError(f"action_interface must be one of "
+                             f"{sorted(_ACTION_INTERFACES)}, got {action_interface!r}")
+        if action_interface == "contact_frame":
+            if template != "push":
+                raise ValueError("action_interface='contact_frame' is push-only; "
+                                 "recontact is free-space motion to a NEW face, so "
+                                 "there is no contact to maintain")
+            if restrict_contact_actions:
+                raise ValueError("action_interface='contact_frame' already enforces the "
+                                 "no-gap-opening rule per substep; "
+                                 "restrict_contact_actions would re-apply it per tick")
+        self.action_interface = action_interface
+        self.slip_limit = float(slip_limit)
         self._rng = np.random.RandomState(seed)
         self._t = 0
         self._active_finger = "L"
@@ -491,6 +514,7 @@ class ContactEnv(gym.Env):
         # before physics.step overwrites self._x.
         pre_achieved = self._achieved_xy(self._x)
         a = np.clip(np.asarray(action, dtype=np.float32).reshape(-1), -1.0, 1.0)
+        cmd = None
         if self.template == "push":
             # Masked: the inactive finger has no task-relevant signal, and its
             # exploration noise alone can wander into forbidden_contact.
@@ -500,7 +524,16 @@ class ContactEnv(gym.Env):
             a[i:i + 2] = 0.0
             if self.restrict_contact_actions:
                 a = self._restrict_push_action(a)
-        x_next, u_phys = self._physics.step(self._x, a)
+            if self.action_interface == "contact_frame":
+                j = 0 if self._active_finger == "L" else 2
+                # Affine rather than a clip: a push option never commands
+                # retreat, and clipping would leave half the range a dead zone
+                # that SAC's entropy term has to fight.
+                cmd = ContactFrameCommand(side=self._active_finger,
+                                          push=0.5 * (float(a[j]) + 1.0),
+                                          slide=float(a[j + 1]),
+                                          slip_limit=self.slip_limit)
+        x_next, u_phys = self._physics.step(self._x, a, contact_frame=cmd)
 
         leg = SimpleNamespace(direction=self._active_finger)
         guard_outcome = self._tmpl.guard(x_next, frozenset(), 1.0, leg, params=self.params)

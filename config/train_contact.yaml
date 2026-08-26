@@ -87,6 +87,17 @@ push_cone_deg: null       # push only -- half-angle (deg) of the cone around the
 restrict_contact_actions: false  # push only -- clamp the active finger's
                           # outward-normal velocity to the object's own when
                           # it would otherwise open the contact gap
+action_interface: finger_velocity  # push only. finger_velocity = the historical
+                          # raw (vx,vy) per finger, held constant across a whole
+                          # policy tick. contact_frame = (push, slide) along the
+                          # contacted face's normal/tangent, re-derived every
+                          # physics substep so the finger cannot slide across a
+                          # face before anything reacts (memo Table 3's
+                          # "contact-aware control interface" ablation).
+slip_limit: 0.5           # contact_frame only -- tangential speed ceiling as a
+                          # fraction of v_max. Pick by measurement, not from
+                          # arctan(finger_friction): measured achieved deviation
+                          # reaches 65-78deg at p90 while contact holds.
 
 # --- settle thresholds (contact_templates.py) -- null -> module constants
 # (0.5cm/s, 5deg/s). Overridable so they're sweepable.

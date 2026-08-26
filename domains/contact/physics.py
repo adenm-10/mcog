@@ -83,10 +83,17 @@ class Physics:
             rel_target,
         ]).astype(np.float32)
 
-    def step(self, x, action) -> Tuple[np.ndarray, np.ndarray]:
-        """Next state, plus the unnormalized fingertip velocities applied."""
+    def step(self, x, action, *, contact_frame=None) -> Tuple[np.ndarray, np.ndarray]:
+        """Next state, plus the unnormalized fingertip velocities applied.
+
+        Under `contact_frame` the active finger's velocity is recomputed every
+        substep, so the returned `u_phys` is the scaled raw action, not the
+        applied Cartesian velocity. It feeds only the `w_a` action penalty,
+        which is 0.0 in every current config -- revisit if w_a is turned on.
+        """
         a = np.clip(np.asarray(action, np.float32).reshape(-1), -1.0, 1.0)
         u_phys = (self.v_max * a).astype(np.float32)
         self.world.write_state(x)
-        self.world.step((u_phys[0], u_phys[1]), (u_phys[2], u_phys[3]))
+        self.world.step((u_phys[0], u_phys[1]), (u_phys[2], u_phys[3]),
+                        contact_frame=contact_frame)
         return self.world.read_state(), u_phys

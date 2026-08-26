@@ -37,6 +37,16 @@ IDX_NO_CONTACT_STEPS = {"L": 17, "R": 18}
 IDX_PEAK_FORCE = {"L": 19, "R": 20}
 
 
+@dataclass(frozen=True)
+class ContactFrameCommand:
+    """One tick of the contact-frame push interface: speeds along the contacted
+    face's inward normal and its tangent, as fractions of v_max."""
+    side: str          # active finger, "L" or "R"
+    push: float        # [0, 1] along the INWARD face normal
+    slide: float       # [-1, 1], scaled by slip_limit
+    slip_limit: float  # tangential ceiling as a fraction of v_max
+
+
 def face_frame(obj_xy, obj_theta: float, finger_xy, object_w_cm: float,
                object_h_cm: float) -> Tuple[np.ndarray, np.ndarray]:
     """Outward unit normal of the object face nearest `finger_xy`, and that
@@ -293,8 +303,38 @@ class PlanarFingertipWorld:
             torque_mag = mu * body.mass * G_EFF_CM_S2 * self.params.angular_drag_arm_cm
             body.torque += -torque_mag if w > 0 else torque_mag
 
-    def step(self, v_cmd_L, v_cmd_R) -> None:
+    def _contact_frame_velocity(self, cmd: "ContactFrameCommand") -> Tuple[float, float]:
+        """The active finger's world velocity for ONE substep, from live poses.
+
+        Two soft constraints, both re-derived per substep so a 25 Hz command
+        cannot slide the finger across a face before anything reacts:
+          1. never open the contact gap faster than the object recedes;
+          2. bound tangential speed to `slip_limit` of v_max.
+        Contact can still be lost by walking off a face corner, so the
+        contact_lost guard stays a real failure mode.
+        """
+        body = self.fingers[cmd.side]
+        v_max = self.params.v_max_cm_s
+        n_out, tang = face_frame((self.obj.position.x, self.obj.position.y),
+                                 self.obj.angle, (body.position.x, body.position.y),
+                                 self.params.object_w_cm, self.params.object_h_cm)
+        v = -cmd.push * v_max * n_out + cmd.slide * cmd.slip_limit * v_max * tang
+        obj_n = float(np.dot((self.obj.velocity.x, self.obj.velocity.y), n_out))
+        cmd_n = float(np.dot(v, n_out))
+        if cmd_n > obj_n:
+            v = v + (obj_n - cmd_n) * n_out
+        speed = float(np.hypot(v[0], v[1]))
+        if speed > v_max:
+            v = v * (v_max / speed)
+        return float(v[0]), float(v[1])
+
+    def step(self, v_cmd_L, v_cmd_R, *,
+             contact_frame: Optional["ContactFrameCommand"] = None) -> None:
         """Advance one policy tick (params.substeps physics steps).
+
+        `contact_frame` recomputes that finger's command every substep from live
+        geometry; None leaves both commands constant across the tick, which is
+        the historical behavior.
 
         _no_contact_steps counts policy ticks, matching CONTACT_N_GRACE_STEPS's
         units. _peak_force resets at the start of the tick it describes, so a
@@ -303,6 +343,12 @@ class PlanarFingertipWorld:
         for side in ("L", "R"):
             self._peak_force[side] = 0.0
         for _ in range(self.params.substeps):
+            if contact_frame is not None:
+                v = self._contact_frame_velocity(contact_frame)
+                if contact_frame.side == "L":
+                    v_cmd_L = v
+                else:
+                    v_cmd_R = v
             self._apply_finger_servo(self.fingers["L"], v_cmd_L)
             self._apply_finger_servo(self.fingers["R"], v_cmd_R)
             self._apply_table_drag(self.obj)

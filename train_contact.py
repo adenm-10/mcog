@@ -21,7 +21,8 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               guard_terminates=True, min_progress_cm=None,
               min_progress_ticks=None, require_settled=True,
               same_room_goal_prob=0.0, push_cone_deg=None,
-              restrict_contact_actions=False):
+              restrict_contact_actions=False,
+              action_interface="finger_velocity", slip_limit=0.5):
     def _init():
         from stable_baselines3.common.monitor import Monitor
         from domains.contact.gym_env import ContactEnv
@@ -36,7 +37,9 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          require_settled=require_settled,
                          same_room_goal_prob=same_room_goal_prob,
                          push_cone_deg=push_cone_deg,
-                         restrict_contact_actions=restrict_contact_actions)
+                         restrict_contact_actions=restrict_contact_actions,
+                         action_interface=action_interface,
+                         slip_limit=slip_limit)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
         # fired and rollout/ep_rew_mean was silently never logged.
@@ -96,7 +99,9 @@ def main(cfg: DictConfig) -> None:
                       require_settled=d["require_settled"],
                       same_room_goal_prob=d["same_room_goal_prob"],
                       push_cone_deg=d["push_cone_deg"],
-                      restrict_contact_actions=d["restrict_contact_actions"])
+                      restrict_contact_actions=d["restrict_contact_actions"],
+                      action_interface=d["action_interface"],
+                      slip_limit=d["slip_limit"])
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
     eval_env = _make_env(template, d["seed"] + 10_000, **env_kwargs)()
