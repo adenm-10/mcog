@@ -825,3 +825,375 @@ Verified for both sweeps: all 24 cells' dispatch simulated, every distinct confi
 through real Hydra (confirming `push_cone_deg`/`target_clip` actually vary and that every
 `w_*` is 0.0 so both templates stay **fully sparse**), and all five distinct configs
 smoke-tested end-to-end through `train_contact.py`.
+
+**Committed and pushed at the end of the session.** `main` fast-forwarded from `a7c153a`
+to **`a6ad76b`** (2 commits: `1d72506` from the prior session, then this session's work as
+one commit) and pushed to `origin/main`; working tree clean. Audited before pushing since
+`git add .` is indiscriminate: 35 files, source and docs only — no checkpoints, no `logs/`,
+no `wandb/`, nothing credential-shaped. `.claude/settings.json` is now tracked (the
+shareable permission allowlist plus a ruff-format hook); `.claude/settings.local.json`
+stays ignored.
+
+Two git-hygiene notes worth keeping. `user.name`/`user.email` were unset, so git derived an
+author address from the login node's hostname; now set globally to
+`Aden McKinney <aden_mckinney@seas.harvard.edu>`. This session's commit was re-authored
+before pushing (safe — it was unpushed), but **`1d72506` carries
+`amckinney@holylogin08.rc.fas.harvard.edu` and is now published, so leave it** rather than
+rewriting shared history.
+
+**Neither sweep is submitted.** That is the next action; see `docs/TODO.md`.
+
+### v22: both v21 sweeps ran — recontact solved, push's cone confirmed (2026-08-25, `a6ad76b`)
+
+**Question.** Does clipping the critic's TD target at `goal_reward` remove recontact's
+divergence, and does training on the corrected push sampler beat training on the buggy one?
+
+**What ran.** The two sweeps built in v21, submitted 2026-08-24 14:37 local from a clean
+tree (every cell's `meta.txt`: `GIT_COMMIT=a6ad76b`, `GIT_DIRTY=no`).
+
+- Job `41645514` — push, 150k, `push_cone_deg {null,30,45}` x `same_room_goal_prob
+  {0.5,1.0}` x seed {0,1}, 12 cells, ~50 min/cell, all COMPLETED.
+- Job `41645529` — recontact, 1M, `target_clip {null,10}` x seed {0..5}, 12 cells,
+  ~6h/cell, all COMPLETED.
+- Job `41643049` (14:23) was a mis-submit, CANCELLED after ~13 min. Ignore its directory.
+
+All numbers below are read from each cell's `progress.csv`; the eval metric is
+`eval/success_rate` at `diag_eval_episodes=16`, so one episode = 6.25 pp.
+
+**Result 1 — the clip works, 6/6.** `target_clip=10`: every seed's last-5-eval mean is
+0.863–0.975 (best 1.000 on all six), `train/critic_loss` max 0.9–1.6. `target_clip=null`:
+one seed (s0) reaches 0.938 with `critic_loss` max 7.7; the other five end at **0.000** with
+`critic_loss` max **1.1e9 – 1.2e11**. This replicates v21's bimodality exactly — bounded
+critic learns, diverging critic collapses — and shows the clip converts 1/6 into 6/6.
+Clipped seeds first cross 0.9 at 56–73% of the 1M budget, then hold, so recontact is now
+converged rather than budget-limited.
+
+**Result 2 — the clip is active only at the start.** `train/target_clip_frac` peaks at
+~0.97 around 2.8–5.2k steps, is <=0.012 by 20k, and ~0.000 at 1M. So the bound matters only
+for the initial bootstrap blowup; afterwards the critic stays inside it unaided. This is
+also the preregistered falsifier passing: the stated failure mode was "clip_frac ~0
+everywhere yet seeds still diverge," and instead clip_frac was near 1 exactly where it
+mattered and only the unclipped arm diverged.
+
+**Result 3 — push: the cone is the whole effect, and `srg=1.0` gates it.** Mean eval over
+each cell's last 8 evals, averaged over the two seeds:
+
+```
+                srg=0.5   srg=1.0
+cone=null        0.000     0.004      <- control, historical face/goal-independent sampler
+cone=30          0.059     0.340
+cone=45          0.070     0.289
+```
+
+Seed spread is tight (cone30/srg1.0: 0.352 and 0.328). `cone` vs `null` is far outside the
+eval resolution; `cone=30` vs `cone=45` is not, so do not rank those two. Push plateaus:
+mid-run mean (evals 8–16) 0.24–0.34 against 0.33–0.35 at the end, so more steps at this
+scale is not the binding constraint. Push cells ran unclipped and did not need it
+(`critic_loss` max 15–36, no divergence).
+
+**Result 4, and the honest negative — retraining has not yet been shown to help push.**
+v21 measured the *already-trained* (buggy-sampler) policies at 34–39% on the corrected
+sampler with zero retraining. Training on the corrected sampler lands at ~0.34. The two
+numbers come from different protocols (60-episode deterministic rollout vs the n=16
+in-training eval), so they are not comparable as they stand — but nothing here yet shows a
+benefit from retraining, only the already-established benefit from fixing the task. A
+fixed task and a better policy are separate claims and need the same protocol to compare.
+
+**Next.** (1) Verify recontact under the 60-episode deterministic rollout with the Q-gap
+check, and confirm the finger-parking behavior is gone. (2) Evaluate job `41613939`'s and
+job `41645514`'s push checkpoints under one identical protocol to settle Result 4. (3) Push's
+remaining lever is contact retention/precision, not budget. Details in `docs/TODO.md`.
+
+### v23: both verifications settled; action interface built (2026-08-25)
+
+**Questions.** (1) Does recontact's ~94% survive an independent protocol? (2) Does
+retraining push on the corrected sampler beat zero-retraining transfer? (3) If not, is
+the action interface the binding constraint?
+
+**What was built.** `eval_contact.py` — the first standalone contact evaluator. Scores a
+checkpoint on a **distance-stratified episode set** (N per bin, reset seeds rejection-
+sampled once, so every checkpoint sees byte-identical initial states) and reports success
+per bin, the `guard_outcome` termination histogram, contact retention, object
+displacement, and Q(s0) against realized discounted return. It prints an **env digest**;
+two runs are comparable only if the digest matches. `train_contact.py`'s env construction
+was extracted to `build_env_kwargs(d)` so both entry points build the identical env
+rather than duplicating 20 lines. First test coverage of `ContactEnv`/`Physics`/
+`PlanarFingertipWorld` landed alongside (`python test_code.py contact`, 18 checks).
+
+**Result 1 — recontact verified, with a caveat.** 60 episodes, digest `9152a53a6b01`:
+
+```
+cell                overall  0-3   3-6   6-9  9-12   12+   Q-gap   Q>10
+clip10_s0             0.917 1.000 0.917 0.917 0.833 0.917   +0.10   0/60
+clip10_s3             0.783 1.000 0.667 0.750 0.917 0.583   +1.23   0/60
+clipnull_s1 (diverged) 0.033 0.000 0.000 0.083 0.083 0.000 +4848.74 54/60
+```
+
+s0 holds 83-100% across every distance bin with a critic gap of **+0.10** — essentially
+perfectly calibrated, against **+44.8** for the pre-clip runs. The diverged control has
+Q mean **4,849** (max 20,950), exceeding the provable bound of 10 in 54 of 60 states, and
+times out in 95% of episodes. **The finger-parking behavior is gone**: median final
+distance 0.30-0.36cm against `arrival_eps=0.4`, where v20/v21 policies parked 0.77-1.89cm
+short. That preregistered check passes, so the `_object_disturbed` gate needs no revisit.
+**Caveat:** the prereg bar was >=0.85 in the 12+cm bin; s0 makes it (0.917), s3 does not
+(0.583). The n=16 in-training eval had reported s3 at 0.938, so it overstated that seed.
+
+**Result 2 — retraining push does NOT beat transfer. Preregistered prediction fires.**
+All four checkpoints on one identical 60-episode set, digest `098fb8afa82e`:
+
+```
+checkpoint                       overall  0-3   3-6  6-9  9-12  12+  retention  contact_lost
+41613939_2 transferred (s0)        0.133 0.500 0.167 0.000 0.000 0.000   [see below] 76.7%
+41613939_3 transferred (s1)        0.083 0.333 0.083 0.000 0.000 0.000   [see below] 83.3%
+41645514_6 retrained  (s0)         0.133 0.417 0.167 0.000 0.083 0.000   [see below] 75.0%
+41645514_7 retrained  (s1)         0.150 0.583 0.167 0.000 0.000 0.000   [see below] 80.0%
+```
+
+**CORRECTION (v25).** The retention column originally printed here (0.203-0.262) was
+wrong: `eval_contact.py` read the active finger ONCE before the episode loop, but `reset`
+re-samples it per episode, so retention was counted against the wrong finger on most
+episodes. Fixed in v25; re-measured, raw push retention is **0.52-0.61**. Success,
+termination and Q figures never used that variable and are unaffected, so the headline
+(retrained 0.142 vs transferred 0.108, contact_lost 75-83%) stands.
+
+Retrained mean 0.142 vs transferred 0.108 — ~2 episodes in 60, inside the within-arm seed
+spread (0.017 and 0.050). **The cone fix bought a measurable task, not a better policy.**
+Also settled: `contact_lost` ends 75-83% of episodes in every arm, no episode reaches the
+200-tick horizon, and median displacement is ~2cm regardless of goal distance. One push
+option is worth ~2cm of object motion, which is exactly why it succeeds only under 3cm.
+
+**Result 3 — the action interface, built and falsified-against.** `action_interface`
+(`finger_velocity` default, bit-identical; `contact_frame` new, push-only, validated to
+raise rather than be ignored). Under `contact_frame` the active finger's two components
+are (push along the inward face normal, slide along its tangent), re-derived **every
+physics substep** under two soft constraints: never open the gap faster than the object
+recedes, and cap tangential speed at `slip_limit`. The motivation is structural —
+`PlanarFingertipWorld.step` held one command across all 20 substeps, so a 25Hz command
+could slide the finger 0.8cm across a face before anything reacted. Contact can still be
+lost by walking off a corner, so the `contact_lost` guard stays meaningful (chosen
+deliberately over pinning the contact point, which would make the guard vacuous).
+
+Scripted falsifier, 60 episodes, **no training**:
+
+```
+controller                        retention  displ_cm  contact_lost
+finger_velocity  straight            1.000      7.98       0.0%
+contact_frame    straight            1.000      7.98       0.0%
+finger_velocity  + steering          0.838      3.55      70.0%
+contact_frame    + steering          0.996      9.27       0.0%
+```
+
+The straight-push rows being **identical** is the right null result: the constraints only
+bind once the controller steers, confirming the plumbing is inert when it should be. Under
+steering — what the policy actually has to do — the raw interface loses contact in 70% of
+episodes and moves the object 3.55cm; `contact_frame` holds contact and moves it 9.27cm.
+`slip_limit=0.5` was picked by measurement over {0.25, 0.5, 1.0} (displacement 8.25 /
+9.27 / 7.98), per memo sec 6.4, not from `arctan(finger_friction)=36.9deg`.
+
+**Gates:** static 22/22, geometry 27/27, **contact 18/18 (new)**, test_option_graph
+171/171, fixture_eval 18/18. All three sweep arms smoke-tested end-to-end through real
+Hydra; all 12 cells' dispatch simulated and verified to vary what they claim (the v16
+lesson).
+
+**Next.** `slurm/submit_sweep.sh` was retargeted to this experiment and is NOT submitted.
+16 cells: a 4-arm ablation — raw / clamped (the same rule at 25Hz) / contact_frame at
+slip 0.5 and 1.0 — x srg {0.5,1.0} x seed {0,1}. The `clamped` arm is what lets the sweep
+attribute an effect between the clamp RATE and the reparameterization; the two slip levels
+test whether a learned policy wants more tangential authority than the scripted optimum.
+Score it with `eval_contact.py`, never the in-training eval. The file previously held job
+41613939's launcher; that record is preserved in `logs/sweep_41613939/*/submit_script.sh`,
+10 byte-identical copies verified before the overwrite.
+
+### v24: local visualization + storage tooling (2026-08-26)
+
+**Question.** Keep wandb and local disk from filling up, and get local-only
+visualizations including videos of policy evals.
+
+**What the measurement changed about the request.** Remote wandb is **155 runs and
+0.25 GB** against a 100 GB tier — not a storage problem at all, only dashboard clutter.
+Local `logs/` is 1.2 GB of which **1.1 GB is 290 SB3 checkpoints** at 3.26 MB each; local
+`wandb/` is 351 MB. So the thing to manage is checkpoints, and home has 72 GB free, so
+this is growth hygiene (~104 MB per 16-cell sweep) rather than an emergency.
+
+**Retention is not a pure storage question.** v23's transfer-vs-retrained result was only
+possible because job 41613939's checkpoints from two days earlier still existed. A
+date-cutoff purge would have destroyed that experiment before it was run. So the pruner
+deletes only what the data itself proves is redundant.
+
+**Built.**
+- `eval_contact.py` gains `eval_video` / `eval_summary_png` / `eval_video_n` /
+  `eval_video_fps` / `eval_media_dir`, all defaulting off. Videos re-run the *scored*
+  episode collecting Snapshots, so a rendered episode IS the episode in the table.
+  Episode selection prefers arrivals + `contact_lost` failures + the worst final-distance
+  case rather than the first N, since the failures carry the information. Because the
+  stratified seeds are fixed by the env digest, **episode k is the same initial state
+  across every checkpoint**, so arm-vs-arm videos are directly comparable. ~8 KB per mp4.
+- `tools/compare_sweep.py` — one figure and table across a sweep's cells, and it
+  **refuses to plot when env digests disagree**, which is the check that would have caught
+  the v22 confound immediately.
+- `tools/prune_runs.py` — dry-run by default. Deletes `model_best.zip` only where that
+  cell's `progress.csv` shows `max(eval/success_rate) == 0.0` (per the callback gotcha
+  those files are just the first eval snapshot) and only when `model.zip` also exists, plus
+  an explicit superseded-job list. Never touches `progress.csv`/`meta.txt`/
+  `submit_script.sh`/`run.*`, never touches jobs still in the queue, honours a `KEEP_JOBS`
+  list, and writes a deletion manifest. **Dry run: 123 files, 0.38 GB.** Not applied.
+- `tools/prune_wandb.py` — dry-run by default; matched exactly **1** junk remote run, which
+  confirms the remote side needs nothing. Reports local `wandb/` and points at
+  `wandb sync --clean` rather than `rm -rf`.
+
+**Two things caught by measuring rather than assuming.**
+1. `visualize.py` had **zero callers** — the same setup that let `plots.py` ship a missing
+   `import pandas`. Exercised on real rollout data before wiring it in; all three functions
+   work. Now gate-covered (`test_code.py contact`, 22 checks) so it cannot rot again.
+2. The first version of `prune_wandb.py` reported local `wandb/` at 1127 MB against `du`'s
+   351 MB. Neither was wrong: the `.wandb` files are **sparse**, so apparent size is 3x
+   disk usage. A storage tool must report `st_blocks * 512`, not `st_size`, or it
+   overstates by 3x. Fixed; now reports 331 MB against `du`'s 351 MB (the gap is the
+   top-level log files outside run dirs).
+
+**Gates:** static 22/22, geometry 27/27, contact **22/22** (4 new renderer checks),
+test_option_graph 171/171, fixture_eval 18/18.
+
+**Not done, deliberately:** nothing was deleted — both pruners are dry-run and deletion is
+the user's call. No periodic checkpointing (it would multiply the 1.1 GB this exists to
+contain). No automatic pruning inside sweep scripts, which is how provenance disappears
+silently. wandb logging stays on, no-media rule unchanged.
+
+### v25: the action interface is push's constraint — contact_frame works (2026-08-26)
+
+**Question.** Job 42007967, the 16-cell interface ablation. Does `contact_frame` beat the
+raw interface, and is it the reparameterization or the clamp rate that matters?
+
+**Two bugs found before the result was trustworthy. Both were mine, both in v24 tooling.**
+
+1. **The batch scoring passed only the TASK overrides**, so every cell — including the
+   eight `contact_frame` cells — was scored with the default
+   `action_interface=finger_velocity`. Those policies emit (push, slide); the evaluator
+   interpreted them as (vx, vy). The first table produced looked like a decisive negative
+   for `contact_frame` (success halved, `contact_lost` up to 97%) and was entirely an
+   artifact. **Exactly the v16 failure mode: a variable that never reached the command.**
+   Caught by replaying one checkpoint on the same seeds and getting a different
+   termination histogram than the stored json.
+2. **The active finger was read once per checkpoint, not per episode.** `reset` re-samples
+   it, so contact retention was counted against the wrong finger on most episodes. This
+   bug was present from eval_contact.py's first version, so **v23's retention column is
+   corrected above** (0.203-0.262 -> 0.52-0.61 for raw push).
+
+Fix for (1) has two parts: the scoring script now reads each cell's own interface out of
+its `meta.txt`, and the **env digest now covers the task only** — reset sampler, board,
+reward, horizon — with `action_interface`/`slip_limit`/`restrict_contact_actions` excluded
+and recorded separately. Those change how the policy's numbers are interpreted, not what
+the task is, so two arms of an interface ablation must stay comparable.
+
+**Result, 60-episode common set, digest `1f402df37eef` (means over 2 seeds):**
+
+```
+arm            overall   0-3    3-6    6-9   9-12    12+   retention  contact_lost
+raw              0.121  0.458  0.125  0.000  0.021  0.000    0.52-0.61   75-83%
+clamped          0.117  0.438  0.125  0.000  0.021  0.000    0.67-0.71   75-83%
+cf_slip0.5       0.229  0.625  0.167  0.167  0.104  0.083    0.94-0.96    5-17%
+cf_slip1.0       0.292  0.625  0.312  0.188  0.084  0.250    0.90-0.96    0-13%
+```
+
+- **The preregistered headline claim holds.** The 6-9cm bin goes from 0.000 in all eight
+  raw/clamped cells to nonzero in seven of eight `contact_frame` cells, and the **12+cm bin
+  is nonzero for the first time in the project's history** (0.250-0.417 in four cells).
+- **`contact_lost` collapses from 75-83% to 0-17%**, and retention rises from ~0.55 to
+  ~0.95, essentially reaching the scripted controller's behavior.
+- **The attribution arm did its job.** `clamped` improves retention (0.67-0.71 vs
+  0.52-0.61) but its success is level with `raw` (0.117 vs 0.121). So **the
+  reparameterization is what matters, not the 25Hz-vs-500Hz clamp rate** — holding contact
+  is necessary but not sufficient; the policy also has to be able to *steer* while holding,
+  which only the contact-frame action gives it.
+- **The learned policy wants more tangential authority than the scripted controller did.**
+  `slip 1.0` (0.292) over `slip 0.5` (0.229), where the scripted sweep had preferred 0.5.
+  Including both levels was the right call. **But seed spread is wide and overlapping**
+  (slip1.0 0.183-0.417, slip0.5 0.150-0.333, n=2), so this is suggestive, not established.
+
+**Gates:** static 22/22, geometry 27/27, contact 22/22, test_option_graph 171/171,
+fixture_eval 18/18.
+
+**Next.** More seeds before ranking slip levels; push is no longer flat-lined beyond 3cm,
+so the range curriculum (memo Eq 15) becomes worth running; and the edge-definition
+fallback is no longer the leading option, since a push edge can now move the object
+further than ~2cm.
+
+---
+
+## v26 — 2026-08-26 — Coulomb slip, the free finger, and E3 killing the settle sweep
+
+**Question.** Three things, in order of what they cost. (a) Is `slip_limit` defensible as a
+tuned constant, or should the tangential budget come from friction? (b) The masked inactive
+finger is servo-held in the object's path — is that really what `forbidden_contact` is
+measuring? (c) Do push failures overshoot the goal or never reach it?
+
+**(a) slip is now derived, not tuned.** `slip_limit` was a free tangential ceiling
+(a fraction of `v_max`) picked by sweeping. Replaced with `slip_model=friction_cone`
+(now the default): the tangential budget is `mu * push * v_max` with `mu = finger_friction`
+— the same coefficient pymunk already uses for that contact, so there is one number rather
+than two that can disagree. It scales with the normal push and vanishes when the finger
+stops pressing, which a flat ceiling does not. The worst-case command sits exactly on
+`arctan(mu) = 36.87deg` off the face normal (asserted in the gate). `slip_model=speed_fraction`
+keeps the superseded formula bit-exact, because the archived `sweep_42007967` checkpoints
+have to stay replayable under the interface they were trained on.
+
+Note this **supersedes v25's reasoning** for picking slip by measurement. The observation
+that stood behind it — achieved deviation reaching 65-78deg at p90 while contact held — is
+still true; it just means pymunk's solver is more permissive than a Coulomb contact, not
+that we should command motions a real finger could not make.
+
+**(b) the free finger: mechanism confirmed, zero training.** `mask_inactive_finger=true`
+does not remove the inactive finger, it leaves it **servo-held wherever it spawned**.
+Harmless at 2cm pushes; not at 6-10cm. Replaying the v25 SOTA checkpoint (cell 15, frozen
+policy) under a 60deg spawn cone centred behind the object's travel:
+
+```
+disengaged_away_deg   success   forbidden_contact   horizon   contact_lost
+null (uniform ring)     0.433      8/60 (13.3%)    22 (36.7%)   4 (6.7%)
+60deg (behind travel)   0.333      1/60 ( 1.7%)    36 (60.0%)   3 (5.0%)
+```
+
+**`forbidden_contact` 13.3% -> 1.7% with the policy frozen** settles the diagnosis: it was
+the object arriving at a stationary fingertip, not a bad grasp at reset. Success *falling*
+is **not** evidence against the change — the policy was trained on the uniform ring and is
+off-distribution here, and 26-vs-20 arrivals in 60 is ~1.6 standard errors. The two runs
+also have different digests by construction (the reset sampler is a task key), so they are
+matched on `d0` bins but are not the same episodes. Whether placement *helps* needs training.
+
+**Unmasking cannot be tested this way** and is not claimed to be: replaying a masked
+checkpoint unmasked would animate two outputs it never learned to control. It goes in the
+sweep. Per decision this round, the `forbidden_contact` guard stays terminal-only with
+**no `w_m` term**, so the `unmask` arm measures the guard alone.
+
+**(c) E3 killed the settle sweep before it ran.** `eval_contact.py` now records closest
+approach and its tick per episode. On the SOTA checkpoint's 34 non-arrivals:
+
+```
+within arrival_eps (0.4cm):  reached  0 (0%)
+within 1cm:                  reached  8 (24%) -> overshot 4, held-but-unsettled 4
+min_dist   p10/p50/p90       0.60 / 3.75 / 10.97 cm
+final_dist p10/p50/p90       1.11 / 5.36 / 12.88 cm
+mean (final - min) 1.40 cm   median closest-approach tick 50 (of 200)
+```
+
+**No failing episode ever came within `arrival_eps`.** Failures never get close, and give up
+only 1.40cm between closest approach and where they stop. That is an **aiming** problem, and
+neither `require_settled` nor a longer horizon can fix it — they get nearest at tick 50 of
+200 and then wander. The planned 12-cell `horizon x require_settled` sweep (E4) **is not
+being run**. Running E3 first, at zero training cost, is what caught this.
+
+**Also.** `mask_inactive_finger` is classified as an **interface** key in `eval_contact.py`
+(it decides whether two of four outputs do anything), while `disengaged_away_deg` is a
+**task** key and stays inside the digest.
+
+**Built.** `slip_model` + `_tangential_speed`, `mask_inactive_finger`, `disengaged_away_deg`
+(null path bit-identical, asserted), E3's `min_dist`/`min_tick` + `overshoot_report`, and a
+rewritten 15-cell sweep (arm {base, legacy, unmask, place, unmask_place} x seed {0,1,2}).
+All five arms smoke-trained.
+
+**Gates:** static 22/22, geometry 27/27, contact 35/35, test_option_graph 171/171,
+fixture_eval 18/18. (`ruff` is not installed in the `tsmc` env — lint gate unrunnable.)
+
+**Next.** Submit the 15-cell sweep. If no arm beats `base` outside seed spread, the free
+finger was not push's binding constraint and the next target is the aiming problem E3
+exposed, not a fifth fix to the contact interface.

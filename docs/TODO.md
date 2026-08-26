@@ -3,53 +3,83 @@
 Next action first for each item. Session history in `docs/PROGRESS.md`; repo map in
 `docs/STRUCTURE.md`; current state and gotchas in `status.md`.
 
-## Immediate — Stage 1, post-v20
+## Immediate — Stage 1, post-v26
 
-**Job `40957220` (the push rerun three prior doc versions called "not yet done") ran and
-completed on 2026-08-21.** Its analysis is in `docs/PROGRESS.md`'s v20 entry. What follows
-replaces that item.
+**contact_frame is established** (v25: `contact_lost` 75-83% -> 0-17%, first nonzero 12+cm
+bin in the project). v26 made slip physical, exposed the free finger as a real failure
+source, and used E3 to cancel a 12-cell sweep before it ran. Full numbers in
+`docs/PROGRESS.md` v25/v26.
 
-1. **Recontact: bound the critic target. This is the binding constraint now.** Four of six
-   seeds diverged (critic_max up to 776,942; Q 539 against a **provable** maximum of 10,
-   since the reward is a single terminal +10 and arrival ends the episode) and success
-   collapsed exactly when they did. The two bounded seeds are the best recontact has ever
-   been (s0: 30% verified, Qgap +2.8 vs the stock buffer's +44.8). Clipping the TD target at
-   `goal_reward` is exact rather than heuristic here. Verify: critic_max stays O(10) on all
-   six seeds and s0's curve is unchanged.
-2. **Then raise recontact's budget back up.** s0 peaked at 279,950 of 300,000 steps, still
-   rising — it is budget-limited, not converged. This partly reverses v20's cut; that cut
-   was right for the peak-then-decline configuration, not for a bounded one. Do it only
-   after item 1, or the extra steps just deepen the divergences.
-3. **Push: sweep `push_cone_deg`.** Implemented and validated (v21) but never trained
-   against. The already-trained policies score 34-39% on the corrected sampler with zero
-   retraining, versus 1-2% on the distribution they were trained on, so this is the highest-
-   expected-value push run available. Suggested axes: `push_cone_deg` {null, 30, 45} x
-   `same_room_goal_prob` {0.5, 1.0}, keeping `push_cone_deg=null` as the control.
-   **Record the reset-distribution commitment at the same time** (item 6 below).
-4. **Push: ramp the range, not just the direction.** `srg=0.0 cone=30` is still hard
-   (scripted controller 4%) because at 21.5cm range a 12.5deg misalignment misses by 4.7cm
-   against `arrival_eps=0.4` — long-range push is **precision**-limited once direction is
-   fixed. That is what memo Eq 15's curriculum is for: start short (`srg=1.0 cone=30` gives
-   median 2cm and 44.5% for a scripted controller) and expand the radius as success rises.
-   The cone sampler already takes a radius, so this is a schedule on one number.
-5. **Contact retention is still the deeper push limit.** Even with the sampler fixed, the
-   trained policies hold contact 43-47% of ticks against a scripted rule's 100%, and the
-   goal-directed sweep showed steering and contact retention are mutually exclusive under
-   the current action interface (contact 100% -> 42% as the goal-directed component grows).
-   The action-space redesign in deferred item 2 (policy outputs a push direction, physics
-   maintains contact) is the live option if item 4 stalls.
-6. **Fairness commitment, to record before any composition claim.** The cone sampler changes
-   the reset distribution, and memo sec 5.2's baseline 3 is "Flat + local reset curriculum:
-   **same resets and training-state coverage** as the option policies". Memo sec 7's failure
-   table names the exact risk: "Hierarchy wins only with special resets -> curriculum
-   advantage, not execution hierarchy -> compare against flat policy with identical reset
-   distribution." **Every flat baseline must get the identical reset distribution**, cone and
-   all. Also note `p_hat` will no longer be calibrated on misaligned states — correct, since
-   those are outside `I_e` and the planner should route through recontact instead, but it
-   means Phase B stops being optional and `p_hat` must not be queried there.
-7. Tick-trace after any sign of life. Training-time CSVs and wandb alone are not
+1. **Submit `slurm/submit_sweep.sh`.** 15 cells, 150k, arm
+   {base, legacy, unmask, place, unmask_place} x seed {0,1,2}. Built, all five gates green,
+   all five arms smoke-trained end-to-end, index mapping checked. **Not submitted.** Commit
+   first — the v20 provenance hole is only closed by a clean tree at submit time.
+   ```bash
+   sbatch slurm/submit_sweep.sh
+   ```
+   The file previously held job 42007967's launcher; all 16 of its per-run copies in
+   `logs/sweep_42007967/*/submit_script.sh` were verified byte-identical before overwriting.
+2. **Score with `eval_contact.py`, and mind the two key classes.** INTERFACE keys
+   (`action_interface`, `slip_model`, `slip_limit`, `restrict_contact_actions`,
+   `mask_inactive_finger`) come **from each cell's `meta.txt`**; TASK keys
+   (`require_settled`, horizon, sampler, `disengaged_away_deg`) are **pinned at the protocol
+   value**. Getting the first wrong inverted the v25 result once already.
+3. **The arms split into two digest groups**, because `disengaged_away_deg` is a task key:
+   group A (uniform ring) = base/legacy/unmask, group B (60deg cone) = place/unmask_place.
+   Within a group the comparison is digest-exact; across groups it is not. **Also score
+   group A's `base` checkpoints under group B's overrides** — no extra training, one eval
+   each — to get the transfer number separating "placement helped" from "placement made an
+   easier task".
+4. **Push's real problem is now AIMING, not contact and not time.** E3 measured it: 0% of
+   failing episodes ever came within `arrival_eps`, only 24% within 1cm, median closest
+   approach 3.75cm, and they give up just 1.40cm between closest approach and stopping.
+   `require_settled` and a longer horizon are both ruled out. **If no v26 arm beats `base`
+   outside seed spread, go straight here** rather than to a fifth contact-interface fix.
+5. **Push: ramp the range, not just the direction** (memo Eq 15). At 21.5cm range a 12.5deg
+   misalignment misses by 4.7cm against `arrival_eps=0.4`, so long-range push is
+   **precision**-limited once direction is fixed. This is the concrete form item 4 most
+   likely takes: the cone sampler already takes a radius, so it is a schedule on one number.
+6. **Edge-definition fallback, now demoted.** One push option was worth ~2cm before
+   contact_frame; it is not any more, so "a push edge simply IS short, compose via
+   recontact" is no longer the leading alternative. Memo Eq 10's `A(v,e)` remains the
+   built-in test if item 4 and item 5 both stall.
+7. **Fairness commitment, to record before any composition claim.** The cone sampler *and*
+   `disengaged_away_deg` both change the reset distribution, and memo sec 5.2's baseline 3
+   is "Flat + local reset curriculum: **same resets and training-state coverage** as the
+   option policies". Memo sec 7's failure table names the exact risk: "Hierarchy wins only
+   with special resets -> curriculum advantage, not execution hierarchy -> compare against
+   flat policy with identical reset distribution." **Every flat baseline must get the
+   identical reset distribution**, cone, spawn placement and all. Also note `p_hat` will no
+   longer be calibrated on misaligned states — correct, since those are outside `I_e` and
+   the planner should route through recontact instead, but it means Phase B stops being
+   optional and `p_hat` must not be queried there.
+8. Tick-trace after any sign of life. Training-time CSVs and wandb alone are not
    sufficient — and in v20 a strong, consistent correlation ranking over `progress.csv`
    named the wrong mechanism outright.
+9. **`ruff` is not installed in the `tsmc` env**, so the lint gate in `CLAUDE.md` cannot be
+   run. Either install it or drop it from the gate list.
+
+## Housekeeping — storage and visualization (v24, tooling built)
+
+- **Run the pruners when you want the space.** Both are dry-run by default and nothing has
+  been deleted. `python tools/prune_runs.py` reports 123 files / 0.38 GB (superseded
+  pre-Stage-1 sweeps, plus `model_best.zip` files that are provably just the first eval
+  snapshot); add `--apply` to act, which writes a manifest to `logs/prune_manifests/`.
+  `python tools/prune_wandb.py` matches exactly 1 junk remote run, so the remote side needs
+  nothing — remote is 0.25 GB against a 100 GB tier.
+- **Local `wandb/` reclaim is `wandb sync --clean`, never `rm -rf`** — it checks sync state
+  first. 331 MB on disk today.
+- **Growth rate is ~104 MB per 16-cell sweep**, all checkpoints. With 72 GB free that is
+  ~700 sweeps of headroom, so pruning is hygiene, not urgency.
+- **Do not add periodic checkpointing** without revisiting this: at 3.26 MB each it
+  multiplies exactly the thing the pruner exists to contain. Deliberately deferred.
+- **Render media with `eval_contact.py eval_video=true eval_summary_png=true`.** Output to
+  `media/eval/<cell>/`, ~8 KB per mp4. The rendered episode IS the scored episode, and
+  because the stratified seeds are fixed by the env digest, episode k is the same initial
+  state across every checkpoint — so arm-vs-arm videos are directly comparable.
+- **`tools/compare_sweep.py <sweep_dir>` for the cross-cell figure.** It refuses to plot
+  when env digests disagree; if it refuses, the cells were scored on different reset
+  distributions and their numbers are not comparable.
 
 ## Stage 1 — deferred, in the order to reach for them
 

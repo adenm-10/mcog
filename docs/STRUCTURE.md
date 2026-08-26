@@ -10,6 +10,10 @@ Current state and gotchas live in `status.md`; session history in
 |---|---|---|
 | Train per-region SAC or flat monolith | `train.py` | works; 90k/seed, one seed run, wandb-instrumented |
 | Train one contact template (SAC+HER) | `train_contact.py` | works; Hydra `contact=push\|recontact` |
+| Score a contact checkpoint on a fixed stratified set | `eval_contact.py` | works; the only cross-cell-comparable push/recontact number. `eval_video=true` / `eval_summary_png=true` for local media. `overshoot_report` splits failures into aiming vs braking (v26) |
+| Compare every cell of a sweep on the common eval set | `tools/compare_sweep.py` | works; refuses to plot cells whose env digests disagree |
+| Reclaim checkpoint bytes under `logs/` | `tools/prune_runs.py` | works; dry-run by default, `--apply` to act |
+| wandb hygiene, remote runs + local dirs | `tools/prune_wandb.py` | works; dry-run by default |
 | Probe edge success across horizons | `tests/probe_edges.py` | works; 8 budgets on disk. **deletion path** |
 | Calibrate every leg from a stratified entry design | `option_graph/calibrate.py` | works; 12,500 rollouts, 0 gradient steps |
 | Fit p_hat / p_bar / H / A / Beta from calibration | `option_graph/edge_model.py` | works; numpy only |
@@ -29,15 +33,15 @@ Current state and gotchas live in `status.md`; session history in
 
 | Capability | File | State |
 |---|---|---|
-| PyMunk physics, isolation boundary | `domains/contact/planar_fingertips.py` | works; only file importing pymunk, enforced by `cmd_layering` |
+| PyMunk physics, isolation boundary | `domains/contact/planar_fingertips.py` | works; only file importing pymunk, enforced by `cmd_layering`. Also `face_frame`, `_tangential_speed` (both pure) and `ContactFrameCommand` |
 | Domain-agnostic obs/step wrapper, object-centric obs | `domains/contact/physics.py` | works; `obs()` translation-invariant to ~1e-6 |
-| Rendering, png/mp4, local disk only | `domains/contact/visualize.py` | works; no wandb import at all |
+| Rendering, png/mp4, local disk only | `domains/contact/visualize.py` | works; no wandb import at all. Wired into `eval_contact.py` and gate-covered as of v24 |
 | Multi-room board geometry (regions/portals) | `domains/contact/board.py` | works; degenerates to one region when `portals=()` |
 | `DomainHooks` builder (contact sibling of `nav_hooks`) | `domains/contact/hooks.py` | works |
 | Arrival tests, guards, templates (nav's DRIVE lives here too) | `domains/contact_templates.py` | push/recontact done, incl. `theta_target` orientation goal |
 | Held-out eval callback, contact-generic | `domains/contact/callbacks.py` | reads only the `achieved_goal`/`desired_goal` contract |
 | Eq 14 reward, HER-safe split | `domains/contact/reward.py` | works; `RewardWeights` ablated to `goal_reward=10.0` only |
-| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works |
+| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=friction_cone\|speed_fraction`, `mask_inactive_finger`, `disengaged_away_deg` (all push only) |
 | HER buffer fixes | `domains/contact/her_buffer.py` | `DonePatchedHerReplayBuffer` (done-flag, both templates) + `PushRelabelSafeHerReplayBuffer` (adds stale-obs patch and relabel tick lag) |
 | SAC with a clipped TD target | `domains/contact/sac_clipped.py` | `TargetClippedSAC`; `target_clip=None` is bit-identical to stock SAC |
 
@@ -72,9 +76,14 @@ since `DomainHooks` (executor.py) is already the abstraction boundary.
 ```bash
 python test_code.py static                                    # 22/22
 python test_code.py geometry                                  # 27/27
+python test_code.py contact                                   # 22/22
 python -m tests.test_option_graph all                         # 171/171
 python -m tests.fixture_eval fixtures tests/fixtures_smoke    # 18/18
 ```
+
+`contact` is the only gate that touches `ContactEnv`/`Physics`/`PlanarFingertipWorld`;
+nothing exercised them before v23. It must live in `test_code.py`, not under
+`tests/test_option_graph.py`, because `cmd_layering` forbids pymunk there.
 
 ## Artifacts
 

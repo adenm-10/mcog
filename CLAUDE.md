@@ -5,8 +5,11 @@ Core is domain-agnostic (`option_graph/`); Dubins-specific code stays in `domain
 wandb: org `aden-mckinney10-university-of-central-florida`, project `mcog`.
 
 ## Commands
-- Test: `pytest -q`
-- Single test: `pytest path::test_name -x`
+- Gates (all five, before and after every commit):
+  `python test_code.py static|geometry|contact`,
+  `python -m tests.test_option_graph all`,
+  `python -m tests.fixture_eval fixtures tests/fixtures_smoke`
+- There is no pytest in this repo: the harness is hand-rolled `check`/`section`/`report`.
 - Lint: `ruff check .`
 
 ## Docs — update in the same change that invalidates them

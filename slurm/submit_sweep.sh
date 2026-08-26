@@ -1,135 +1,153 @@
 #!/bin/bash
 #SBATCH --partition=shared
-#SBATCH --job-name=overlap_donepatch
+#SBATCH --job-name=push_contact
 #SBATCH --output=logs/slurm_staging/%A_%a.out
 #SBATCH --error=logs/slurm_staging/%A_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=0-08:00:00
-#SBATCH --array=0-9
+#SBATCH --time=0-04:00:00
+#SBATCH --array=0-14
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=aden_mckinney@seas.harvard.edu
 
 # ===========================================================================
-# SUPERSEDED by slurm/sweep_push_cone.sh and slurm/sweep_recontact_clip.sh
-# (v21). Kept as the record of job 41613939. Do not submit this one.
-# ===========================================================================
-# v20 sweep. Gate-verified 4/4 plus the correctness checks recorded in
-# docs/PROGRESS.md's v20 entry before submission.
+# v26 PUSH sweep: the free finger, and a friction-consistent slip law.
 #
-# ---------------------------------------------------------------------------
-# Tasks 0-3: PUSH, 150k. A 2x2: same_room_goal_prob {0.0, 1.0} x seed {0,1}.
-# ---------------------------------------------------------------------------
-# Baseline for comparison is job 40957220 cells 2-3 (push_nosettled), which
-# shared require_settled=false with every cell here.
+# 15 cells = arm {base, legacy, unmask, place, unmask_place} x seed {0,1,2}.
+# 150k steps each, contact_frame throughout.
 #
-# Constant across all four, and the delta vs that baseline:
-#   min_progress_cm=0.5  ->  min_progress_ticks=1  (cm filter removed entirely)
+# (The previous contents were job 42007967's launcher. All 16 of its per-run
+# copies, logs/sweep_42007967/*/submit_script.sh, are byte-identical to the
+# copy overwritten here -- verified before overwriting.)
 #
-#   The distance filter was coupled to arrival_eps by the triangle inequality:
-#   `arrived` needs |ag_{t+1} - dg| < arrival_eps and the filter needs
-#   |dg - ag_t| > min_progress_cm, and ag_{t+1} ~= ag_t for a slow object, so
-#   both hold only if the object moved > (min_progress_cm - arrival_eps) in
-#   that ONE tick. Measured median per-tick motion is 0.0098cm against a
-#   required 0.1cm, so the filter kept 0.33-1.0% of HER pairs and the survivors
-#   were 21-43x median tick speed -- i.e. the fastest-moving-object moments,
-#   which under a settled success criterion are the least like a real success.
+# WHAT v25 ESTABLISHED. contact_frame roughly doubled push success and produced
+# the project's first nonzero 12+cm result. Best cell 0.417. Scoring all 16
+# cells needed each cell's OWN interface read from its meta.txt; scoring them
+# all as finger_velocity inverted the result once already (docs/PROGRESS.md v25).
 #
-#   ticks=1 (not 3 or 10) because that is the reference HER convention, not an
-#   invention: OpenAI baselines computes `future_t = t_samples + 1 + offset`,
-#   strictly future. SB3 deviates ("our implementation is inclusive: current
-#   transition can be sampled"), and v20 measured the cost -- 745 pairs at
-#   lag 0, 100% of which score a reward tautologically because the goal IS that
-#   transition's own outcome. ticks=1 deletes exactly those and keeps 89.8% of
-#   the remaining positives. Larger thresholds are unvalidated and are NOT swept
-#   here; they also go blind if episodes ever lengthen (at guard_terminates=false,
-#   lag>=10 passes 88% of positives whose object path length is exactly 0.000cm).
+# TWO CHANGES ARE UNDER TEST HERE.
 #
-# The swept axis, and why it is the one that matters:
-#   same_room_goal_prob 0.0 -> 1.0 shortens the initial object-to-goal distance.
-#   Measured over 600 resets:
-#       srg=0.0 : min 12.96  p10 17.82  median 25.10 cm
-#       srg=1.0 : min  0.27  p10  2.90  median  7.04 cm
-#   At srg=0.0 NOT ONE episode in 600 starts closer than 12.96cm, while HER's
-#   positive examples are capped at arrival_eps + one tick of object motion
-#   (0.81cm measured, 0.85cm predicted) and real success needs 0.4cm. That is
-#   ZERO overlap between what HER can teach and what success requires -- which
-#   is the standing explanation for why no push cell has ever succeeded under
-#   any filter, reward weight, or budget. At srg=1.0 the p10 is 2.90cm and 0.3%
-#   of episodes start already inside arrival_eps, so the REAL reward can fire
-#   without HER at all.
-#   srg=0.0 is retained as the internal control, so the filter change is
-#   measured against the old setting and the overlap change is measured on top
-#   of it. This is a stand-in for memo Eq 15's curriculum (which expands the
-#   initiation set backward from the target and is still unimplemented -- see
-#   docs/TODO.md); it changes the task to a within-room push rather than
-#   shrinking the difficulty axis of the cross-room one.
+# 1. THE FREE FINGER. gym_env.step zeroed the non-pushing finger's action, which
+#    does not remove it -- it leaves it SERVO-HELD wherever it spawned. Harmless
+#    when a push moved 2cm; not once pushes moved 6-10cm. Measured:
+#    forbidden_contact went 8% -> 17-19% and started firing LATE (tick 26-31 vs
+#    8-9), which is the object arriving at a stationary fingertip, not a bad
+#    grasp at reset. Two independent fixes, hence two axes:
+#      unmask = mask_inactive_finger=false. The policy controls both fingers and
+#               the Eq 40 guard is the only thing keeping the free one clear.
+#               This is the option the masking comment warned against (its
+#               exploration noise alone used to trip the guard), so it is a real
+#               test of whether that warning still holds at 150k steps.
+#      place  = disengaged_away_deg=60. Spawn the free finger in a 60deg cone
+#               centred on the ACTIVE face's outward normal, i.e. behind the
+#               object's travel. Sidesteps the collision instead of solving it.
+#    ZERO-TRAINING FALSIFIER, ALREADY PASSED. Replaying the v25 SOTA checkpoint
+#    (cell 15, frozen policy) under the new spawn cone: forbidden_contact
+#    8/60 (13.3%) -> 1/60 (1.7%). The mechanism is confirmed. Overall success
+#    fell 0.433 -> 0.333 in that same replay, but the policy was trained on the
+#    uniform ring and is off-distribution there, and 26-vs-20 arrivals in 60 is
+#    ~1.6 standard errors. Whether placement HELPS is what these cells decide.
 #
-# PREREGISTERED PREDICTIONS (recorded so they can be checked against, per the
-# discipline in docs/PROGRESS.md; the second row is the informative one):
-#   - critic_loss stays bounded in all four but settles ABOVE the 0.67 dead
-#     floor of job 40957220's s0 cells, because positives go from 1.0% to 60.6%
-#     of pairs. If it diverges again, the done-flag patch is not sufficient and
-#     there is a second value bug.
-#   - the "dead fixed point" (critic->0.67, ent_coef->0.002, ep_len declining)
-#     DISAPPEARS. If it persists with ~60x the positive data, the bottleneck is
-#     the actor / exploration, not the critic's inputs. That distinction is the
-#     main thing this arm buys.
-#   - srg=0.0 cells: real success stays 0.0, because the zero-overlap above is
-#     untouched by the filter change.
-#   - srg=1.0 cells: FIRST verified push success expected here, if anywhere.
-#     If these also stay at 0.0, the blocker is contact retention rather than
-#     overlap -- v17 measured a scripted closed-loop rule holding contact 30/30
-#     against the trained policy's median break at tick 6, so that is the next
-#     place to look.
+# 2. SLIP IS NOW DERIVED, NOT TUNED. slip_limit was a free tangential ceiling
+#    picked by sweeping. It is now Coulomb: friction_cone sets the tangential
+#    budget to mu * push * v_max with mu = finger_friction, the same coefficient
+#    pymunk already uses for that contact. It scales with the normal push and
+#    vanishes when the finger stops pressing, which a fixed ceiling does not.
+#    The worst-case command sits exactly on arctan(mu) = 36.87deg off the face
+#    normal (asserted in test_code.py contact).
+#      legacy = speed_fraction slip_limit=1.0, v25's best setting, kept as ONE
+#               comparison arm so we know what adopting the physical constraint
+#               cost. This is not a slip sweep and slip is not being tuned again.
 #
-# ---------------------------------------------------------------------------
-# Tasks 4-9: RECONTACT, 300k, 6 seeds, guard_terminates left at its default.
-# ---------------------------------------------------------------------------
-# Baseline for comparison is job 40910275 cells 2-5.
-#   Delta 1: recontact now uses DonePatchedHerReplayBuffer, so a relabeled
-#   transition scoring the arrival bonus is marked terminal. v19 applied this
-#   only to push's subclass; v20 measured the cost of the omission -- Q(s0)
-#   +44.8/+40.3 against a realized return of ~-1.5 at 1M, with the policy
-#   parking the finger 0.77-1.89cm short while holding the object at exactly
-#   0.000cm/s. Verified before submission: 14/14 positive-reward virtual
-#   samples now come back done=1, where the stock buffer gave 0/14.
-#   Delta 2: budget 1M -> 300k. Peak held-out eval lands at 120-360k in every
-#   prior cell and the 700k trough is 4.6x below it, so ~800k of every 1M cell
-#   was spent worse than its own 200k checkpoint. The freed wall-clock buys
-#   seeds instead, which is what the seed effect -- now reproduced on three
-#   independent axes -- actually needs.
-#   Delta 3: guard_terminates is no longer swept. gttrue/gtfalse trajectories
-#   nearly overlap at both seeds; the axis is spent.
+# WHAT E3 KILLED, BEFORE IT WAS RUN. The planned horizon/require_settled sweep
+# assumed push failures OVERSHOOT. eval_contact.py now reports closest approach
+# per episode, and on the SOTA checkpoint 0% of the 34 non-arrivals ever came
+# within arrival_eps, only 20-24% within 1cm, median closest approach 3.75cm,
+# and mean (final - min) just 1.40cm. Failures never get close. That is an
+# AIMING problem, so settling cannot fix it and a longer horizon cannot either
+# (median closest approach is tick 50 of 200 -- they get nearest halfway and
+# then wander). Those 12 cells are not being run.
 #
-# NOT changed here, deliberately: physics.obs()'s rel_target slot (and with it
-# push's bespoke HER buffer) is redundant -- it equals
-# (desired_goal - achieved_goal)/pos_scale, a linear function of two arrays the
-# policy already receives, and its only consumers in the repo are the patch that
-# repairs it. Removing it would invalidate every existing push checkpoint, so it
-# is held out of this sweep. See docs/TODO.md.
+# PREREGISTERED PREDICTIONS:
+#  - place cuts forbidden_contact to ~2%. This is near-certain; the frozen-policy
+#    replay already showed it. The open question is whether success follows, and
+#    if forbidden_contact falls while success does NOT, the guard was catching
+#    episodes that were failing anyway and E1 is cosmetic.
+#  - unmask is the risky arm. If forbidden_contact rises above the 17-19%
+#    baseline, the free finger's exploration noise is still net-harmful and
+#    masking should stay. If it falls, the policy learned to park it clear and
+#    unmask strictly dominates place, which only moves the spawn.
+#  - unmask_place tests whether they compose or are redundant. Redundancy is the
+#    likelier outcome: a policy that can move the finger does not need it spawned
+#    out of the way.
+#  - legacy vs base isolates the slip law. friction_cone is STRICTER (budget
+#    0.75*push*v_max <= 15 cm/s vs a flat 20 cm/s), so a loss means tangential
+#    authority beyond the friction cone was doing real work -- worth knowing,
+#    since a real finger would not have it. No difference is the expected result.
+#  - FALSIFIER FOR THE WHOLE ROUND: if no arm beats base outside seed spread,
+#    the free finger was not push's binding constraint and the next move is the
+#    aiming problem E3 exposed, not a fifth fix to the contact interface.
+#
+# NOT changed, deliberately: target_clip stays null (push's critic is already
+# calibrated, measured gap +1.77 against the provable bound of 10). Reward stays
+# fully sparse, every w_* zero -- the guard stays terminal-only, with no w_m
+# term, so `unmask` measures the guard alone. push_cone_deg stays 30 and
+# same_room_goal_prob stays 1.0 in every cell, so the sampler is held fixed.
+#
+# SCORING -- READ THIS, IT HAS BITTEN THIS PROJECT TWICE.
+# Two kinds of key, and they are handled OPPOSITELY:
+#   INTERFACE keys (action_interface, slip_model, slip_limit,
+#   restrict_contact_actions, mask_inactive_finger) must be taken FROM EACH
+#   CELL -- they decide what the policy's numbers mean. eval_contact.py excludes
+#   them from the digest for exactly this reason.
+#   TASK keys (require_settled, horizon, sampler, disengaged_away_deg) must be
+#   pinned at the protocol value for every cell, or the arms are not measuring
+#   the same success. The digest contains them, so drift is caught.
+#
+# THE ARMS SPLIT INTO TWO DIGEST GROUPS, because disengaged_away_deg is a task
+# key and placement genuinely changes the reset distribution:
+#   group A (uniform ring):  base, legacy, unmask
+#   group B (60deg cone):    place, unmask_place
+# Within a group the comparison is digest-exact. ACROSS groups it is not: both
+# are stratified to identical distance bins so d0 is matched by construction
+# (which was v22's failure), but the reset distributions differ on purpose.
+# To make the cross-group read interpretable, also score group A's `base`
+# checkpoints under group B's overrides -- no extra training, one eval each --
+# giving the transfer number that separates "placement helped" from "placement
+# made an easier task".
+#
+#   python eval_contact.py contact=push seed=0 \
+#     use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true \
+#     board_w_cm=50.0 board_h_cm=30.0 portals=[{x:25.0,y_lo:5.0,y_hi:25.0}] \
+#     min_progress_ticks=1 learning_starts=10000 require_settled=false \
+#     push_cone_deg=30 same_room_goal_prob=1.0 \
+#     <the cell's own interface keys, from its meta.txt> \
+#     <the group's disengaged_away_deg> \
+#     eval_ckpt=<cell>/model_best.zip
+# The printed env digest must match across every cell in a group.
 # ===========================================================================
 
+ARMS=(base legacy unmask place unmask_place); SEEDS=(0 1 2)
 i=$SLURM_ARRAY_TASK_ID
-if [ "$i" -lt 4 ]; then
-  TEMPLATE="push"
-  SEED=$(( i % 2 ))
-  TOTAL_STEPS=150000
-  # 0,1 -> srg 0.0 (internal control, the old setting); 2,3 -> srg 1.0.
-  SRG=$([ "$i" -lt 2 ] && echo 0.0 || echo 1.0)
-  # min_progress_cm is deliberately NOT passed: it defaults to null, which
-  # disables the distance filter entirely. min_progress_ticks alone gates.
-  EXTRA_OVERRIDE="use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true board_w_cm=50.0 board_h_cm=30.0 portals=[{x:25.0,y_lo:5.0,y_hi:25.0}] min_progress_ticks=1 her_n_sampled_goal=4 learning_starts=10000 same_room_goal_prob=${SRG} require_settled=false"
-  RUN_TAG="push_srg${SRG}_ticks1_s${SEED}"
-else
-  TEMPLATE="recontact"
-  SEED=$(( i - 4 ))
-  TOTAL_STEPS=300000
-  EXTRA_OVERRIDE="use_her=true w_T=0.0 w_a=0.0 w_m=0.0 guard_terminates=true"
-  RUN_TAG="recontact_donepatch_s${SEED}"
-fi
+ARM=${ARMS[$(( i / 3 ))]}
+SEED=${SEEDS[$(( i % 3 ))]}
+
+CF="action_interface=contact_frame"
+case "${ARM}" in
+  base)         ARM_OVERRIDE="${CF} slip_model=friction_cone"                                                        ;;
+  legacy)       ARM_OVERRIDE="${CF} slip_model=speed_fraction slip_limit=1.0"                                        ;;
+  unmask)       ARM_OVERRIDE="${CF} slip_model=friction_cone mask_inactive_finger=false"                             ;;
+  place)        ARM_OVERRIDE="${CF} slip_model=friction_cone disengaged_away_deg=60"                                 ;;
+  unmask_place) ARM_OVERRIDE="${CF} slip_model=friction_cone mask_inactive_finger=false disengaged_away_deg=60"      ;;
+  *) echo "unknown arm ${ARM}" >&2; exit 2 ;;
+esac
+
+TEMPLATE="push"
+TOTAL_STEPS=150000
+EXTRA_OVERRIDE="use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true board_w_cm=50.0 board_h_cm=30.0 portals=[{x:25.0,y_lo:5.0,y_hi:25.0}] min_progress_ticks=1 her_n_sampled_goal=4 learning_starts=10000 same_room_goal_prob=1.0 push_cone_deg=30 require_settled=false target_clip=null ${ARM_OVERRIDE}"
+RUN_TAG="push_${ARM}_s${SEED}"
 
 SWEEP_DIR="logs/sweep_${SLURM_ARRAY_JOB_ID}"
 mkdir -p "${SWEEP_DIR}"
@@ -160,7 +178,7 @@ python train_contact.py \
   ${EXTRA_OVERRIDE} \
   out_dir="${RUN_DIR}" \
   wandb=true wandb_run_name="${RUN_TAG}_${SLURM_ARRAY_JOB_ID}" \
-  wandb_group="overlap_donepatch_${SLURM_ARRAY_JOB_ID}"
+  wandb_group="free_finger_${SLURM_ARRAY_JOB_ID}"
 rc=$?
 
 still=$(squeue -h -j "${SLURM_ARRAY_JOB_ID}" -t PENDING,RUNNING -o "%A_%a" \
