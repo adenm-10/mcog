@@ -237,8 +237,13 @@ def main(cfg: DictConfig) -> None:
     # are deliberately EXCLUDED: they change how the policy's numbers are
     # interpreted, not what the task is, and two arms of an interface ablation
     # must stay comparable. They are recorded separately instead.
+    # mask_inactive_finger is an INTERFACE key, not a task key: it decides
+    # whether two of the policy's four outputs do anything, so replaying a
+    # masked checkpoint unmasked would suddenly animate outputs it never
+    # learned to control. disengaged_away_deg is a TASK key -- it moves the
+    # reset distribution -- and so stays inside the digest.
     iface_keys = ("action_interface", "slip_model", "slip_limit",
-                  "restrict_contact_actions")
+                  "restrict_contact_actions", "mask_inactive_finger")
     stamp = {k: repr(v) for k, v in sorted(env_kwargs.items()) if k not in iface_keys}
     stamp["template"] = template
     digest = hashlib.sha1(json.dumps(stamp, sort_keys=True).encode()).hexdigest()[:12]
@@ -266,7 +271,8 @@ def main(cfg: DictConfig) -> None:
             else f"{interface['slip_limit']}*v_max")
     print(f"  interface  {interface['action_interface']}"
           f"  slip={interface['slip_model']}({slip})"
-          f"  restrict={interface['restrict_contact_actions']}")
+          f"  restrict={interface['restrict_contact_actions']}"
+          f"  masked={interface['mask_inactive_finger']}")
     print(_table(rows, edges))
     print("  termination: " + "  ".join(
         f"{k} {v} ({100 * v / len(rows):.1f}%)"

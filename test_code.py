@@ -492,6 +492,70 @@ def cmd_contact() -> None:
           "speed_fraction still reproduces the superseded formula exactly",
           f"{legacy:.4f} vs {0.7 * 0.5 * v_max:.4f}")
 
+    section("mask_inactive_finger gates the free finger, guard stays on")
+    def _free_finger_moved(mask):
+        e = _contact_env(mask_inactive_finger=mask)
+        e.reset(seed=99)
+        other = "R" if e._active_finger == "L" else "L"
+        i = 0 if other == "L" else 2
+        a = np.zeros(4, dtype=np.float32)
+        a[i:i + 2] = 1.0
+        before = e._x[IDX_FINGER_XY[other]].copy()
+        for _ in range(5):
+            e.step(a)
+        return float(np.hypot(*(e._x[IDX_FINGER_XY[other]] - before)))
+    check(_free_finger_moved(True) < 0.05,
+          "masked: a full command to the free finger moves it not at all",
+          f"moved {_free_finger_moved(True):.4f}cm")
+    check(_free_finger_moved(False) > 0.5,
+          "unmasked: the same command does move it",
+          f"moved {_free_finger_moved(False):.4f}cm")
+    check(_contact_env(mask_inactive_finger=False).guard_terminates,
+          "unmasking leaves the forbidden_contact guard terminating")
+
+    section("disengaged_away_deg: off is bit-identical, on respects the cone")
+    def _resets(n, **kw):
+        e = _contact_env(**kw)
+        out = []
+        for s in range(n):
+            e.reset(seed=s)
+            other = "R" if e._active_finger == "L" else "L"
+            out.append((e._x[IDX_OBJ_XY].copy(), e._x[IDX_OBJ_HEADING].copy(),
+                        e._x[IDX_FINGER_XY[e._active_finger]].copy(),
+                        e._x[IDX_FINGER_XY[other]].copy(), e.params))
+        return out
+    base, off = _resets(40), _resets(40, disengaged_away_deg=None)
+    check(all(all(np.array_equal(x, y) for x, y in zip(a[:4], b[:4]))
+              for a, b in zip(base, off)),
+          "null keeps the RNG stream and every reset bit-identical")
+
+    half_deg = 60.0
+    on = _resets(120, disengaged_away_deg=half_deg)
+    worst, n_checked, n_clipped = 0.0, 0, 0
+    for obj, head, act, inact, p in on:
+        margin = p.finger_radius_cm + 0.5
+        # The sampler clips to the board, which pulls a point off its ray; a
+        # clipped sample says nothing about the cone, so exclude it and count it.
+        if (min(abs(inact[0] - margin), abs(inact[0] - (p.board_w_cm - margin)),
+                abs(inact[1] - margin), abs(inact[1] - (p.board_h_cm - margin)))
+                < 1e-9):
+            n_clipped += 1
+            continue
+        theta = float(np.arctan2(head[1], head[0]))
+        n_out, _t = face_frame(obj, theta, act, p.object_w_cm, p.object_h_cm)
+        d = inact - obj
+        cos = float(np.dot(d / np.hypot(*d), n_out))
+        worst = max(worst, math.degrees(math.acos(max(-1.0, min(1.0, cos)))))
+        n_checked += 1
+    check(n_checked > 60, "enough unclipped cone samples to be worth checking",
+          f"{n_checked}/120 unclipped ({n_clipped} clipped to the board)")
+    check(worst <= half_deg + 1e-6,
+          f"every unclipped spawn lies within {half_deg:g}deg of the active face normal",
+          f"worst deviation {worst:.2f}deg")
+    wide = _resets(120, disengaged_away_deg=180.0)
+    check(any(np.hypot(*(f - o)) > 0 for o, _h, _a, f, _p in wide),
+          "180deg reproduces a full ring without erroring")
+
     section("contact_frame moves the object further than the raw interface")
     def _displacement(**kw):
         e = _contact_env(**kw)

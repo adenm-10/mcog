@@ -79,7 +79,9 @@ class ContactEnv(gym.Env):
                 restrict_contact_actions: bool = False,
                 action_interface: str = "finger_velocity",
                 slip_model: str = "friction_cone",
-                slip_limit: float = 0.5):
+                slip_limit: float = 0.5,
+                mask_inactive_finger: bool = True,
+                disengaged_away_deg: Optional[float] = None):
         super().__init__()
         if template not in TEMPLATES:
             raise ValueError(f"template must be one of {sorted(TEMPLATES)}, got {template!r}")
@@ -156,6 +158,14 @@ class ContactEnv(gym.Env):
         # sweep_42007967 checkpoints still replay under their own interface.
         self.slip_model = slip_model
         self.slip_limit = float(slip_limit)
+        # Push only. False gives the policy both fingers and leaves
+        # forbidden_contact as the only thing keeping the free one clear;
+        # True zeroes the inactive finger, which parks it in the object's path.
+        self.mask_inactive_finger = bool(mask_inactive_finger)
+        # Push only: half-angle (deg) of the cone the disengaged finger spawns
+        # in, centred behind the object's travel. None -> the historical
+        # uniform ring, bit-identical.
+        self.disengaged_away_deg = disengaged_away_deg
         self._rng = np.random.RandomState(seed)
         self._t = 0
         self._active_finger = "L"
@@ -229,14 +239,23 @@ class ContactEnv(gym.Env):
         x0[IDX_FINGER_XY[side]] = xy
         return x0
 
-    def _sample_disengaged_point(self, center_xy: Tuple[float, float]) -> Tuple[float, float]:
+    def _sample_disengaged_point(self, center_xy: Tuple[float, float],
+                                 away_from: Optional[np.ndarray] = None) -> Tuple[float, float]:
         """A random board point outside the object's circular footprint bound, out
-        to disengaged_reach_mult x that radius."""
+        to disengaged_reach_mult x that radius. `away_from` is a unit vector the
+        spawn cone is centred on when disengaged_away_deg is set."""
         ow, oh = self.params.object_w_cm, self.params.object_h_cm
         half_diag = 0.5 * float(np.hypot(ow, oh))
         reach = (half_diag + self.params.finger_radius_cm + 1.0) * \
             self._rng.uniform(1.0, self.disengaged_reach_mult)
-        ang = float(self._rng.uniform(0.0, 2.0 * np.pi))
+        if self.disengaged_away_deg is None or away_from is None:
+            ang = float(self._rng.uniform(0.0, 2.0 * np.pi))
+        else:
+            # One uniform either way, in the same order, so the None path stays
+            # bit-identical -- same discipline as _sample_push_edge's cone branch.
+            half = math.radians(float(self.disengaged_away_deg))
+            centre = math.atan2(float(away_from[1]), float(away_from[0]))
+            ang = centre + float(self._rng.uniform(-half, half))
         margin = self.params.finger_radius_cm + 0.5
         x = float(np.clip(center_xy[0] + reach * np.cos(ang),
                           margin, self.params.board_w_cm - margin))
@@ -264,7 +283,10 @@ class ContactEnv(gym.Env):
         obj_state = self._place_object(x0, y0)
         obj_state = self._place_finger(obj_state, active,
                                        (x0 + face_offset[0], y0 + face_offset[1]))
-        inactive_xy = self._sample_disengaged_point((x0, y0))
+        # The object travels away from the active finger, so that finger's own
+        # outward normal points at the one region it cannot be run into.
+        inactive_xy = self._sample_disengaged_point(
+            (x0, y0), away_from=np.asarray(self._FACE_NORMALS[face], dtype=float))
         obj_state = self._place_finger(obj_state, inactive, inactive_xy)
         return obj_state
 
@@ -526,12 +548,15 @@ class ContactEnv(gym.Env):
         a = np.clip(np.asarray(action, dtype=np.float32).reshape(-1), -1.0, 1.0)
         cmd = None
         if self.template == "push":
-            # Masked: the inactive finger has no task-relevant signal, and its
-            # exploration noise alone can wander into forbidden_contact.
-            other = "R" if self._active_finger == "L" else "L"
-            i = 0 if other == "L" else 2
-            a = a.copy()
-            a[i:i + 2] = 0.0
+            if self.mask_inactive_finger:
+                # Zeroed, not free: the inactive finger's exploration noise alone
+                # can wander into forbidden_contact. The cost is that it stays
+                # servo-held wherever it spawned, so a travelling object runs into
+                # it -- which is why the default is worth ablating.
+                other = "R" if self._active_finger == "L" else "L"
+                i = 0 if other == "L" else 2
+                a = a.copy()
+                a[i:i + 2] = 0.0
             if self.restrict_contact_actions:
                 a = self._restrict_push_action(a)
             if self.action_interface == "contact_frame":

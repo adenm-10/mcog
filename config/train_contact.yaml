@@ -119,6 +119,17 @@ slip_model: friction_cone # contact_frame only -- how the tangential (face-paral
                           # kept only so archived checkpoints replay faithfully.
 slip_limit: 0.5           # speed_fraction only -- tangential ceiling as a fraction
                           # of v_max.
+mask_inactive_finger: true  # push only -- true zeroes the non-pushing finger's
+                          # action, which leaves it servo-held wherever it spawned
+                          # and in the travelling object's path (measured:
+                          # forbidden_contact 8% -> 17-19% once pushes got long).
+                          # false gives the policy both fingers and leaves the
+                          # Eq 40 guard as the only thing keeping it clear.
+                          # Default stays true so archived checkpoints replay.
+disengaged_away_deg: null # push only -- half-angle (deg) of the cone the
+                          # disengaged finger spawns in, centred on the active
+                          # face's outward normal (i.e. behind the object's
+                          # travel). null -> the historical uniform ring.
 
 # --- settle thresholds (contact_templates.py) -- null -> module constants
 # (0.5cm/s, 5deg/s). Overridable so they're sweepable.
