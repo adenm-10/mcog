@@ -341,6 +341,100 @@ def cmd_geometry() -> None:
 
 # ======================================================================= #
 
+def _contact_env(**kw):
+    from domains.contact.gym_env import ContactEnv
+    from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+    params = PlanarFingertipParams(board_w_cm=50.0, board_h_cm=30.0,
+                                   portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),))
+    return ContactEnv(template="push", params=params, seed=0, require_settled=False,
+                      push_cone_deg=30.0, same_room_goal_prob=1.0, **kw)
+
+
+def _scripted_states(env, n_steps: int, a):
+    """States visited under a fixed action, as a flat rounded tuple."""
+    import numpy as np
+    env.reset(seed=4242)
+    out = []
+    for _ in range(n_steps):
+        env.step(np.asarray(a, dtype=np.float32))
+        out.append(tuple(np.round(env._x, 12)))
+    return out
+
+
+def cmd_contact() -> None:
+    """The contact action interfaces. First coverage of ContactEnv/Physics/
+    PlanarFingertipWorld -- nothing exercised them before this."""
+    import math
+
+    import numpy as np
+    from domains.contact.planar_fingertips import face_frame
+
+    section("face_frame: outward normal on each face, unrotated")
+    for finger, want, lab in (((10.0, 0.0), (1.0, 0.0), "+x"),
+                              ((-10.0, 0.0), (-1.0, 0.0), "-x"),
+                              ((0.0, 10.0), (0.0, 1.0), "+y"),
+                              ((0.0, -10.0), (0.0, -1.0), "-y")):
+        n, t = face_frame((0.0, 0.0), 0.0, finger, 10.0, 6.0)
+        check(close(n[0], want[0]) and close(n[1], want[1]), f"normal is {lab}",
+              f"got ({n[0]:+.3f},{n[1]:+.3f})")
+        check(close(float(np.dot(n, t)), 0.0) and close(float(np.hypot(*t)), 1.0),
+              f"{lab} tangent is unit and orthogonal")
+
+    section("face_frame: rotates with the object")
+    th = math.radians(30.0)
+    n, _t = face_frame((0.0, 0.0), th, (10.0 * math.cos(th), 10.0 * math.sin(th)), 10.0, 6.0)
+    check(close(n[0], math.cos(th), 1e-9) and close(n[1], math.sin(th), 1e-9),
+          "a +x-face finger on a 30deg object gets the rotated normal",
+          f"got ({n[0]:+.4f},{n[1]:+.4f})")
+
+    section("_restrict_push_action is bit-identical after the face_frame refactor")
+    from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+                                                   IDX_OBJ_VEL, IDX_OBJ_XY)
+
+    def _ref(env, x, active, a):
+        """The pre-refactor implementation, inlined verbatim as the oracle."""
+        theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
+        c, s = float(np.cos(theta)), float(np.sin(theta))
+        rel = x[IDX_FINGER_XY[active]] - x[IDX_OBJ_XY]
+        local = np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]])
+        ow, oh = env.params.object_w_cm, env.params.object_h_cm
+        if abs(local[0]) / (ow / 2.0) >= abs(local[1]) / (oh / 2.0):
+            ln = np.array([1.0 if local[0] >= 0.0 else -1.0, 0.0])
+        else:
+            ln = np.array([0.0, 1.0 if local[1] >= 0.0 else -1.0])
+        normal = np.array([c * ln[0] - s * ln[1], s * ln[0] + c * ln[1]])
+        i = 0 if active == "L" else 2
+        v_cmd = env.params.v_max_cm_s * a[i:i + 2]
+        cmd_n = float(np.dot(v_cmd, normal))
+        obj_n = float(np.dot(x[IDX_OBJ_VEL], normal))
+        if cmd_n > obj_n:
+            v_cmd = v_cmd + (obj_n - cmd_n) * normal
+            a = a.copy()
+            a[i:i + 2] = np.clip(v_cmd / env.params.v_max_cm_s, -1.0, 1.0)
+        return a
+
+    env = _contact_env(restrict_contact_actions=True)
+    rng, mismatch, fired = np.random.RandomState(7), 0, 0
+    for k in range(400):
+        env.reset(seed=5000 + k)
+        # Perturb the finger around the object so every face, and both the
+        # clamped and unclamped branches, get exercised.
+        x = env._x.copy()
+        ang, r = rng.uniform(0, 2 * math.pi), rng.uniform(3.0, 8.0)
+        x[IDX_FINGER_XY[env._active_finger]] = (x[IDX_OBJ_XY]
+                                                + np.array([r * math.cos(ang),
+                                                            r * math.sin(ang)]))
+        x[IDX_OBJ_VEL] = rng.uniform(-5.0, 5.0, size=2)
+        env._x = x
+        a = rng.uniform(-1.0, 1.0, size=4).astype(np.float32)
+        got, want = env._restrict_push_action(a), _ref(env, x, env._active_finger, a)
+        mismatch += int(not np.array_equal(got, want))
+        fired += int(not np.array_equal(got, a))
+    check(mismatch == 0, "matches the pre-refactor oracle on 400 random states",
+          f"{mismatch} mismatch(es)")
+    check(fired > 100, "and the clamp actually fired on most of them",
+          f"fired on {fired}/400 (a low count would make the test vacuous)")
+
 def main() -> int:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -350,6 +444,8 @@ def main() -> int:
         cmd_static()
     elif cmd == "geometry":
         cmd_geometry()
+    elif cmd == "contact":
+        cmd_contact()
     elif cmd == "fixtures":
         from tests.fixture_eval import cmd_fixtures
         _results.extend(cmd_fixtures(args[0] if args else "tests/fixtures_smoke"))

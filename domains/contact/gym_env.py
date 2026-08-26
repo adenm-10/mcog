@@ -27,7 +27,8 @@ from domains.contact.physics import Physics
 from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
                                                IDX_PEAK_FORCE,
-                                               PlanarFingertipParams, Portal)
+                                               PlanarFingertipParams, Portal,
+                                               face_frame)
 from domains.contact.reward import RewardWeights, arrived_loose, goal_dist, step_reward
 from domains.contact_templates import (RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
                                        object_settled)
@@ -473,16 +474,8 @@ class ContactEnv(gym.Env):
         x = self._x
         active = self._active_finger
         theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
-        c, s = float(np.cos(theta)), float(np.sin(theta))
-        rel = x[IDX_FINGER_XY[active]] - x[IDX_OBJ_XY]
-        local = np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]])
-        ow, oh = self.params.object_w_cm, self.params.object_h_cm
-        if abs(local[0]) / (ow / 2.0) >= abs(local[1]) / (oh / 2.0):
-            local_normal = np.array([1.0 if local[0] >= 0.0 else -1.0, 0.0])
-        else:
-            local_normal = np.array([0.0, 1.0 if local[1] >= 0.0 else -1.0])
-        normal = np.array([c * local_normal[0] - s * local_normal[1],
-                          s * local_normal[0] + c * local_normal[1]])
+        normal, _tangent = face_frame(x[IDX_OBJ_XY], theta, x[IDX_FINGER_XY[active]],
+                                      self.params.object_w_cm, self.params.object_h_cm)
 
         i = 0 if active == "L" else 2
         v_cmd = self.params.v_max_cm_s * a[i:i + 2]

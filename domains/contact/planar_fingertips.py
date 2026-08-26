@@ -36,6 +36,24 @@ IDX_CONTACT = {"L": 15, "R": 16}
 IDX_NO_CONTACT_STEPS = {"L": 17, "R": 18}
 IDX_PEAK_FORCE = {"L": 19, "R": 20}
 
+
+def face_frame(obj_xy, obj_theta: float, finger_xy, object_w_cm: float,
+               object_h_cm: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Outward unit normal of the object face nearest `finger_xy`, and that
+    face's tangent. Pure; shared by the per-tick clamp and the contact-frame
+    action interface, which must agree on which face is being pushed."""
+    c, s = math.cos(obj_theta), math.sin(obj_theta)
+    rel = np.asarray(finger_xy, dtype=float) - np.asarray(obj_xy, dtype=float)
+    local = np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]])
+    if abs(local[0]) / (object_w_cm / 2.0) >= abs(local[1]) / (object_h_cm / 2.0):
+        local_n = np.array([1.0 if local[0] >= 0.0 else -1.0, 0.0])
+    else:
+        local_n = np.array([0.0, 1.0 if local[1] >= 0.0 else -1.0])
+    n_out = np.array([c * local_n[0] - s * local_n[1],
+                      s * local_n[0] + c * local_n[1]])
+    return n_out, np.array([-n_out[1], n_out[0]])
+
+
 # Stands in for the normal force gravity would supply, to size the manual
 # table drag below. There is no vertical axis here, so object-table friction
 # cannot be a native pymunk contact -- the table isn't a shape.
