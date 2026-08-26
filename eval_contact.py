@@ -82,6 +82,9 @@ def rollout(model, env, seed: int, gamma: float,
 
     done, steps, succ, touch, ret = False, 0, 0.0, 0, 0.0
     why = "horizon"
+    # E3: closest approach and when it happened. A large final_dist means
+    # something very different depending on whether min_dist was ever small.
+    min_dist, min_tick = d0, 0
     while not done:
         obs, r, term, trunc, info = env.step(a)
         if snapshots is not None:
@@ -89,6 +92,10 @@ def rollout(model, env, seed: int, gamma: float,
             snapshots.append(to_snapshot(env._x, env.params))
         ret += (gamma ** steps) * float(r)
         steps += 1
+        ag = np.asarray(obs["achieved_goal"], dtype=float)
+        dist = float(np.hypot(ag[0] - dg[0], ag[1] - dg[1]))
+        if dist < min_dist:
+            min_dist, min_tick = dist, steps
         touch += int(float(obs["observation"][OBS_CONTACT[active]]) > 0.5)
         succ = max(succ, float(info.get("is_success", 0.0)))
         if term or trunc:
@@ -103,7 +110,43 @@ def rollout(model, env, seed: int, gamma: float,
     return dict(d0=d0, success=succ, steps=steps, why=why, q0=q0, ret=ret,
                 retention=touch / max(1, steps),
                 displacement=float(np.hypot(agT[0] - ag0[0], agT[1] - ag0[1])),
-                final_dist=float(np.hypot(agT[0] - dg[0], agT[1] - dg[1])))
+                final_dist=float(np.hypot(agT[0] - dg[0], agT[1] - dg[1])),
+                min_dist=min_dist, min_tick=min_tick)
+
+
+def overshoot_report(rows: List[dict], arrival_eps: float) -> str:
+    """E3: split non-arrivals by whether the object ever got close.
+
+    A large final distance is ambiguous on its own. If closest approach was
+    inside the arrival band the policy can aim and cannot stop, and settling is
+    the fix; if it never got close, settling is beside the point.
+    """
+    fail = [r for r in rows if r["why"] != "arrived"]
+    if not fail:
+        return "  overshoot: no failures"
+    out = ["  overshoot diagnosis (non-arrivals only, n=%d):" % len(fail)]
+    for band, label in ((arrival_eps, "arrival_eps"), (1.0, "1cm")):
+        got_close = [r for r in fail if r["min_dist"] <= band]
+        n_over = len([r for r in got_close if r["final_dist"] > band])
+        n_settle = len(got_close) - n_over
+        out.append(
+            f"    within {band:g}cm ({label}): reached {len(got_close)}"
+            f" ({100 * len(got_close) / len(fail):.0f}%)"
+            f" -> overshot {n_over}, held-but-unsettled {n_settle}"
+            f"   |  never reached {len(fail) - len(got_close)}"
+            f" ({100 * (len(fail) - len(got_close)) / len(fail):.0f}%)")
+    md = np.array([r["min_dist"] for r in fail])
+    fd = np.array([r["final_dist"] for r in fail])
+    q = [10, 50, 90]
+    out.append("    min_dist  p10/p50/p90 " +
+               "/".join(f"{v:.2f}" for v in np.percentile(md, q)) + " cm")
+    out.append("    final_dist p10/p50/p90 " +
+               "/".join(f"{v:.2f}" for v in np.percentile(fd, q)) + " cm")
+    # How much of the approach is thrown away after closest approach.
+    out.append(f"    mean (final - min) {float((fd - md).mean()):.2f} cm"
+               f"   median closest-approach tick "
+               f"{float(np.median([r['min_tick'] for r in fail])):.0f}")
+    return "\n".join(out)
 
 
 def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]:
@@ -277,6 +320,7 @@ def main(cfg: DictConfig) -> None:
     print("  termination: " + "  ".join(
         f"{k} {v} ({100 * v / len(rows):.1f}%)"
         for k, v in sorted(whys.items(), key=lambda kv: -kv[1])))
+    print(overshoot_report(rows, float(env.arrival_eps)))
     print(f"  Q(s0) mean {qs.mean():.2f}  max {qs.max():.2f}   "
           f"realized mean {rets.mean():.2f}   gap {qs.mean() - rets.mean():+.2f}"
           f"   Q>goal_reward in {int((qs > d['goal_reward']).sum())}/{len(qs)}")
