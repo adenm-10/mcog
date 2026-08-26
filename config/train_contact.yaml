@@ -36,6 +36,23 @@ target_clip: null          # clamp the critic's TD target to [0, this]. null -> 
                            # tuning knob -- see domains/contact/sac_clipped.py.
 her_n_sampled_goal: 4      # HerReplayBuffer's relabels-per-real-transition (SB3 default 4)
 
+# --- eval_contact.py only (standalone checkpoint scorer; ignored by training) ---
+eval_ckpt: null                          # path to a .zip saved by train_contact.py
+eval_episodes_per_bin: 12                # stratified set: episodes per distance bin
+eval_dist_edges: [3.0, 6.0, 9.0, 12.0]   # bin edges (cm) -> len+1 bins
+eval_max_reject: 20000                   # rejection-sampling budget for the whole set
+eval_out: null                           # json path; null -> beside the checkpoint
+eval_summary_png: false                  # success-by-bin + termination + progress figure
+eval_video: false                        # mp4 per selected episode (~8KB each)
+eval_video_n: 4                          # how many episodes to render
+eval_video_pick: auto                    # auto | arrived | failed. auto mixes
+                                         # successes and failures; arrived shows
+                                         # the hardest successes first.
+eval_video_fps: 12
+eval_media_dir: null                     # null -> media/eval/<cell>/. LOCAL DISK ONLY:
+                                         # nothing here is ever uploaded (limited wandb
+                                         # storage), and visualize.py has no wandb import.
+
 # --- env / arrival ---
 horizon: null                # set per-template in config/contact/*.yaml
 arrival_eps: 0.4

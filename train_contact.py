@@ -47,13 +47,9 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
     return _init
 
 
-@hydra.main(version_base=None, config_path="config", config_name="train_contact")
-def main(cfg: DictConfig) -> None:
-    from hydra.core.hydra_config import HydraConfig
-    d = OmegaConf.to_container(cfg, resolve=True)
-    template = HydraConfig.get().runtime.choices["contact"]
-    d["template"] = template
-
+def build_env_kwargs(d: dict) -> dict:
+    """Every `ContactEnv` kwarg except `template`/`seed`, from a resolved Hydra
+    dict. Shared with eval_contact.py so both build the identical env."""
     from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
     from domains.contact.reward import RewardWeights
 
@@ -75,6 +71,29 @@ def main(cfg: DictConfig) -> None:
                             w_F=d["w_F"], w_m=d["w_m"], w_T=d["w_T"],
                             force_max=d["force_max"])
 
+    return dict(horizon=d["horizon"], arrival_eps=d["arrival_eps"],
+                params=params, weights=weights,
+                wall_margin_cm=d["wall_margin_cm"],
+                disengaged_reach_mult=d["disengaged_reach_mult"],
+                eps_v_cm_s=d["eps_v_cm_s"], eps_omega_deg_s=d["eps_omega_deg_s"],
+                guard_terminates=d["guard_terminates"],
+                min_progress_cm=d["min_progress_cm"],
+                min_progress_ticks=d["min_progress_ticks"],
+                require_settled=d["require_settled"],
+                same_room_goal_prob=d["same_room_goal_prob"],
+                push_cone_deg=d["push_cone_deg"],
+                restrict_contact_actions=d["restrict_contact_actions"],
+                action_interface=d["action_interface"],
+                slip_limit=d["slip_limit"])
+
+
+@hydra.main(version_base=None, config_path="config", config_name="train_contact")
+def main(cfg: DictConfig) -> None:
+    from hydra.core.hydra_config import HydraConfig
+    d = OmegaConf.to_container(cfg, resolve=True)
+    template = HydraConfig.get().runtime.choices["contact"]
+    d["template"] = template
+
     out_dir = d["out_dir"] or os.path.join(
         "logs", "contact", template, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(out_dir, exist_ok=True)
@@ -88,20 +107,7 @@ def main(cfg: DictConfig) -> None:
     from domains.contact.sac_clipped import TargetClippedSAC
     from option_graph.callbacks import TrainMetricsCallback, attach_csv_logger
 
-    env_kwargs = dict(horizon=d["horizon"], arrival_eps=d["arrival_eps"],
-                      params=params, weights=weights,
-                      wall_margin_cm=d["wall_margin_cm"],
-                      disengaged_reach_mult=d["disengaged_reach_mult"],
-                      eps_v_cm_s=d["eps_v_cm_s"], eps_omega_deg_s=d["eps_omega_deg_s"],
-                      guard_terminates=d["guard_terminates"],
-                      min_progress_cm=d["min_progress_cm"],
-                      min_progress_ticks=d["min_progress_ticks"],
-                      require_settled=d["require_settled"],
-                      same_room_goal_prob=d["same_room_goal_prob"],
-                      push_cone_deg=d["push_cone_deg"],
-                      restrict_contact_actions=d["restrict_contact_actions"],
-                      action_interface=d["action_interface"],
-                      slip_limit=d["slip_limit"])
+    env_kwargs = build_env_kwargs(d)
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
     eval_env = _make_env(template, d["seed"] + 10_000, **env_kwargs)()

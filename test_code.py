@@ -479,6 +479,48 @@ def cmd_contact() -> None:
     check(cf > raw, "a scripted straight push travels further under contact_frame",
           f"{cf:.2f}cm vs {raw:.2f}cm")
 
+    section("renderer runs on real rollout data")
+    # visualize.py had zero callers until v24. plots.py rotted exactly that way
+    # (a dropped `import pandas`, found only when a real run exercised it), so
+    # these call the real functions on real snapshots, not an import check.
+    import tempfile
+
+    from domains.contact.physics import to_snapshot
+    from domains.contact import visualize as V
+    env = _contact_env()
+    env.reset(seed=4242)
+    snaps = [to_snapshot(env._x, env.params)]
+    for _ in range(12):
+        env.step(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        snaps.append(to_snapshot(env._x, env.params))
+    with tempfile.TemporaryDirectory() as td:
+        mp4 = os.path.join(td, "t.mp4")
+        try:
+            V.save_video(snaps, mp4, fps=10)
+            ok = os.path.exists(mp4) and os.path.getsize(mp4) > 0
+            check(ok, "save_video writes a non-empty mp4",
+                  f"{os.path.getsize(mp4) if ok else 0} bytes")
+        except Exception as e:
+            check(False, "save_video writes a non-empty mp4", f"{type(e).__name__}: {e}")
+        for name, fn in (("plot_trajectory", lambda: V.plot_trajectory(snaps)),
+                         ("plot_snapshot", lambda: V.plot_snapshot(snaps[0]))):
+            try:
+                fn(); check(True, f"{name} runs")
+            except Exception as e:
+                check(False, f"{name} runs", f"{type(e).__name__}: {e}")
+        try:
+            from eval_contact import save_summary_png
+            rows = [dict(d0=1.0, success=1.0, steps=5, why="arrived", q0=8.0, ret=9.0,
+                         retention=1.0, displacement=1.0, final_dist=0.2),
+                    dict(d0=9.0, success=0.0, steps=14, why="contact_lost", q0=3.0,
+                         ret=0.0, retention=0.3, displacement=2.0, final_dist=8.0)]
+            png = os.path.join(td, "s.png")
+            save_summary_png(rows, [3.0, 6.0, 9.0, 12.0], png, "gate")
+            check(os.path.getsize(png) > 0, "eval_contact.save_summary_png writes a png")
+        except Exception as e:
+            check(False, "eval_contact.save_summary_png writes a png",
+                  f"{type(e).__name__}: {e}")
+
     section("misconfiguration raises rather than being ignored")
     for kw, why in (
             (dict(action_interface="nonsense"), "unknown interface"),
