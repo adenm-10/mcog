@@ -237,7 +237,8 @@ def main(cfg: DictConfig) -> None:
     # are deliberately EXCLUDED: they change how the policy's numbers are
     # interpreted, not what the task is, and two arms of an interface ablation
     # must stay comparable. They are recorded separately instead.
-    iface_keys = ("action_interface", "slip_limit", "restrict_contact_actions")
+    iface_keys = ("action_interface", "slip_model", "slip_limit",
+                  "restrict_contact_actions")
     stamp = {k: repr(v) for k, v in sorted(env_kwargs.items()) if k not in iface_keys}
     stamp["template"] = template
     digest = hashlib.sha1(json.dumps(stamp, sort_keys=True).encode()).hexdigest()[:12]
@@ -261,8 +262,10 @@ def main(cfg: DictConfig) -> None:
 
     print(f"\n[eval_contact] {template}  {ckpt}")
     print(f"  env digest {digest}   {len(rows)} episodes   gamma {gamma}")
+    slip = (f"mu*push" if interface["slip_model"] == "friction_cone"
+            else f"{interface['slip_limit']}*v_max")
     print(f"  interface  {interface['action_interface']}"
-          f"  slip_limit={interface['slip_limit']}"
+          f"  slip={interface['slip_model']}({slip})"
           f"  restrict={interface['restrict_contact_actions']}")
     print(_table(rows, edges))
     print("  termination: " + "  ".join(

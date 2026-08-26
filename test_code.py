@@ -441,7 +441,7 @@ def cmd_contact() -> None:
           f"fired on {fired}/400 (a low count would make the test vacuous)")
 
     section("contact_frame constraints hold every substep")
-    env = _contact_env(action_interface="contact_frame", slip_limit=0.5)
+    env = _contact_env(action_interface="contact_frame", slip_model="speed_fraction", slip_limit=0.5)
     obs, _ = env.reset(seed=4242)
     v_max, worst_t, worst_gap = env.params.v_max_cm_s, 0.0, -1e9
     for _ in range(60):
@@ -463,6 +463,35 @@ def cmd_contact() -> None:
     check(worst_gap < v_max, "no runaway gap-opening under a max slide command",
           f"worst (v-v_obj).n = {worst_gap:+.3f}")
 
+    section("friction_cone ties the tangential budget to the push")
+    from domains.contact.planar_fingertips import (ContactFrameCommand,
+                                                   _tangential_speed)
+    mu, v_max = 0.75, 20.0
+    def _cone(push, slide):
+        return _tangential_speed(ContactFrameCommand(
+            side="L", push=push, slide=slide, slip_model="friction_cone",
+            slip_limit=0.5, mu=mu), v_max)
+    check(abs(_cone(1.0, 1.0) - mu * v_max) < 1e-9,
+          "full push + full slide gives exactly mu*v_max",
+          f"{_cone(1.0, 1.0):.4f} vs {mu * v_max:.4f}")
+    check(abs(_cone(0.0, 1.0)) < 1e-12,
+          "zero push gives zero tangential budget (no normal force, no friction)",
+          f"{_cone(0.0, 1.0):.6f}")
+    check(abs(_cone(0.5, 1.0) - 0.5 * mu * v_max) < 1e-9,
+          "the budget is linear in the push, as mu*N is",
+          f"{_cone(0.5, 1.0):.4f}")
+    # The realized deviation from the face normal must sit inside the cone.
+    ang = math.degrees(math.atan2(abs(_cone(1.0, 1.0)), 1.0 * v_max))
+    check(abs(ang - math.degrees(math.atan(mu))) < 1e-6,
+          "the worst-case command sits exactly on the Coulomb cone",
+          f"{ang:.2f}deg vs arctan(mu)={math.degrees(math.atan(mu)):.2f}deg")
+    legacy = _tangential_speed(ContactFrameCommand(
+        side="L", push=0.3, slide=0.7, slip_model="speed_fraction",
+        slip_limit=0.5, mu=mu), v_max)
+    check(abs(legacy - 0.7 * 0.5 * v_max) < 1e-9,
+          "speed_fraction still reproduces the superseded formula exactly",
+          f"{legacy:.4f} vs {0.7 * 0.5 * v_max:.4f}")
+
     section("contact_frame moves the object further than the raw interface")
     def _displacement(**kw):
         e = _contact_env(**kw)
@@ -475,7 +504,7 @@ def cmd_contact() -> None:
         ag = np.asarray(o["achieved_goal"], dtype=float)
         return float(np.hypot(ag[0] - ag0[0], ag[1] - ag0[1]))
     raw = _displacement()
-    cf = _displacement(action_interface="contact_frame", slip_limit=0.5)
+    cf = _displacement(action_interface="contact_frame", slip_model="speed_fraction", slip_limit=0.5)
     check(cf > raw, "a scripted straight push travels further under contact_frame",
           f"{cf:.2f}cm vs {raw:.2f}cm")
 
@@ -526,6 +555,7 @@ def cmd_contact() -> None:
             (dict(action_interface="nonsense"), "unknown interface"),
             (dict(action_interface="contact_frame", restrict_contact_actions=True),
              "contact_frame + restrict_contact_actions"),
+            (dict(slip_model="coulomb"), "unknown slip_model"),
     ):
         try:
             _contact_env(**kw)

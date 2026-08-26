@@ -26,7 +26,8 @@ from domains.contact.board import Board
 from domains.contact.physics import Physics
 from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
-                                               IDX_PEAK_FORCE, ContactFrameCommand,
+                                               IDX_PEAK_FORCE, SLIP_MODELS,
+                                               ContactFrameCommand,
                                                PlanarFingertipParams, Portal,
                                                face_frame)
 from domains.contact.reward import RewardWeights, arrived_loose, goal_dist, step_reward
@@ -77,6 +78,7 @@ class ContactEnv(gym.Env):
                 push_cone_deg: Optional[float] = None,
                 restrict_contact_actions: bool = False,
                 action_interface: str = "finger_velocity",
+                slip_model: str = "friction_cone",
                 slip_limit: float = 0.5):
         super().__init__()
         if template not in TEMPLATES:
@@ -144,7 +146,15 @@ class ContactEnv(gym.Env):
                 raise ValueError("action_interface='contact_frame' already enforces the "
                                  "no-gap-opening rule per substep; "
                                  "restrict_contact_actions would re-apply it per tick")
+        if slip_model not in SLIP_MODELS:
+            raise ValueError(f"slip_model must be one of {sorted(SLIP_MODELS)}, "
+                             f"got {slip_model!r}")
         self.action_interface = action_interface
+        # friction_cone derives the tangential budget from finger_friction
+        # (Coulomb mu*N), so it is not a free parameter. speed_fraction +
+        # slip_limit is the superseded tuned ceiling, kept so the archived
+        # sweep_42007967 checkpoints still replay under their own interface.
+        self.slip_model = slip_model
         self.slip_limit = float(slip_limit)
         self._rng = np.random.RandomState(seed)
         self._t = 0
@@ -532,7 +542,9 @@ class ContactEnv(gym.Env):
                 cmd = ContactFrameCommand(side=self._active_finger,
                                           push=0.5 * (float(a[j]) + 1.0),
                                           slide=float(a[j + 1]),
-                                          slip_limit=self.slip_limit)
+                                          slip_model=self.slip_model,
+                                          slip_limit=self.slip_limit,
+                                          mu=self.params.finger_friction)
         x_next, u_phys = self._physics.step(self._x, a, contact_frame=cmd)
 
         leg = SimpleNamespace(direction=self._active_finger)

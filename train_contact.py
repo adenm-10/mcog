@@ -22,7 +22,8 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               min_progress_ticks=None, require_settled=True,
               same_room_goal_prob=0.0, push_cone_deg=None,
               restrict_contact_actions=False,
-              action_interface="finger_velocity", slip_limit=0.5):
+              action_interface="finger_velocity", slip_model="friction_cone",
+              slip_limit=0.5):
     def _init():
         from stable_baselines3.common.monitor import Monitor
         from domains.contact.gym_env import ContactEnv
@@ -39,7 +40,7 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          push_cone_deg=push_cone_deg,
                          restrict_contact_actions=restrict_contact_actions,
                          action_interface=action_interface,
-                         slip_limit=slip_limit)
+                         slip_model=slip_model, slip_limit=slip_limit)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
         # fired and rollout/ep_rew_mean was silently never logged.
@@ -84,7 +85,7 @@ def build_env_kwargs(d: dict) -> dict:
                 push_cone_deg=d["push_cone_deg"],
                 restrict_contact_actions=d["restrict_contact_actions"],
                 action_interface=d["action_interface"],
-                slip_limit=d["slip_limit"])
+                slip_model=d["slip_model"], slip_limit=d["slip_limit"])
 
 
 @hydra.main(version_base=None, config_path="config", config_name="train_contact")

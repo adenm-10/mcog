@@ -43,8 +43,10 @@ class ContactFrameCommand:
     face's inward normal and its tangent, as fractions of v_max."""
     side: str          # active finger, "L" or "R"
     push: float        # [0, 1] along the INWARD face normal
-    slide: float       # [-1, 1], scaled by slip_limit
-    slip_limit: float  # tangential ceiling as a fraction of v_max
+    slide: float       # [-1, 1]
+    slip_model: str    # "friction_cone" | "speed_fraction"
+    slip_limit: float  # speed_fraction only: tangential ceiling, fraction of v_max
+    mu: float          # friction_cone only: finger-object friction coefficient
 
 
 def face_frame(obj_xy, obj_theta: float, finger_xy, object_w_cm: float,
@@ -62,6 +64,27 @@ def face_frame(obj_xy, obj_theta: float, finger_xy, object_w_cm: float,
     n_out = np.array([c * local_n[0] - s * local_n[1],
                       s * local_n[0] + c * local_n[1]])
     return n_out, np.array([-n_out[1], n_out[0]])
+
+
+SLIP_MODELS = ("friction_cone", "speed_fraction")
+
+
+def _tangential_speed(cmd: "ContactFrameCommand", v_max: float) -> float:
+    """Face-parallel speed for one substep, from the tick's (push, slide).
+
+    friction_cone: Coulomb. A contact pressing with normal force N can carry at
+    most mu*N tangentially before it slides, so the budget scales with the push
+    and vanishes when the finger stops pressing. mu is finger_friction -- the
+    same coefficient pymunk uses for this contact, so there is one number, not
+    two that can disagree. speed_fraction is the legacy fixed ceiling, kept only
+    so archived checkpoints replay under the interface they were trained on.
+
+    Both scale rather than clip: a clip would leave the tail of `slide`'s range
+    a dead zone that SAC's entropy term has to fight, same reason push is affine.
+    """
+    if cmd.slip_model == "friction_cone":
+        return cmd.slide * cmd.mu * cmd.push * v_max
+    return cmd.slide * cmd.slip_limit * v_max
 
 
 # Stands in for the normal force gravity would supply, to size the manual
@@ -309,7 +332,7 @@ class PlanarFingertipWorld:
         Two soft constraints, both re-derived per substep so a 25 Hz command
         cannot slide the finger across a face before anything reacts:
           1. never open the contact gap faster than the object recedes;
-          2. bound tangential speed to `slip_limit` of v_max.
+          2. bound tangential speed -- see _tangential_speed.
         Contact can still be lost by walking off a face corner, so the
         contact_lost guard stays a real failure mode.
         """
@@ -318,7 +341,7 @@ class PlanarFingertipWorld:
         n_out, tang = face_frame((self.obj.position.x, self.obj.position.y),
                                  self.obj.angle, (body.position.x, body.position.y),
                                  self.params.object_w_cm, self.params.object_h_cm)
-        v = -cmd.push * v_max * n_out + cmd.slide * cmd.slip_limit * v_max * tang
+        v = -cmd.push * v_max * n_out + _tangential_speed(cmd, v_max) * tang
         obj_n = float(np.dot((self.obj.velocity.x, self.obj.velocity.y), n_out))
         cmd_n = float(np.dot(v, n_out))
         if cmd_n > obj_n:

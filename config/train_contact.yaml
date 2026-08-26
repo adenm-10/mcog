@@ -111,10 +111,14 @@ action_interface: finger_velocity  # push only. finger_velocity = the historical
                           # physics substep so the finger cannot slide across a
                           # face before anything reacts (memo Table 3's
                           # "contact-aware control interface" ablation).
-slip_limit: 0.5           # contact_frame only -- tangential speed ceiling as a
-                          # fraction of v_max. Pick by measurement, not from
-                          # arctan(finger_friction): measured achieved deviation
-                          # reaches 65-78deg at p90 while contact holds.
+slip_model: friction_cone # contact_frame only -- how the tangential (face-parallel)
+                          # budget is set. friction_cone: Coulomb, |v_t| scales with
+                          # mu * push, mu = finger_friction, so it is DERIVED, not
+                          # tuned, and vanishes when the finger stops pressing.
+                          # speed_fraction: the superseded fixed ceiling below;
+                          # kept only so archived checkpoints replay faithfully.
+slip_limit: 0.5           # speed_fraction only -- tangential ceiling as a fraction
+                          # of v_max.
 
 # --- settle thresholds (contact_templates.py) -- null -> module constants
 # (0.5cm/s, 5deg/s). Overridable so they're sweepable.
