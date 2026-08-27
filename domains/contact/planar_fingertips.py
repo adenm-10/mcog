@@ -47,6 +47,10 @@ class ContactFrameCommand:
     slip_model: str    # "friction_cone" | "speed_fraction"
     slip_limit: float  # speed_fraction only: tangential ceiling, fraction of v_max
     mu: float          # friction_cone only: finger-object friction coefficient
+    gap_assist: bool = True   # forbid commanding retreat faster than the object
+                              # recedes. An ASSIST, not physics -- see
+                              # _contact_frame_velocity. Default True so archived
+                              # checkpoints replay under the interface they trained on.
 
 
 def face_frame(obj_xy, obj_theta: float, finger_xy, object_w_cm: float,
@@ -72,12 +76,16 @@ SLIP_MODELS = ("friction_cone", "speed_fraction")
 def _tangential_speed(cmd: "ContactFrameCommand", v_max: float) -> float:
     """Face-parallel speed for one substep, from the tick's (push, slide).
 
-    friction_cone: Coulomb. A contact pressing with normal force N can carry at
-    most mu*N tangentially before it slides, so the budget scales with the push
-    and vanishes when the finger stops pressing. mu is finger_friction -- the
-    same coefficient pymunk uses for this contact, so there is one number, not
-    two that can disagree. speed_fraction is the legacy fixed ceiling, kept only
-    so archived checkpoints replay under the interface they were trained on.
+    speed_fraction (default, slip_limit=1.0): a flat ceiling as a fraction of
+    v_max. At 1.0 nothing constrains the tangential command but the caller's
+    clamp of the whole command to v_max, so the finger may slide along a face
+    with no push -- and pymunk's own contact friction (mu=finger_friction)
+    decides what that does to the object. Friction is modelled ONCE, there.
+
+    friction_cone: additionally caps |v_t| at mu*push*v_max, i.e. holds the
+    COMMAND inside the sticking cone. That is a second friction model layered
+    over the solver's, it forbids deliberate slip (which a real finger does),
+    and it freezes the finger entirely at push=0. Kept as an ablation arm.
 
     Both scale rather than clip: a clip would leave the tail of `slide`'s range
     a dead zone that SAC's entropy term has to fight, same reason push is affine.
@@ -331,7 +339,11 @@ class PlanarFingertipWorld:
 
         Two soft constraints, both re-derived per substep so a 25 Hz command
         cannot slide the finger across a face before anything reacts:
-          1. never open the contact gap faster than the object recedes;
+          1. `gap_assist`: never open the contact gap faster than the object
+             recedes. This is an ASSIST, not a physical constraint -- nothing
+             stops a real finger from retreating. It is what makes losing contact
+             a consequence of sliding off a corner rather than of the policy
+             simply backing away, so it is ablatable (v29).
           2. bound tangential speed -- see _tangential_speed.
         Contact can still be lost by walking off a face corner, so the
         contact_lost guard stays a real failure mode.
@@ -342,10 +354,11 @@ class PlanarFingertipWorld:
                                  self.obj.angle, (body.position.x, body.position.y),
                                  self.params.object_w_cm, self.params.object_h_cm)
         v = -cmd.push * v_max * n_out + _tangential_speed(cmd, v_max) * tang
-        obj_n = float(np.dot((self.obj.velocity.x, self.obj.velocity.y), n_out))
-        cmd_n = float(np.dot(v, n_out))
-        if cmd_n > obj_n:
-            v = v + (obj_n - cmd_n) * n_out
+        if cmd.gap_assist:
+            obj_n = float(np.dot((self.obj.velocity.x, self.obj.velocity.y), n_out))
+            cmd_n = float(np.dot(v, n_out))
+            if cmd_n > obj_n:
+                v = v + (obj_n - cmd_n) * n_out
         speed = float(np.hypot(v[0], v[1]))
         if speed > v_max:
             v = v * (v_max / speed)

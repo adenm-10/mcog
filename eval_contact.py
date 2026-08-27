@@ -28,6 +28,16 @@ def _bin_of(d: float, edges: List[float]) -> int:
     return int(np.searchsorted(np.asarray(edges, dtype=float), d, side="right"))
 
 
+def _bin_labels(edges: List[float]) -> List[str]:
+    return ([f"0-{edges[0]:g}"]
+            + [f"{edges[i]:g}-{edges[i + 1]:g}" for i in range(len(edges) - 1)]
+            + [f"{edges[-1]:g}+"])
+
+
+def _bin_label(d: float, edges: List[float]) -> str:
+    return _bin_labels(edges)[_bin_of(d, edges)]
+
+
 def stratified_seeds(env, edges: List[float], per_bin: int,
                      max_reject: int) -> List[Tuple[int, int]]:
     """`per_bin` reset seeds per distance bin, found by rejection sampling.
@@ -67,12 +77,18 @@ def rollout(model, env, seed: int, gamma: float,
     # Per-episode, not once per checkpoint: reset re-samples which finger is
     # active, so a value read before the loop is stale for every later episode.
     active = getattr(env, "_active_finger", "L")
-    if snapshots is not None:
-        from domains.contact.physics import to_snapshot
-        snapshots.append(to_snapshot(env._x, env.params))
     ag0 = np.asarray(obs["achieved_goal"], dtype=float).copy()
     dg = np.asarray(obs["desired_goal"], dtype=float)
     d0 = float(np.hypot(ag0[0] - dg[0], ag0[1] - dg[1]))
+    if snapshots is not None:
+        from domains.contact.physics import to_snapshot
+        # The overlay is per-episode: reset re-samples the active finger, and
+        # the goal is not in the state vector at all.
+        overlay = dict(goal_xy=(float(dg[0]), float(dg[1])),
+                       arrival_eps_cm=getattr(env, "arrival_eps", None),
+                       active_finger=active,
+                       inactive_masked=getattr(env, "mask_inactive_finger", None))
+        snapshots.append(to_snapshot(env._x, env.params, **overlay))
 
     a, _ = model.predict(obs, deterministic=True)
     tensor_obs, _ = model.policy.obs_to_tensor(obs)
@@ -88,8 +104,7 @@ def rollout(model, env, seed: int, gamma: float,
     while not done:
         obs, r, term, trunc, info = env.step(a)
         if snapshots is not None:
-            from domains.contact.physics import to_snapshot
-            snapshots.append(to_snapshot(env._x, env.params))
+            snapshots.append(to_snapshot(env._x, env.params, **overlay))
         ret += (gamma ** steps) * float(r)
         steps += 1
         ag = np.asarray(obs["achieved_goal"], dtype=float)
@@ -176,12 +191,27 @@ def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]
 
 
 def render_episode(model, env, seed: int, gamma: float,
-                   path: str, fps: int = 12) -> dict:
-    """Re-run one scored episode collecting Snapshots, and write an mp4."""
-    from domains.contact.visualize import save_video
+                   path: str, fps: int = 12, edges: Optional[List[float]] = None) -> dict:
+    """Re-run one scored episode collecting Snapshots; write an mp4 plus the
+    matching trajectory still, which shows the whole path in one image."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from domains.contact.visualize import (_episode_caption, plot_trajectory,
+                                          save_video)
     snaps: list = []
     row = rollout(model, env, seed, gamma, snapshots=snaps)
-    save_video(snaps, path, fps=fps)
+    info = {"why": row["why"], "success": row["success"]}
+    if edges is not None:
+        info["bin"] = _bin_label(row["d0"], edges)
+    save_video(snaps, path, fps=fps, info=info)
+
+    ax = plot_trajectory(snaps)
+    ax.set_title(f"seed {seed}   " + _episode_caption(snaps, info), fontsize=7.5)
+    ax.figure.savefig(path.replace(".mp4", "_path.png"), dpi=120,
+                      bbox_inches="tight")
+    plt.close(ax.figure)
     return row
 
 
@@ -193,9 +223,7 @@ def save_summary_png(rows: List[dict], edges: List[float], path: str,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    labels = ([f"0-{edges[0]:g}"]
-              + [f"{edges[i]:g}-{edges[i + 1]:g}" for i in range(len(edges) - 1)]
-              + [f"{edges[-1]:g}+"])
+    labels = _bin_labels(edges)
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.6))
 
     xs, ys, ns = [], [], []
@@ -233,9 +261,7 @@ def save_summary_png(rows: List[dict], edges: List[float], path: str,
 
 
 def _table(rows: List[dict], edges: List[float]) -> str:
-    labels = ([f"0-{edges[0]:g}"]
-              + [f"{edges[i]:g}-{edges[i + 1]:g}" for i in range(len(edges) - 1)]
-              + [f"{edges[-1]:g}+"])
+    labels = _bin_labels(edges)
     out = [f"{'bin (cm)':<10}{'n':>4}{'success':>9}{'retention':>11}"
            f"{'displ':>8}{'final':>8}{'len':>6}"]
     for b, lab in enumerate(labels):
@@ -286,7 +312,7 @@ def main(cfg: DictConfig) -> None:
     # learned to control. disengaged_away_deg is a TASK key -- it moves the
     # reset distribution -- and so stays inside the digest.
     iface_keys = ("action_interface", "slip_model", "slip_limit",
-                  "restrict_contact_actions", "mask_inactive_finger")
+                  "restrict_contact_actions", "mask_inactive_finger", "gap_assist")
     stamp = {k: repr(v) for k, v in sorted(env_kwargs.items()) if k not in iface_keys}
     stamp["template"] = template
     digest = hashlib.sha1(json.dumps(stamp, sort_keys=True).encode()).hexdigest()[:12]
@@ -341,8 +367,9 @@ def main(cfg: DictConfig) -> None:
                 p = os.path.join(mdir, f"ep{i:02d}_{rows[i]['why']}"
                                        f"_d{rows[i]['d0']:.0f}cm.mp4")
                 render_episode(model, env, seed, gamma, p,
-                               fps=int(d["eval_video_fps"]))
+                               fps=int(d["eval_video_fps"]), edges=edges)
                 media.append(p)
+                media.append(p.replace(".mp4", "_path.png"))
         print(f"  media -> {mdir}  ({len(media)} file(s))")
 
     out = d["eval_out"] or os.path.join(os.path.dirname(os.path.abspath(ckpt)),

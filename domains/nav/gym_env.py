@@ -31,31 +31,6 @@ from domains.nav.car import create_dubins_car
 from domains.nav.reward import sparse_reward, arrived
 from domains.geometry import sample_state_in_cells, sample_xy_in_cell
 
-import logging
-import sys
-
-
-def setup_logger(log_file):
-    logger = logging.getLogger("dubins")
-    logger.setLevel(logging.WARNING)
-
-    if logger.handlers:
-        logger.handlers.clear()
-
-    fh = logging.FileHandler(log_file)
-    sh = logging.StreamHandler(sys.stdout)
-
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s"
-    )
-
-    fh.setFormatter(formatter)
-    sh.setFormatter(formatter)
-
-    logger.addHandler(fh)
-    logger.addHandler(sh)
-
-    return logger
 
 class DubinsMazeEnv(gym.Env):
     metadata = {"render_modes": []}

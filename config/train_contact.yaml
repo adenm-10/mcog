@@ -101,6 +101,25 @@ push_cone_deg: null       # push only -- half-angle (deg) of the cone around the
                           # historical sampler, whose face exclusion misjudges
                           # "nearest the goal" and puts the finger on the goal side
                           # in 40-57% of resets -- kept as a faithful control.
+push_range_min_cm: null   # push only, cone sampler only -- floor on the goal's
+                          # distance from the object at reset. null keeps the
+                          # historical draw (near end = arrival_eps), which puts
+                          # 5 of the 60 benchmark episodes under 1cm, i.e. goals
+                          # the object is already almost on. Rays too short to
+                          # hold the floor are rejected, not clamped.
+object_theta_spread_deg: null  # push only, cone sampler only -- half-width (deg)
+                          # of the uniform spread the object's INITIAL HEADING is
+                          # drawn from. null keeps the historical fixed 0 deg
+                          # (measured 300/300 before v29), draws no extra random
+                          # number, and is bit-identical. Requires push_cone_deg:
+                          # the historical sampler picks the face from an
+                          # axis-aligned table and would be inconsistent.
+gap_assist: true          # contact_frame only -- forbid commanding retreat faster
+                          # than the object recedes. An ASSIST, not physics: a real
+                          # finger may back away. It is what makes contact_lost a
+                          # consequence of sliding off a corner rather than of the
+                          # policy simply letting go. finger_velocity has never had
+                          # it, so false is the midpoint of full -> raw.
 restrict_contact_actions: false  # push only -- clamp the active finger's
                           # outward-normal velocity to the object's own when
                           # it would otherwise open the contact gap
@@ -111,14 +130,26 @@ action_interface: finger_velocity  # push only. finger_velocity = the historical
                           # physics substep so the finger cannot slide across a
                           # face before anything reacts (memo Table 3's
                           # "contact-aware control interface" ablation).
-slip_model: friction_cone # contact_frame only -- how the tangential (face-parallel)
-                          # budget is set. friction_cone: Coulomb, |v_t| scales with
-                          # mu * push, mu = finger_friction, so it is DERIVED, not
-                          # tuned, and vanishes when the finger stops pressing.
-                          # speed_fraction: the superseded fixed ceiling below;
-                          # kept only so archived checkpoints replay faithfully.
-slip_limit: 0.5           # speed_fraction only -- tangential ceiling as a fraction
-                          # of v_max.
+slip_model: speed_fraction # contact_frame only -- how the tangential
+                          # (face-parallel) budget is set. speed_fraction: a flat
+                          # ceiling, `slip_limit` below. At slip_limit=1.0 the only
+                          # limits left are the whole-command clamp to v_max and
+                          # "no pulling", so the finger may slide along a face with
+                          # no push and pymunk's own contact friction (mu=0.75)
+                          # decides what the object does -- friction is modelled
+                          # ONCE, by the solver. friction_cone additionally caps
+                          # |v_t| at mu * push * v_max; that is a second friction
+                          # model on top of the solver's, and it froze the finger
+                          # whenever push went to zero. DEPRECATED -- ablation arm
+                          # only, never the default. Measured cost at 400k, same 60
+                          # episodes, single-factor: 0.283 with the cone against
+                          # 0.739 without it. It also CAPS the ceiling -- the cone
+                          # arm's eval curve flattened at ~0.26 by 200k while the
+                          # flat arm kept climbing to 0.68 (docs/PROGRESS.md v28).
+                          # NOT deleted: the v26/v27 archived cells trained with it
+                          # and must stay replayable.
+slip_limit: 1.0           # speed_fraction only -- tangential ceiling as a fraction
+                          # of v_max. 1.0 = no tangential limit beyond v_max.
 mask_inactive_finger: true  # push only -- true zeroes the non-pushing finger's
                           # action, which leaves it servo-held wherever it spawned
                           # and in the travelling object's path (measured:

@@ -22,7 +22,8 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
 from option_graph.executor import DomainHooks, ExecConfig, LegSpec, run_option
-from option_graph.records import EpisodeRecord, OptionRecord, edge_key
+from option_graph.records import (EpisodeRecord, OptionRecord, edge_key,
+                                  json_safe)
 
 Node = Hashable
 
@@ -438,21 +439,6 @@ def _load_run_cfg(run_dir: str, config_dir: str = "config",
     return cfg
 
 
-def _json_safe(o):
-    """NaN -> None, numpy -> python, recursively."""
-    if isinstance(o, dict):
-        return {str(k): _json_safe(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_json_safe(v) for v in o]
-    if isinstance(o, float) and o != o:
-        return None
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return _json_safe(float(o))
-    return o
-
-
 # One line each, next to the values they describe -- shipped to wandb as a
 # glossary table once per run.
 METRIC_DOCS = {
@@ -573,7 +559,7 @@ def main(hydra_cfg: DictConfig) -> int:
                "stratum_spread": condition_spread(tally)}
     os.makedirs(os.path.dirname(side) or ".", exist_ok=True)
     with open(side, "w") as f:
-        json.dump(_json_safe(payload), f, indent=2, sort_keys=True,
+        json.dump(json_safe(payload), f, indent=2, sort_keys=True,
                   allow_nan=False)
     print(f"[calibrate] wrote {side}")
 

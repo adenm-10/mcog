@@ -122,12 +122,6 @@ def route_hops(route: Optional[Sequence[Node]]) -> int:
     return -1 if route is None else max(0, len(list(route)) - 1)
 
 
-def route_cost(route: Sequence[Node],
-               edge_cost: Callable[[Node, Node], float]) -> float:
-    """Summed cost of an explicit route, for scoring one route against another."""
-    return float(sum(float(edge_cost(a, b)) for a, b in route_edges(route)))
-
-
 def route_suffix(route: Sequence[Node], node: Node) -> Route:
     """The tail of route from node onward, or [] if node is not on it."""
     r = list(route)

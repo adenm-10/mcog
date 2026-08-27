@@ -130,7 +130,7 @@ def _wandb_init(cfg, base_dir, *, job_type: str, extra_tags=(), extra_config=Non
 def run_monolith(cfg, bundle, base_dir):
     from option_graph.callbacks import attach_csv_logger
     from option_graph.analysis.plots import plot_training_diagnostics
-    from option_graph._port_eval import evaluate_monolith
+    from option_graph.eval_harness import evaluate_monolith
     from wandb_logging import finish, log_image, summary
     models, train, ev, mon = (os.path.join(base_dir, d)
                               for d in ("models", "train", "eval", "monitors"))
@@ -194,7 +194,7 @@ def _region_success(env, model, episodes, seed):
 def run_regions(cfg, bundle, base_dir):
     from option_graph.callbacks import attach_csv_logger
     from option_graph.analysis.plots import plot_regions_training
-    from option_graph._port_eval import evaluate_composition
+    from option_graph.eval_harness import evaluate_composition
     from wandb_logging import finish, log_image
     from wandb_logging import summary as wandb_summary  # local `summary` is a per-region dict
     train = os.path.join(base_dir, "train")

@@ -2,8 +2,7 @@
 """Static training / eval visuals for the Dubins SB3 experiment.
 
 Column-driven: every panel plots only the progress.csv columns that exist and
-shows a placeholder otherwise (same graceful pattern as skills/training_summary.py).
-No SB3 dependency here on purpose.
+shows a placeholder otherwise. No SB3 dependency here on purpose.
 """
 from __future__ import annotations
 
@@ -150,7 +149,7 @@ def plot_regions_training(paths, out_path, title=""):
     return out_path
 
 
-# ---- rollout drawing (shared by per-episode png + grid) ---------------------
+# ---- rollout drawing (eval_harness.py writes the grid) ----------------------
 
 def _region_layer(maze, table):
     if table is None:
@@ -167,20 +166,40 @@ def _region_layer(maze, table):
 def _draw_rollout_ax(ax, maze, X, goal, success, dist=None,
                      region_grid=None, midpoints=None):
     xmin, xmax, ymin, ymax = maze.extent
+    extent = (xmin, xmax, ymin, ymax)
     ax.set_aspect("equal", "box")
+    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
     if region_grid is not None and np.any(np.isfinite(region_grid)):
         n = int(np.nanmax(region_grid)) + 1
         cmap = plt.get_cmap("tab20", max(n, 2))          # 20 distinct, wraps beyond
-        ax.imshow(region_grid, origin="lower", extent=(xmin, xmax, ymin, ymax),
+        ax.imshow(region_grid, origin="lower", extent=extent,
                   cmap=cmap, interpolation="nearest", alpha=0.25,
                   vmin=-0.5, vmax=n - 0.5)
 
+    # Walls after the region tint so they stay readable on top of it. NaN keeps
+    # free cells transparent rather than painting them white over the tint.
+    walls = np.where(np.asarray(maze.wall, bool), 1.0, np.nan)
+    ax.imshow(walls, origin="lower", extent=extent, cmap="gray_r",
+              interpolation="nearest", vmin=0.0, vmax=1.0)
 
-def plot_rollout(maze, rollout, goal, save_path, region_grid=None, midpoints=None):
-    fig, ax = plt.subplots(figsize=(6, 6))
-    _draw_rollout_ax(ax, maze, rollout["X"], goal, bool(rollout["success"]),
-                     region_grid=region_grid, midpoints=midpoints)
-    fig.tight_layout(); fig.savefig(save_path, dpi=200); plt.close(fig)
+    if midpoints:
+        pts = np.asarray([np.asarray(p, float).reshape(-1)[:2]
+                          for p in midpoints.values()])
+        ax.scatter(pts[:, 0], pts[:, 1], s=14, marker="x", c="tab:purple",
+                   linewidths=1.0, zorder=3)
+
+    P = np.asarray(X, float).reshape(len(np.asarray(X)), -1)[:, :2]
+    colour = "tab:green" if success else "tab:red"
+    ax.plot(P[:, 0], P[:, 1], lw=1.2, color=colour, zorder=4)
+    ax.scatter([P[0, 0]], [P[0, 1]], s=28, marker="o", c="black", zorder=5)
+    g = np.asarray(goal, float).reshape(-1)[:2]
+    ax.scatter([g[0]], [g[1]], s=60, marker="*", c="tab:blue", zorder=5)
+
+    bits = ["arrived" if success else "failed", f"{len(P) - 1} steps"]
+    if dist is not None and np.isfinite(dist):
+        bits.append(f"geo {float(dist):.1f}")
+    ax.set_title(" | ".join(bits), fontsize=8, color=colour)
+    ax.set_xticks([]); ax.set_yticks([])
 
 
 def plot_rollout_grid(maze, episodes, save_path, max_n=8, region_grid=None, midpoints=None):

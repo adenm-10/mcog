@@ -18,6 +18,8 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 SCHEMA_VERSION = 1
 
 #: reached           terminated in its target set (see reached_* for which predicate)
@@ -44,13 +46,26 @@ EPISODE_REASONS = ("success", "timeout", "no_path", "option_budget", "stuck",
 
 GOAL_SENTINEL = "goal"   # terminal leg targets the true goal, not an interface
 
-def _clean(o):
-    """NaN -> None, recursively, so no bare NaN token reaches the file."""
+def json_safe(o):
+    """numpy -> python, NaN -> None, recursively, so no bare NaN or numpy scalar
+    reaches a file. The single serializer for every artifact this repo writes:
+    five near-copies had diverged, and only the ones carrying the np.ndarray
+    branch could serialize a PHat. Branch order matters -- np.float64 subclasses
+    float, so the NaN test must stay ahead of the np.floating test.
+    """
     if isinstance(o, dict):
-        return {k: _clean(v) for k, v in o.items()}
-    if isinstance(o, list):
-        return [_clean(v) for v in o]
-    return None if isinstance(o, float) and o != o else o
+        return {str(k): json_safe(v) for k, v in o.items()}
+    if isinstance(o, np.ndarray):
+        return json_safe(o.tolist())
+    if isinstance(o, (list, tuple)):
+        return [json_safe(v) for v in o]
+    if isinstance(o, float) and o != o:
+        return None
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return json_safe(float(o))
+    return o
 
 def edge_key(source_region: Any, target_region: Optional[Any] = None,
              interface_id: Optional[str] = None) -> str:
@@ -201,7 +216,8 @@ def write_jsonl(path: str, episodes: Iterable[EpisodeRecord],
     n = 0
     with open(path, mode) as f:
         for ep in episodes:
-            f.write(json.dumps(_clean(ep.to_dict()), separators=(",", ":"), allow_nan=False) + "\n")
+            f.write(json.dumps(json_safe(ep.to_dict()), separators=(",", ":"),
+                               allow_nan=False) + "\n")
             n += 1
     print(f"[records] {n} episodes -> {path}")
     return path

@@ -2,7 +2,6 @@
 """Base class for dynamical systems."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import jax.numpy as jnp
 
 class DynamicalSystem(ABC):

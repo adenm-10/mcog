@@ -21,9 +21,10 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               guard_terminates=True, min_progress_cm=None,
               min_progress_ticks=None, require_settled=True,
               same_room_goal_prob=0.0, push_cone_deg=None,
+              push_range_min_cm=None, object_theta_spread_deg=None,
               restrict_contact_actions=False,
-              action_interface="finger_velocity", slip_model="friction_cone",
-              slip_limit=0.5, mask_inactive_finger=True,
+              action_interface="finger_velocity", slip_model="speed_fraction",
+              slip_limit=1.0, mask_inactive_finger=True, gap_assist=True,
               disengaged_away_deg=None):
     def _init():
         from stable_baselines3.common.monitor import Monitor
@@ -39,10 +40,13 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          require_settled=require_settled,
                          same_room_goal_prob=same_room_goal_prob,
                          push_cone_deg=push_cone_deg,
+                         push_range_min_cm=push_range_min_cm,
+                         object_theta_spread_deg=object_theta_spread_deg,
                          restrict_contact_actions=restrict_contact_actions,
                          action_interface=action_interface,
                          slip_model=slip_model, slip_limit=slip_limit,
                          mask_inactive_finger=mask_inactive_finger,
+                         gap_assist=gap_assist,
                          disengaged_away_deg=disengaged_away_deg)
         # SB3 only auto-wraps Monitor around a bare env; train_env below is
         # already a DummyVecEnv by the time SAC() sees it, so that never
@@ -86,10 +90,13 @@ def build_env_kwargs(d: dict) -> dict:
                 require_settled=d["require_settled"],
                 same_room_goal_prob=d["same_room_goal_prob"],
                 push_cone_deg=d["push_cone_deg"],
+                push_range_min_cm=d["push_range_min_cm"],
+                object_theta_spread_deg=d["object_theta_spread_deg"],
                 restrict_contact_actions=d["restrict_contact_actions"],
                 action_interface=d["action_interface"],
                 slip_model=d["slip_model"], slip_limit=d["slip_limit"],
                 mask_inactive_finger=d["mask_inactive_finger"],
+                gap_assist=d["gap_assist"],
                 disengaged_away_deg=d["disengaged_away_deg"])
 
 

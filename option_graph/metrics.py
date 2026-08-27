@@ -23,7 +23,7 @@ from omegaconf import DictConfig, OmegaConf
 from option_graph.edge_model import (PHat, build_matrix, pair_index,
                                      predict_handoff, predict_marginal,
                                      predict_naive, route_edge_keys)
-from option_graph.records import flatten_options, read_jsonl
+from option_graph.records import flatten_options, json_safe, read_jsonl
 
 PREDICTORS = ("naive", "marginal", "handoff", "chained")
 PLAN_PREDICTORS = ("naive", "marginal", "handoff")
@@ -371,22 +371,6 @@ def print_report(routes, gs, boot, verdict) -> None:
               "measured on the wrong distribution and the fix is the training "
               "reset distribution, not the abstraction. Also publishable.")
 
-def _json_safe(o):
-    if isinstance(o, dict):
-        return {str(k): _json_safe(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_json_safe(v) for v in o]
-    if isinstance(o, np.ndarray):
-        return _json_safe(o.tolist())
-    if isinstance(o, float) and o != o:
-        return None
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return _json_safe(float(o))
-    return o
-
-
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -524,7 +508,7 @@ def main(hydra_cfg: DictConfig) -> int:
                "failure_by_edge": failure_by_edge(episodes),
                "rung1_variant": variant}
     with open(out, "w") as f:
-        json.dump(_json_safe(payload), f, indent=2, sort_keys=True,
+        json.dump(json_safe(payload), f, indent=2, sort_keys=True,
                   allow_nan=False)
     print(f"\n[metrics] wrote {out}")
 

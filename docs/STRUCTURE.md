@@ -12,6 +12,8 @@ Current state and gotchas live in `status.md`; session history in
 | Train one contact template (SAC+HER) | `train_contact.py` | works; Hydra `contact=push\|recontact` |
 | Score a contact checkpoint on a fixed stratified set | `eval_contact.py` | works; the only cross-cell-comparable push/recontact number. `eval_video=true` / `eval_summary_png=true` for local media. `overshoot_report` splits failures into aiming vs braking (v26) |
 | Compare every cell of a sweep on the common eval set | `tools/compare_sweep.py` | works; refuses to plot cells whose env digests disagree |
+| Score every cell of a sweep, keys handled by class | `tools/score_sweep.py` | works; INTERFACE keys read from each cell's `meta.txt`, TASK keys pinned, `--transfer-arm` for the cross-digest-group control |
+| Run that scoring on a compute node | `slurm/score_sweep.sh` | works; the login node has `nproc=1`, so 36 evals belong here |
 | Reclaim checkpoint bytes under `logs/` | `tools/prune_runs.py` | works; dry-run by default, `--apply` to act |
 | wandb hygiene, remote runs + local dirs | `tools/prune_wandb.py` | works; dry-run by default |
 | Probe edge success across horizons | `tests/probe_edges.py` | works; 8 budgets on disk. **deletion path** |
@@ -20,7 +22,7 @@ Current state and gotchas live in `status.md`; session history in
 | Evaluate composition or monolith on frozen weights | `option_graph/run_eval.py` | works; `arms=`, `dry_run=` |
 | Score the four predictors, bootstrap, verdict | `option_graph/metrics.py` | works |
 | Diagnose route collapse (distance, at_budget, asymmetry) | `option_graph/analysis/route_collapse.py` | works; produced the mechanism |
-| Plot predicted vs observed | `option_graph/analysis/plots.py` | works |
+| Plot predicted vs observed | `option_graph/analysis/plots.py` | works; `_draw_rollout_ax` drew only the region tint until 2026-08-27 — trajectory, walls, goal and interface markers are gate-covered now (`static`) |
 | Graph search, BFS and risk-aware | `option_graph/planner.py` | BFS used; **risk-aware never run (F2)** |
 | Option rollout, guards, replanning | `option_graph/executor.py` | `fixed_route` used; **`replan` never run (F5)** |
 | tol=0 regression gate on frozen weights | `tests/fixture_eval.py` | works; 18 checks |
@@ -35,19 +37,21 @@ Current state and gotchas live in `status.md`; session history in
 |---|---|---|
 | PyMunk physics, isolation boundary | `domains/contact/planar_fingertips.py` | works; only file importing pymunk, enforced by `cmd_layering`. Also `face_frame`, `_tangential_speed` (both pure) and `ContactFrameCommand` |
 | Domain-agnostic obs/step wrapper, object-centric obs | `domains/contact/physics.py` | works; `obs()` translation-invariant to ~1e-6 |
-| Rendering, png/mp4, local disk only | `domains/contact/visualize.py` | works; no wandb import at all. Wired into `eval_contact.py` and gate-covered as of v24 |
+| Rendering, png/mp4, local disk only | `domains/contact/visualize.py` | works; no wandb import at all. `Snapshot` carries an optional TASK OVERLAY (goal, arrival ring, which fingertip is driven) — the goal is not in the state vector, so it is passed to `to_snapshot`. `eval_contact` writes `<ep>.mp4` **and** `<ep>_path.png` |
 | Multi-room board geometry (regions/portals) | `domains/contact/board.py` | works; degenerates to one region when `portals=()` |
 | `DomainHooks` builder (contact sibling of `nav_hooks`) | `domains/contact/hooks.py` | works |
 | Arrival tests, guards, templates (nav's DRIVE lives here too) | `domains/contact_templates.py` | push/recontact done, incl. `theta_target` orientation goal |
 | Held-out eval callback, contact-generic | `domains/contact/callbacks.py` | reads only the `achieved_goal`/`desired_goal` contract |
 | Eq 14 reward, HER-safe split | `domains/contact/reward.py` | works; `RewardWeights` ablated to `goal_reward=10.0` only |
-| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=friction_cone\|speed_fraction`, `mask_inactive_finger`, `disengaged_away_deg` (all push only) |
+| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=speed_fraction\|friction_cone`, `mask_inactive_finger`, `disengaged_away_deg`, `push_range_min_cm` (all push only) |
 | HER buffer fixes | `domains/contact/her_buffer.py` | `DonePatchedHerReplayBuffer` (done-flag, both templates) + `PushRelabelSafeHerReplayBuffer` (adds stale-obs patch and relabel tick lag) |
 | SAC with a clipped TD target | `domains/contact/sac_clipped.py` | `TargetClippedSAC`; `target_clip=None` is bit-identical to stock SAC |
 
 ## Layering — the architectural claim
 
-1. `records.py` is the **only shared vocabulary**.
+1. `records.py` is the **only shared vocabulary** — including `json_safe`, the one
+   JSON serializer every artifact writer uses. Five near-copies had diverged on the
+   `np.ndarray` branch; `static` now fails if a second definition appears anywhere.
 2. `executor.py` is the **only producer** of records.
 3. `edge_model.py`, `calibrate.py`, `metrics.py` are **pure functions over records**, no
    env dependency. `metrics.py` takes descriptors and predictor tables *as data*.
@@ -71,13 +75,13 @@ families) is a new sibling file under `domains/contact/`, exactly like
 `planar_fingertips.py`. `domains/nav/` and `option_graph/` need no changes for that,
 since `DomainHooks` (executor.py) is already the abstraction boundary.
 
-## Gates — run all four before and after every commit
+## Gates — run all five before and after every commit
 
 ```bash
-python test_code.py static                                    # 22/22
+python test_code.py static                                    # 26/26
 python test_code.py geometry                                  # 27/27
-python test_code.py contact                                   # 22/22
-python -m tests.test_option_graph all                         # 171/171
+python test_code.py contact                                   # 50/50
+python -m tests.test_option_graph all                         # 170/170
 python -m tests.fixture_eval fixtures tests/fixtures_smoke    # 18/18
 ```
 

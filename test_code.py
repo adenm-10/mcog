@@ -10,7 +10,6 @@ Exit code 0 iff every check passes.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -98,7 +97,7 @@ def cmd_static() -> None:
             except OSError:
                 continue
             for i, line in enumerate(lines, 1):
-                if line.lstrip().startswith("#") or "[legacy-ref]" in line:
+                if line.lstrip().startswith("#"):
                     continue
                 for rx, label in pats:
                     if rx.search(line):
@@ -108,13 +107,37 @@ def cmd_static() -> None:
     for h in hits[:25]:
         print(f"        {h}")
 
+    section("one serializer, not five")
+    # Five near-copies of _json_safe had diverged on the np.ndarray branch, and
+    # only the ones that had it could serialize a PHat. records.json_safe is now
+    # the only definition; this fails the moment a fourth module grows its own.
+    # tests/fixture_eval.py's _clean is a VALUE NORMALIZER for tol=0 comparison,
+    # not a serializer -- excluded by path, not by luck of its parameter name.
+    SERIALIZER_RX = re.compile(r"\s*def (_?json_safe|_clean)\b")
+    NOT_A_SERIALIZER = {"./tests/fixture_eval.py"}
+    defs = set()
+    for root, dirs, files in os.walk("."):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(root, fn)
+            if (os.path.abspath(path) == os.path.abspath(__file__)
+                    or path in NOT_A_SERIALIZER):
+                continue
+            for line in open(path, encoding="utf-8", errors="replace"):
+                if SERIALIZER_RX.match(line):
+                    defs.add(path)
+    check(defs == {"./option_graph/records.py"},
+          "json_safe is defined in records.py and nowhere else",
+          f"found {sorted(defs)}")
+
     section("import graph")
     for mod in ["config.loader", "domains.geometry", "domains.nav.partitions",
                 "domains.nav.sdf", "domains.nav.maze",
                 "domains.nav.gym_env", "domains.nav.physics",
                 "domains.nav.gym_env", "option_graph.records",
                 "option_graph.callbacks", "option_graph.analysis.plots",
-                "option_graph._port_eval",
                 "option_graph.planner", "option_graph.executor",
                 "option_graph.eval_harness",]:
         r = subprocess.run([sys.executable, "-c", f"import {mod}"],
@@ -154,6 +177,36 @@ def cmd_static() -> None:
     check(r.returncode != 0 and "not in struct" in (r.stdout + r.stderr),
           "unregistered key on the CLI fails loudly",
           f"returncode={r.returncode}")
+
+    section("rollout figure actually draws the rollout")
+    # _draw_rollout_ax used to accept X/goal/success/dist and draw only the
+    # region tint, so plot_rollout_grid wrote a PNG captioned "worst 8
+    # rollouts" with no rollouts in it. Assert the artists exist, not that a
+    # file was written -- the broken version wrote a file just fine.
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from types import SimpleNamespace
+    from option_graph.analysis.plots import _draw_rollout_ax
+    fake = SimpleNamespace(wall=np.zeros((4, 4), bool), extent=(0.0, 4.0, 0.0, 4.0))
+    fake.wall[0, 0] = True
+    X = np.array([[0.5, 0.5, 1.0, 0.0], [1.5, 1.5, 1.0, 0.0], [2.5, 2.5, 1.0, 0.0]])
+    _, ax = plt.subplots()
+    _draw_rollout_ax(ax, fake, X, (3.5, 3.5), False, dist=4.2,
+                     midpoints={("i", "ab"): (2.0, 2.0)})
+    traj = [ln for ln in ax.lines if len(ln.get_xdata()) == len(X)]
+    check(len(traj) == 1, "trajectory drawn as one polyline",
+          f"{len(ax.lines)} lines, {len(traj)} of full length")
+    if traj:
+        check(np.allclose(traj[0].get_xdata(), X[:, 0])
+              and np.allclose(traj[0].get_ydata(), X[:, 1]),
+              "polyline carries the rollout's own xy")
+    check(len(ax.collections) >= 3, "start, goal and midpoint markers drawn",
+          f"{len(ax.collections)} collections")
+    check("failed" in ax.get_title() and "4.2" in ax.get_title(),
+          "title reports outcome and geodesic distance", f"title={ax.get_title()!r}")
+    plt.close("all")
 
 # =========================================================================== #
 # geometry
@@ -492,6 +545,141 @@ def cmd_contact() -> None:
           "speed_fraction still reproduces the superseded formula exactly",
           f"{legacy:.4f} vs {0.7 * 0.5 * v_max:.4f}")
 
+    section("the default slip law leaves friction to the solver alone")
+    import inspect
+
+    from domains.contact.gym_env import ContactEnv
+    sig = inspect.signature(ContactEnv.__init__).parameters
+    check(sig["slip_model"].default == "speed_fraction"
+          and abs(float(sig["slip_limit"].default) - 1.0) < 1e-12,
+          "default is speed_fraction at slip_limit=1.0, i.e. no extra cone",
+          f"{sig['slip_model'].default!r}/{sig['slip_limit'].default}")
+    def _flat(push, slide, limit=1.0):
+        return _tangential_speed(ContactFrameCommand(
+            side="L", push=push, slide=slide, slip_model="speed_fraction",
+            slip_limit=limit, mu=mu), v_max)
+    # The behavioural difference the default change is FOR: sliding along a face
+    # without pushing. pymunk's own contact friction then decides what the
+    # object does -- friction is modelled once, by the solver.
+    check(abs(_flat(0.0, 1.0) - v_max) < 1e-9 and abs(_cone(0.0, 1.0)) < 1e-12,
+          "at zero push the default slides at v_max where friction_cone freezes",
+          f"flat {_flat(0.0, 1.0):.2f} vs cone {_cone(0.0, 1.0):.2f} cm/s")
+    check(all(abs(_flat(p, 1.0)) >= abs(_cone(p, 1.0)) - 1e-12
+              for p in (0.0, 0.1, 0.25, 0.5, 0.75, 1.0)),
+          "the default is at least as permissive as the cone at every push",
+          "checked 6 push levels")
+
+    section("push_range_min_cm floors the goal distance the cone draws")
+    def _goal_dists(n, **kw):
+        e = _contact_env(**kw)
+        out = []
+        for s in range(n):
+            obs, _ = e.reset(seed=s)
+            ag = np.asarray(obs["achieved_goal"], dtype=float)
+            dg = np.asarray(obs["desired_goal"], dtype=float)
+            out.append(float(np.hypot(ag[0] - dg[0], ag[1] - dg[1])))
+        return out
+    free = _goal_dists(200)
+    floored = _goal_dists(200, push_range_min_cm=3.0)
+    # Assert the branch is actually exercised: a floor that never binds would
+    # pass the next check against a completely broken implementation.
+    n_below = sum(1 for d in free if d < 3.0)
+    check(n_below > 50,
+          "the unfloored sampler really does draw sub-floor goals",
+          f"{n_below}/200 under 3cm, median {sorted(free)[100]:.2f}cm")
+    check(min(floored) >= 3.0 - 1e-9,
+          "with the floor set, no goal is drawn closer than it",
+          f"min {min(floored):.3f}cm over 200 resets")
+    check(_goal_dists(60) == _goal_dists(60, push_range_min_cm=None),
+          "push_range_min_cm=None is bit-identical to the historical draw",
+          "60 resets")
+
+    section("gap_assist is an assist, and off is a real change")
+    from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+                                                   IDX_OBJ_XY)
+    sig2 = inspect.signature(ContactEnv.__init__).parameters
+    check(sig2["gap_assist"].default is True,
+          "gap_assist defaults True, so archived checkpoints replay unchanged",
+          f"{sig2['gap_assist'].default}")
+    # The clamp fires only when the object is RECEDING faster than the finger
+    # pushes (cmd_n = -push*v_max, so it can only exceed a NEGATIVE obj_n). A
+    # stationary object never triggers it -- test it where it actually bites.
+    def _normal_speed(assist, push, recede):
+        e = _contact_env(action_interface="contact_frame", gap_assist=assist)
+        e.reset(seed=7)
+        w, side = e._physics.world, e._active_finger
+        n_out, _ = face_frame((w.obj.position.x, w.obj.position.y), w.obj.angle,
+                              (w.fingers[side].position.x, w.fingers[side].position.y),
+                              w.params.object_w_cm, w.params.object_h_cm)
+        w.obj.velocity = tuple(-recede * n_out)      # object moving AWAY from the finger
+        cmd = ContactFrameCommand(side=side, push=push, slide=0.0,
+                                  slip_model="speed_fraction", slip_limit=1.0,
+                                  mu=0.75, gap_assist=assist)
+        v = np.asarray(w._contact_frame_velocity(cmd), dtype=float)
+        return float(np.dot(v, n_out))
+    on, off = _normal_speed(True, 0.1, 12.0), _normal_speed(False, 0.1, 12.0)
+    check(abs(on - (-12.0)) < 1e-6,
+          "assist ON: the finger is dragged inward to match a receding object",
+          f"commanded {-0.1 * 20.0:.1f} cm/s, applied {on:.1f} cm/s (object -12.0)")
+    check(abs(off - (-0.1 * 20.0)) < 1e-6,
+          "assist OFF: the raw command stands and the contact gap opens",
+          f"applied {off:.1f} cm/s")
+    check(abs(on - off) > 1.0,
+          "the branch under test actually fired",
+          f"difference {abs(on - off):.1f} cm/s")
+    check(abs(_normal_speed(True, 1.0, 0.0) - _normal_speed(False, 1.0, 0.0)) < 1e-12,
+          "with a still object the assist is inert, so it changes nothing by default",
+          "full push, object at rest")
+
+    section("object_theta_spread_deg rotates the object and everything that follows")
+    def _thetas(n, **kw):
+        e = _contact_env(**kw)
+        out = []
+        for s in range(n):
+            e.reset(seed=s)
+            h = np.asarray(e._x[IDX_OBJ_HEADING], dtype=float)
+            out.append(float(np.degrees(np.arctan2(h[1], h[0]))))
+        return out
+    fixed = _thetas(120)
+    check(len(set(np.round(fixed, 9))) == 1 and abs(fixed[0]) < 1e-9,
+          "default heading is fixed at 0deg (the crutch this ablates)",
+          f"{len(set(np.round(fixed, 9)))} distinct value(s)")
+    spread = _thetas(120, object_theta_spread_deg=45.0)
+    check(len(set(np.round(spread, 6))) > 100 and max(abs(t) for t in spread) <= 45.0 + 1e-6,
+          "with a spread set, heading is drawn inside +/- the half-width",
+          f"{len(set(np.round(spread, 6)))} distinct, max |theta| {max(abs(t) for t in spread):.1f}deg")
+    check(_thetas(60) == _thetas(60, object_theta_spread_deg=None),
+          "object_theta_spread_deg=None is bit-identical (no extra RNG draw)",
+          "60 resets")
+    # The finger must still land ON the face it was assigned, after rotation.
+    e = _contact_env(object_theta_spread_deg=45.0)
+    worst = 0.0
+    for s in range(60):
+        e.reset(seed=s)
+        gap = float(np.hypot(*(e._x[IDX_FINGER_XY[e._active_finger]]
+                               - e._x[IDX_OBJ_XY]))) 
+        n_out, _ = face_frame(tuple(e._x[IDX_OBJ_XY]),
+                              float(np.arctan2(e._x[IDX_OBJ_HEADING][1],
+                                               e._x[IDX_OBJ_HEADING][0])),
+                              tuple(e._x[IDX_FINGER_XY[e._active_finger]]),
+                              e.params.object_w_cm, e.params.object_h_cm)
+        rel = np.asarray(e._x[IDX_FINGER_XY[e._active_finger]], float) - np.asarray(e._x[IDX_OBJ_XY], float)
+        worst = max(worst, abs(float(np.dot(rel, n_out)) - gap))
+    check(worst < 1e-6,
+          "after rotation the active finger still sits on its face's outward normal",
+          f"worst off-normal residual {worst:.2e} cm")
+    try:
+        from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+        ContactEnv(template="push", seed=0, require_settled=False,
+                   params=PlanarFingertipParams(
+                       board_w_cm=50.0, board_h_cm=30.0,
+                       portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),)),
+                   push_cone_deg=None, object_theta_spread_deg=30.0)
+        check(False, "rotation without the cone sampler raises")
+    except ValueError:
+        check(True, "rotation without the cone sampler raises",
+              "the historical sampler picks the face from an axis-aligned table")
+
     section("mask_inactive_finger gates the free finger, guard stays on")
     def _free_finger_moved(mask):
         e = _contact_env(mask_inactive_finger=mask)
@@ -601,6 +789,52 @@ def cmd_contact() -> None:
                 fn(); check(True, f"{name} runs")
             except Exception as e:
                 check(False, f"{name} runs", f"{type(e).__name__}: {e}")
+
+        # The task overlay is the thing worth asserting: goal, tolerance ring and
+        # which fingertip is driven are NOT in the state vector, so a renderer
+        # that quietly ignores them still writes a perfectly valid mp4. Same
+        # failure mode as plots._draw_rollout_ax -- assert the artists.
+        import matplotlib.pyplot as plt
+        goal = (float(env._x[0]) + 7.0, float(env._x[1]) + 3.0)
+        over = [to_snapshot(s_x, env.params, goal_xy=goal, arrival_eps_cm=0.4,
+                            active_finger="L", inactive_masked=True)
+                for s_x in (env._x,)]
+        check(over[0].goal_xy is not None and over[0].active_finger == "L",
+              "Snapshot carries the task overlay")
+        ax = V.plot_snapshot(over[0])
+        stars = [ln for ln in ax.lines if ln.get_marker() == "*"]
+        check(len(stars) == 1 and np.allclose(stars[0].get_xydata()[0], goal),
+              "goal star drawn at the goal", f"{len(stars)} star(s)")
+        rings = [p for p in ax.patches
+                 if type(p).__name__ == "Circle" and not p.get_fill()]
+        check(len(rings) == 1, "arrival tolerance drawn as an unfilled ring",
+              f"{len(rings)} ring(s)")
+        # 0.4cm on an 80cm board would be invisible; the floor must kick in.
+        check(rings and rings[0].get_radius() > 0.4,
+              "tolerance ring is floored to stay visible",
+              f"r={rings[0].get_radius():.2f}" if rings else "no ring")
+        widths = {n: p.get_linewidth() for n, p in
+                  zip(over[0].fingers, [p for p in ax.patches
+                                        if type(p).__name__ == "Circle"
+                                        and p.get_fill()])}
+        check(len(set(widths.values())) == 2,
+              "driven and held fingertips are drawn differently",
+              f"linewidths={widths}")
+        plt.close("all")
+
+        # goal-derived helpers, and the closest-approach tick E3 turns on
+        check(abs(V.goal_dist(over[0]) - float(np.hypot(7.0, 3.0))) < 1e-9,
+              "goal_dist measures object-centre to goal")
+        with_goal = [V.Snapshot(**{**s.__dict__, "goal_xy": goal}) for s in snaps]
+        k = V.nearest_index(with_goal)
+        check(k is not None and k == int(np.argmin(
+                  [V.goal_dist(s) for s in with_goal])),
+              "nearest_index returns the argmin tick", f"tick {k}")
+        check(V.nearest_index(snaps) is None,
+              "nearest_index is None when no snapshot carries a goal")
+        cap = V._episode_caption(over, {"why": "contact_lost", "success": 0.0})
+        check("contact_lost" in cap and "failed" in cap and "driving L" in cap,
+              "caption reports outcome and which finger is driven", cap[:70])
         try:
             from eval_contact import save_summary_png
             rows = [dict(d0=1.0, success=1.0, steps=5, why="arrived", q0=8.0, ret=9.0,

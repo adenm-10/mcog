@@ -43,10 +43,6 @@ def heading_error(x: State, desired) -> float:
     return float(np.arccos(np.clip(float(heading(x) @ d), -1.0, 1.0)))
 
 
-def within_cone(x: State, desired, alpha_deg: float = HEADING_CONE_ALPHA_DEG) -> bool:
-    return heading_error(x, desired) <= float(np.deg2rad(float(alpha_deg)))
-
-
 def dist_to_target(x: State, target) -> float:
     return float(np.hypot(float(x[0]) - float(target[0]),
                           float(x[1]) - float(target[1])))
@@ -103,11 +99,6 @@ def score_arrival(x: State, *, target, arrival_eps: float,
 # violation that is only counted, and a str is "stop now" naming a
 # records.OPTION_OUTCOMES value. nav returns only bools; contact needs the
 # terminating case (docs/stage1_env_spec.md, Guards).
-
-def as_cell_set(cells) -> FrozenSet[Tuple[int, int]]:
-    """Cell array -> set, so the per-step check below is cheap."""
-    return frozenset((int(c[0]), int(c[1]))
-                     for c in np.asarray(cells).reshape(-1, 2))
 
 
 def guard_region(x: State, allowed_cells: FrozenSet[Tuple[int, int]],

@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 # Must precede any jax import. Every import in this module is function-local, and
-# option_graph._port_eval imports jax at ITS module level, so setting these here
+# option_graph.eval_harness imports jax at ITS module level, so setting these here
 # is early enough as long as fixture_eval is imported first.
 os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -43,7 +43,7 @@ FIXTURE_DIR = "tests/fixtures_smoke"
 MODES = ("regions", "monolith")
 TOL = float(os.environ.get("FIXTURE_TOL", "0.0"))
 
-# Every key returned by option_graph._port_eval.evaluate_controller().
+# Every key returned by option_graph.eval_harness.evaluate_controller().
 METRIC_KEYS = ("success_rate", "time_to_arrival", "mean_path_length",
                "mean_efficiency", "mean_control_cost", "mean_geodesic_dist", "n")
 GATE_KEYS   = ("success_rate", "n", "mean_geodesic_dist", "time_to_arrival")
@@ -169,7 +169,7 @@ def _eval_arm(cfg: dict, bundle, models, sink) -> dict:
     """Re-run the terminal eval. Must match run_monolith / run_regions argument
     for argument, or a fixture diff means 'the harness changed', not 'the code
     changed'."""
-    from option_graph._port_eval import evaluate_composition, evaluate_monolith
+    from option_graph.eval_harness import evaluate_composition, evaluate_monolith
 
     kw = dict(bundle=bundle, dt=float(cfg["dt"]), omega_max=float(cfg["omega_max"]),
               gamma=float(cfg["gamma"]), horizon=int(cfg["flat_horizon"]),

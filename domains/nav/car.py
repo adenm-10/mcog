@@ -17,9 +17,7 @@ rewrite it per leg via set_goal() without touching this class.
 from dataclasses import dataclass
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
-import numpy as np
 
 from .base import DynamicalSystem
 from .maze import Maze

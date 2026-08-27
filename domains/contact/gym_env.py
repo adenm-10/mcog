@@ -76,11 +76,14 @@ class ContactEnv(gym.Env):
                 require_settled: bool = True,
                 same_room_goal_prob: float = 0.0,
                 push_cone_deg: Optional[float] = None,
+                push_range_min_cm: Optional[float] = None,
+                object_theta_spread_deg: Optional[float] = None,
                 restrict_contact_actions: bool = False,
                 action_interface: str = "finger_velocity",
-                slip_model: str = "friction_cone",
-                slip_limit: float = 0.5,
+                slip_model: str = "speed_fraction",
+                slip_limit: float = 1.0,
                 mask_inactive_finger: bool = True,
+                gap_assist: bool = True,
                 disengaged_away_deg: Optional[float] = None):
         super().__init__()
         if template not in TEMPLATES:
@@ -119,6 +122,19 @@ class ContactEnv(gym.Env):
         # sampler, bug included, so it stays a faithful control -- see
         # _sample_push_edge.
         self.push_cone_deg = push_cone_deg
+        # Floor on the coned goal's radius, so training is not dominated by
+        # goals the object is already almost on (5 of the 60 benchmark
+        # episodes sit under 1cm against arrival_eps=0.4). None -> the
+        # historical draw, bit-identical.
+        self.push_range_min_cm = push_range_min_cm
+        # Push only. Half-width (deg) of the uniform spread the object's
+        # initial heading is drawn from; None keeps the historical fixed
+        # heading of 0 deg (measured 300/300 before v29) and draws no extra
+        # random number, so that path stays bit-identical.
+        self.object_theta_spread_deg = object_theta_spread_deg
+        # Set by _place_object_for_push; the coned goal sampler reads it so the
+        # push direction follows a rotated object.
+        self._last_face_normal = np.array([1.0, 0.0])
         # Push only: probability the goal room IS the source room. HER can only
         # relabel to positions the object actually reached, and under a
         # cross-room-only curriculum that is almost always still the source room
@@ -148,16 +164,28 @@ class ContactEnv(gym.Env):
                 raise ValueError("action_interface='contact_frame' already enforces the "
                                  "no-gap-opening rule per substep; "
                                  "restrict_contact_actions would re-apply it per tick")
+        if object_theta_spread_deg is not None and push_cone_deg is None:
+            raise ValueError("object_theta_spread_deg needs push_cone_deg: the historical "
+                             "sampler picks the contact face from an axis-aligned table, "
+                             "so a rotated object would be given an inconsistent face")
         if slip_model not in SLIP_MODELS:
             raise ValueError(f"slip_model must be one of {sorted(SLIP_MODELS)}, "
                              f"got {slip_model!r}")
         self.action_interface = action_interface
-        # friction_cone derives the tangential budget from finger_friction
-        # (Coulomb mu*N), so it is not a free parameter. speed_fraction +
-        # slip_limit is the superseded tuned ceiling, kept so the archived
-        # sweep_42007967 checkpoints still replay under their own interface.
+        # speed_fraction at slip_limit=1.0 (the default) leaves no tangential
+        # limit beyond the whole-command clamp to v_max: the finger may slide
+        # along a face with no push, and pymunk's contact friction decides what
+        # that does to the object. friction_cone caps |v_t| at mu*push*v_max on
+        # top of that -- a second friction model over the solver's own, kept as
+        # an ablation arm because it measurably costs success (v28).
         self.slip_model = slip_model
         self.slip_limit = float(slip_limit)
+        # An ASSIST, not physics: forbids commanding retreat faster than the
+        # object recedes, so contact is lost by sliding off a corner rather than
+        # by the policy backing away. contact_frame only -- finger_velocity has
+        # never had it, which makes gap_assist=false the midpoint of the ladder
+        # full -> nogapassist -> raw.
+        self.gap_assist = bool(gap_assist)
         # Push only. False gives the policy both fingers and leaves
         # forbidden_contact as the only thing keeping the free one clear;
         # True zeroes the inactive finger, which parks it in the object's path.
@@ -275,19 +303,34 @@ class ContactEnv(gym.Env):
         orders and so cannot share anything earlier than this."""
         ow, oh = self.params.object_w_cm, self.params.object_h_cm
         clearance = self.params.finger_radius_cm - 0.02  # deliberate slight overlap
-        face_offset = {
+        local_offset = {
             "west": (-(ow / 2.0 + clearance), 0.0), "east": (ow / 2.0 + clearance, 0.0),
             "north": (0.0, oh / 2.0 + clearance), "south": (0.0, -(oh / 2.0 + clearance)),
         }[face]
+        # One draw either way, in the same order, so the None path stays
+        # bit-identical -- the discipline used for disengaged_away_deg.
+        theta = 0.0 if self.object_theta_spread_deg is None else math.radians(
+            float(self._rng.uniform(-float(self.object_theta_spread_deg),
+                                    float(self.object_theta_spread_deg))))
+        # `face` names a face of the OBJECT, so both the finger's offset and the
+        # face normal live in the object's frame and rotate with it. The object's
+        # rotated bounding box reaches at most its half-diagonal, which is inside
+        # wall_margin_cm, so no rotation can push it into a wall.
+        c, sn = math.cos(theta), math.sin(theta)
+        face_offset = (c * local_offset[0] - sn * local_offset[1],
+                       sn * local_offset[0] + c * local_offset[1])
+        n_local = self._FACE_NORMALS[face]
+        face_normal = np.array([c * n_local[0] - sn * n_local[1],
+                                sn * n_local[0] + c * n_local[1]], dtype=float)
         x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,))
-        obj_state = self._place_object(x0, y0)
+        obj_state = self._place_object(x0, y0, theta=None if theta == 0.0 else theta)
         obj_state = self._place_finger(obj_state, active,
                                        (x0 + face_offset[0], y0 + face_offset[1]))
         # The object travels away from the active finger, so that finger's own
         # outward normal points at the one region it cannot be run into.
-        inactive_xy = self._sample_disengaged_point(
-            (x0, y0), away_from=np.asarray(self._FACE_NORMALS[face], dtype=float))
+        inactive_xy = self._sample_disengaged_point((x0, y0), away_from=face_normal)
         obj_state = self._place_finger(obj_state, inactive, inactive_xy)
+        self._last_face_normal = face_normal
         return obj_state
 
     def _ray_interval_in_room(self, room: int, p, u):
@@ -320,6 +363,12 @@ class ContactEnv(gym.Env):
                 continue
             lo, hi = iv
             lo = max(lo, min(self.arrival_eps, hi))  # never start already arrived
+            if self.push_range_min_cm is not None:
+                # Reject rather than clamp: clamping would pile goals onto `hi`
+                # exactly whenever the ray is too short to hold the floor.
+                if hi <= float(self.push_range_min_cm):
+                    continue
+                lo = max(lo, float(self.push_range_min_cm))
             if hi <= lo:
                 continue
             r = float(self._rng.uniform(lo, hi))
@@ -352,13 +401,24 @@ class ContactEnv(gym.Env):
         else:
             face = str(self._rng.choice(self._FACES))
             portal = None
-        nx, ny = self._FACE_NORMALS[face]
         obj_state = self._place_object_for_push(src, face, active, inactive)
+        # _place_object_for_push may have rotated the object, so take the face's
+        # normal from there rather than from the axis-aligned table.
+        nx, ny = self._last_face_normal
         obj_xy = (float(obj_state[IDX_OBJ_XY][0]), float(obj_state[IDX_OBJ_XY][1]))
         # The finger sits on `face`, so it can only push along the inward normal.
         goal_xy = self._sample_goal_in_push_cone(dst, obj_xy, (-nx, -ny), portal)
-        if goal_xy is None:
-            goal_xy = self._sample_room_xy(dst)  # cone can't reach dst from here
+        if goal_xy is None:  # cone can't reach dst from here
+            # push_range_min_cm is a hard floor, so the fallback has to clear it
+            # too -- otherwise it leaks back exactly the near-zero goals the
+            # floor exists to remove (measured 3.7% at a 3cm floor). With no
+            # floor this draws once and breaks, bit-identical to before.
+            for _ in range(64):
+                goal_xy = self._sample_room_xy(dst)
+                if self.push_range_min_cm is None or float(np.hypot(
+                        goal_xy[0] - obj_xy[0],
+                        goal_xy[1] - obj_xy[1])) >= float(self.push_range_min_cm):
+                    break
         return obj_state, goal_xy
 
     def _sample_push_edge(self):
@@ -569,7 +629,8 @@ class ContactEnv(gym.Env):
                                           slide=float(a[j + 1]),
                                           slip_model=self.slip_model,
                                           slip_limit=self.slip_limit,
-                                          mu=self.params.finger_friction)
+                                          mu=self.params.finger_friction,
+                                          gap_assist=self.gap_assist)
         x_next, u_phys = self._physics.step(self._x, a, contact_frame=cmd)
 
         leg = SimpleNamespace(direction=self._active_finger)

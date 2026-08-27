@@ -26,10 +26,16 @@ from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_VEL,
 CONTROL_DIM = 4  # (vLx, vLy, vRx, vRy), each in [-1, 1]
 
 
-def to_snapshot(x, params: PlanarFingertipParams) -> Snapshot:
+def to_snapshot(x, params: PlanarFingertipParams, *, goal_xy=None,
+                arrival_eps_cm=None, active_finger=None,
+                inactive_masked=None) -> Snapshot:
     """The one place that knows both the state layout and the generic Snapshot
     contract, so swapping the sim means a new function here, not in
-    visualize.py."""
+    visualize.py.
+
+    The task overlay (goal, tolerance, which finger is driven) is not in the
+    state vector, so it is passed in; omitting it renders as before.
+    """
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     angle = math.atan2(float(x[3]), float(x[2]))
     fingers = {side: (float(x[sl][0]), float(x[sl][1]))
@@ -40,7 +46,11 @@ def to_snapshot(x, params: PlanarFingertipParams) -> Snapshot:
         object_xy=(float(x[0]), float(x[1])), object_angle_rad=angle,
         object_w_cm=params.object_w_cm, object_h_cm=params.object_h_cm,
         fingers=fingers, finger_radius_cm=params.finger_radius_cm,
-        touching=touching, walls=wall_segments(params))
+        touching=touching, walls=wall_segments(params),
+        goal_xy=(None if goal_xy is None
+                 else (float(goal_xy[0]), float(goal_xy[1]))),
+        arrival_eps_cm=(None if arrival_eps_cm is None else float(arrival_eps_cm)),
+        active_finger=active_finger, inactive_masked=inactive_masked)
 
 
 class Physics:

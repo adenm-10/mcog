@@ -1197,3 +1197,511 @@ fixture_eval 18/18. (`ruff` is not installed in the `tsmc` env — lint gate unr
 **Next.** Submit the 15-cell sweep. If no arm beats `base` outside seed spread, the free
 finger was not push's binding constraint and the next target is the aiming problem E3
 exposed, not a fifth fix to the contact interface.
+
+## v27 — 2026-08-26 — the free finger scored: placement is cosmetic, unmasking is harmful
+
+**Question.** Job `42056320`, 15 cells, `{base, legacy, unmask, place, unmask_place} x seed
+{0,1,2}`, contact_frame, 150k. Is the servo-held free finger a real constraint on push, and
+what did adopting the Coulomb slip law cost? Preregistered in the launcher header;
+`forbidden_contact` was named the primary signal because success gaps under ~0.15 are
+unreadable at 3 seeds.
+
+**What ran.** All 15 cells COMPLETED at `8165284`, `GIT_DIRTY=no`. Scored with a new
+`tools/score_sweep.py`: interface keys from each cell's `meta.txt`, task keys pinned, two
+digest groups (A `4c221f0405c6` uniform ring, B `7b7d59c82155` 60deg cone), plus `base`
+transferred into group B. **Both `model_best.zip` and `model.zip` were scored** — 36 evals,
+34s each, on the `shared` partition. Paired bootstrap over the 60 shared stratified
+episodes, 20k resamples.
+
+**Results.**
+
+| arm | `model_best` | `model` | fc% (best/final) | horizon% | reten | Q gap | 12+cm |
+|---|---|---|---|---|---|---|---|
+| `base` | 0.150 | 0.172 | 15.0 / 12.2 | 61-66 | 0.98 | +5.06/+4.35 | 0.000 |
+| `legacy` | **0.294** | 0.233 | 23.9 / 22.2 | 42 | 0.91-0.94 | **+2.69/+3.14** | **0.083** |
+| `unmask` | 0.178 | 0.200 | **31.7 / 26.7** | 47-50 | 0.99 | +3.95/+3.60 | 0.028 |
+| `place` | 0.156 | 0.228 | **0.0 / 0.0** | 71-72 | 0.97 | +4.52/+3.60 | 0.000 |
+| `unmask_place` | 0.167 | 0.239 | 22.8 / 20.6 | 52-58 | 0.98 | +4.44/+3.83 | 0.000 |
+| `base` -> group B | 0.150 | 0.211 | **0.0 / 0.0** | | | | |
+
+1. **`place` kills `forbidden_contact` outright: 0/180 episode-scorings, both checkpoints.**
+   The prediction was ~2%. The `base`-transferred control is also 0/180, which attributes it
+   to the spawn and not the policy.
+2. **`unmask` fails its own preregistered threshold.** `forbidden_contact` went UP to
+   26.7-31.7% against the 19% bar, so the masking comment's warning still holds at 150k.
+   `unmask_place` is not the predicted harmless redundancy: unmasking *reintroduces* the
+   collision placement removed (0.0% -> 20.6%). **Keep masking; close out `unmask`.**
+3. **The transfer eval killed the placement success claim.** Naively `place` 0.228 vs `base`
+   0.172 reads +0.056. Against the correct control, `base` under group B's own reset at
+   0.211, it is **+0.017 [-0.039,+0.078]** — nothing. Placement made an easier task. This is
+   exactly the read the transfer eval was added to provide.
+4. **Only `legacy` beats `base` on success, and only on one checkpoint:** +0.144
+   [+0.078,+0.217] on `model_best`, +0.061 [-0.000,+0.122] on `model`.
+5. **Pooled against v25's rescored cells the slip-law cost is solid.** 7 `speed_fraction`
+   cells (v26 `legacy` x3 + v25 `cf_slip1.0` x4) vs 3 `friction_cone` cells, identical
+   digest and identical 60 episodes: **+0.126 [+0.061,+0.194]** (`model_best`) and **+0.080
+   [+0.022,+0.137]** (`model`). Both exclude 0. `base` sits below BOTH superseded ceilings
+   (v25 `cf_slip0.5` 0.200-0.221, `cf_slip1.0` 0.263-0.267). Confound to state: the v25
+   cells trained at `a6ad76b` and varied `same_room_goal_prob` in training, so this is
+   corroboration, not one clean experiment.
+6. **`legacy` is the best aimer**, which is the mechanism: 39% of its failures reach within
+   1cm against `base`'s 19%, median closest approach 1.42cm against 3.54cm. Consistent with
+   more tangential authority, and with its lower retention (0.909).
+7. **E3 replicates in all five arms, both checkpoints, ~1400 failing episodes: 0% ever
+   reach `arrival_eps`.** `horizon` is now the dominant failure at 42-72% with median
+   episode length 200 in every bin >=3cm. Aiming is confirmed; the free finger was not
+   hiding it.
+
+**Failure modes found.**
+
+- **`model_best` and `model` disagree on the arm ordering** (`legacy` first vs
+  `unmask_place`/`place`/`legacy` level). Scoring only one would have given a confident
+  wrong answer.
+- **Nothing converged at 150k.** The 100-125k eval bucket beats the 75-100k bucket in
+  **15 of 15 cells** (sign test p ~ 3e-5). `ep_len_mean` went from v25's 11-14 ticks to
+  78-129, so the same 150k buys ~8x fewer episodes. This is the likely cause of the
+  checkpoint disagreement. Note v25's "plateau by ~50k" referred to the 200-tick episode
+  horizon, a different budget from the training clock.
+- **The in-training n=16 eval inflates success ~2x**: `base` 0.323 -> 0.150, `legacy`
+  0.431 -> 0.294, `place` 0.413 -> 0.156.
+- **The critic gap tripled.** `base` +5.06 against v26's recorded +1.77 (Q mean 5.93 vs
+  realized 0.81). No bound violation (max 9.63 < 10, 0/60 over). Inversely correlated with
+  success across arms — `legacy` has both the smallest gap and the best success.
+  Correlation only; v20's lesson applies.
+- **`base`'s seed sd was exactly 0.000 on `model_best`** (9/60 three times), which is the
+  v20 duplicate-cell signature. Checked: the three success *memberships* differ (4-6
+  episodes) and mean |dQ| is 0.9-1.4, so the policies are distinct and the equal counts are
+  coincidence. All three succeed on the same low-index episodes, which is itself the aiming
+  story — solvability is set by the task, not the seed.
+
+**A protocol break, found by replaying a stored result.** The v25 SOTA checkpoint replayed
+at 0.4333 against its stored 0.4167, with the digest moved `1f402df37eef` ->
+`4c221f0405c6`. Cause: **v25's scoring pinned `same_room_goal_prob=0.5`; the v26 launcher's
+documented command says `1.0`.** Forcing `srg=0.5` at HEAD reproduces v25's stratified set
+**60/60 bit-identical**, so status.md's "`disengaged_away_deg=null` is bit-identical" claim
+is CORRECT and the suspected extra RNG draw does not exist. But `srg=1.0` is a materially
+easier distribution — mean initial goal distance 7.59cm vs 9.15cm, and the 12+cm bin's max
+drops 29.3cm -> 18.9cm. **Decision: pin `srg=1.0` going forward** (it is what every v26
+cell trained at) and restate v25 on it; job `42076377` did, giving the row-5 numbers above.
+v25's published 0.229 / 0.292 / best 0.417 are on the old distribution and must not be
+quoted beside these.
+
+**Next.** Adopt `place`, keep masking, drop `unmask`. Then aiming, with the budget folded
+in: `base` and `legacy` both carried as arms at 400k so the slip-law cost and the
+convergence question are answered in the same job. **Correction to the recorded plan:
+`push_cone_deg` is a half-ANGLE, and `_sample_goal_in_push_cone` samples the goal radius
+`uniform(lo, hi)` out to the wall-padded room boundary with no cap.** status.md's "the cone
+sampler already takes a radius, so it is a schedule on one number" is wrong — memo Eq 15's
+range curriculum needs a new parameter (clamp `hi`), not just a schedule.
+
+## v28 — 2026-08-27 — the training distribution was the mismatch; the cone comes off
+
+**Question.** Four changes were asked for directly: turn the critic clip on for push,
+remove the extra friction cone and let the solver own friction, ablate a 3cm goal-distance
+floor and an adjacent-room-only goal spawn, and extend the budget to 400k. Before building
+them, re-derive v27's numbers from the raw evals and check what they support.
+
+**v27 reproduces exactly.** All 36 eval JSONs re-scored from
+`logs/eval/v26_42056320/`: the arm table, the per-bin columns, `forbidden_contact` 0/180
+for `place` and for the `base` transfer, and the paired bootstrap
+(`legacy - base` +0.144 [+0.078,+0.211] `model_best`, +0.061 [+0.000,+0.122] `model`) all
+land on the recorded values. Both digest groups also turn out to share **identical `d0` to
+1e-6 on all 60 episodes**, so the group A/B transfer comparison is matched on the goal and
+differs only in the free finger's spawn — stronger than "matched on `d0` bins".
+
+**THE FINDING: push trains on a much easier distribution than it is scored on.** Measured
+at HEAD, 400 resets per setting, against the fixed 60-episode benchmark:
+
+```
+training, srg=1.0 (every push sweep to date)   min 0.4  median 2.1  mean 3.0  64% <3cm   4% >9cm
+the benchmark it is graded on                  min 0.4  median 7.2  mean 7.6  20% <3cm  40% >9cm
+```
+
+The policy has barely seen a long push. `stratified_seeds` deliberately searches for goals
+to fill five distance bins, so the benchmark is *supposed* to be harder — but nobody had
+measured how much, and 64%-vs-20% under 3cm is a bigger gap than any effect measured in
+v25-v27. This is a more direct account of "long pushes never work" than the slip law, the
+free finger, or aiming.
+
+**Three checks on v27's reasoning.**
+
+1. **E3's headline is true by construction.** "0% of failing episodes ever came within
+   `arrival_eps`" cannot be otherwise: `require_settled=false` makes arrival
+   `d < arrival_eps`, and arrival terminates. Confirmed in the data — over 2,160 episode
+   scorings the minimum closest approach among failures is **0.4010cm** and the maximum
+   among successes is **0.4000cm**, a hard cut at the threshold. The `arrival_eps` row of
+   `overshoot_report` is dead by construction under the pinned protocol. The *conclusion*
+   survives on the live numbers (median closest approach 3.09cm, 18% of failures within
+   1cm), but the line quoted as proof is not proof, and it was used to cancel a 12-cell
+   sweep. Rewrite the row or delete it.
+2. **The miss is about half shortfall, not mostly aiming.** Decomposing each failure's
+   start/end/goal triangle (free, from data already on disk), failures with `d0>=3cm`,
+   median `d0` 9.5cm: `base` travels **3.70cm (48%)** toward the goal with **2.26cm**
+   sideways error; `legacy` **6.09cm (73%)** with **2.13cm**. So `legacy`'s advantage is
+   almost entirely *travelling further*, not aiming better — which revises v27's "`legacy`
+   is the best aimer".
+3. **An untrained network scores 0.254 on the in-training eval.** Every cell's first two
+   evals precede the first gradient step (`learning_starts=10000`); across 15 cells they
+   average 0.254 against a final 0.411. No trivial-baseline number exists for the
+   60-episode benchmark. Also: the "still rising in 15/15 cells" claim is 14/15 strictly
+   (one tie), and the **125-150k bucket beats 100-125k in only 9/15** — mean gain drops
+   +0.078 then +0.021, so the curve is flattening, and 400k will buy less than "still
+   rising" suggests.
+
+**Also measured: the 0-3cm bin carries a fifth of the score and is nearly trivial.**
+Pooled over all 36 scorings, success is 0.856 under 1cm and 0.009 beyond 12cm; median
+object displacement in a *successful* episode is 0.95cm. Restricting to goals >=3cm moves
+`base` 0.150/0.172 -> **0.042** and `legacy` 0.294/0.233 -> **0.174/0.153**, i.e. the gap
+goes from 2x to 4x. Report both from now on; the restriction is a free reweighting of
+episodes already scored, no re-run and no digest change.
+
+**Built.**
+
+- **The enforced friction cone comes off the default.** `slip_model=speed_fraction`,
+  `slip_limit=1.0` is now the default, which leaves no tangential limit but the clamp of
+  the whole command to `v_max` and "no pulling". Rationale: the finger is a force servo and
+  its contact with the object is a native pymunk contact at mu=0.75, so **the solver
+  already resolves slip**. `friction_cone` caps the *command* at `mu*push*v_max` on top of
+  that — a second friction model over the solver's own. It forbids deliberate slip (a real
+  finger slips constantly; v25 measured 65-78deg deviation while contact held) and it
+  **freezes the finger entirely at push=0**, so the finger cannot slide along a face
+  without also driving the object. `friction_cone` is kept as an ablation arm, not deleted.
+  Supporting measurement, success on goals >=3cm, one eval set (digest `4c221f0405c6`),
+  14 cells: **cone 0.042 < flat 0.5 0.109 < flat 1.0 0.170**, monotone, and every cone cell
+  below every flat cell. Confound: 8 of the 11 flat cells are v25's, trained at `a6ad76b`
+  with `same_room_goal_prob` varying in training. The clean within-sweep comparison is
+  3 vs 3 with perfect separation, exact one-sided p = 0.05 — the smallest 3-vs-3 can give.
+- **`push_range_min_cm`** (push only, cone sampler only): a floor on the goal's distance
+  from the object at reset. Rays too short to hold the floor are **rejected, not clamped**,
+  which would pile goals onto `hi`. The first version leaked — 3.7% of goals were still
+  under a 3cm floor, via `_sample_push_edge_coned`'s `_sample_room_xy` fallback when the
+  cone cannot reach; the fallback now redraws until it clears the floor. `None` is
+  bit-identical (asserted): with no floor the fallback loop draws once and breaks.
+- **Gate: 35 -> 41.** Three checks that the default slip law is `speed_fraction`/1.0 and
+  that it slides at `v_max` where the cone freezes, at every push level; three that the
+  floor holds over 200 resets, that `None` is bit-identical, and — following the repo's own
+  rule about tests that never fire — that **the unfloored sampler really does draw
+  sub-floor goals** (131/200 under 3cm), so the floor check cannot pass against a broken
+  implementation.
+- **v28 sweep launcher**, 18 cells = `{full, noclip, nomin, cone, cross0, cross50}` x seed
+  `{0,1,2}` at 400k. Each arm is `full` minus exactly one factor. `disengaged_away_deg=60`
+  is **adopted in every cell**, not tested, so there is one digest group and no transfer
+  control is needed this round; the reference to beat is `base` scored under that same
+  reset in v27, 0.150/0.211 overall and 0.042/0.069 on goals >=3cm.
+
+**Preregistered predictions (BOTH WRONG -- see the results section below).** (1) `full`
+beats `nomin` on goals >=3cm and loses to it under 3cm. (2) `cross0` sees near-zero
+successes and produces no learning signal, because success beyond 12cm is 0.009 today and
+the reward is fully sparse.
+
+**Verification before submission.** All 18 cells expanded from the launcher itself (not a
+retyped copy — a retyped copy had a typo the file did not, which is v16's failure mode in
+miniature); each differs from `full` in exactly one key. All six arms smoke-trained to
+completion. `target_clip` read back out of each saved checkpoint: `noclip` `None`, the
+other five `10.0`. Sampler settings confirmed behaviourally, not by reading the command:
+`full` min 3.0 median 4.8, `nomin` min 0.4 median 2.1, `cross0` min 12.3 median 21.6,
+`cross50` min 3.0 median 13.9.
+
+**Gates:** static 22/22, geometry 27/27, **contact 41/41**, test_option_graph 171/171,
+fixture_eval 18/18. (`ruff` still not installed in `tsmc`.)
+
+**Next.** Submit the 18-cell sweep. Score both checkpoints, report the 5-bin mean and the
+>=3cm figure side by side, and treat seed as the experimental unit when comparing arms —
+v27's episode-level bootstrap CI answers "would more episodes change this", not "would more
+seeds".
+
+## 2026-08-27 — dead-code sweep (Tier A) and a silent plotting bug
+
+**Question.** The repo had accumulated single-use experiment code. What is actually
+unreferenced, and what only *looks* unreferenced?
+
+**What ran.** An AST scan over every top-level def/class/const in the repo, a module
+import graph, an unused-import pass, and `diff -q` of each `slurm/` launcher against the
+copies archived under `logs/<sweep>/*/submit_script.sh`. Then all five gates before and
+after.
+
+**Gates.** Before: 22/27/41/171/18. After: **25/27/41/170/18**, all green. The two deltas
+are accounted for, not lost tests: `static` +4 −1 (four new plotting checks, minus the
+`option_graph._port_eval` import check) and `test_option_graph` −1 (`cmd_layering` emits
+one check per module under `option_graph/`, and `_port_eval.py` is gone).
+
+**Deleted.**
+
+- `.cleanup-backup/` — six files. The four `.bak` copies were **byte-identical** to the
+  live `tests/*.py` (measured, `diff -q`); `gates.sh` ran only four gates and omitted
+  `contact`; `status.md.orig` was the 120 KB pre-condense draft.
+- `tests/probe_region_budget.py` (269 lines) — its own docstring said *"DISPOSABLE —
+  delete once the reference budget is chosen. Nothing imports this."* The budget is chosen
+  (`option_budget=50`, `h_region=160`).
+- `option_graph/_port_eval.py` (10 lines) — the retired `eval_harness` shim. Four call
+  sites repointed: `train.py:133,197`, `tests/fixture_eval.py:172`, plus the import-graph
+  entry in `test_code.py`. Closes a TODO item.
+- `domains/nav/gym_env.py`'s `setup_logger` plus the `logging`/`sys` imports it orphaned.
+- `domains/contact_templates.py`'s `within_cone` and `as_cell_set`;
+  `option_graph/planner.py`'s `route_cost`; `option_graph/analysis/plots.py`'s
+  `plot_rollout`.
+- Five genuinely unused imports (`nav/base.py` `dataclass`, `nav/car.py` `jax` and `np`,
+  `edge_model.py` `field`, `test_code.py` `json`).
+- `test_code.py`'s `[legacy-ref]` escape hatch, which no source line used.
+
+**The bug: `plot_rollout_grid` drew no rollouts.** `_draw_rollout_ax` took
+`X, goal, success, dist, midpoints` and used **none of them** — its whole body was the
+region-tint `imshow`. So `eval_harness.py:159` wrote `rollouts/grid.png`, captioned
+*"worst 8 rollouts (failures + longest horizon)"*, containing only a colour wash. Fixed to
+draw walls, the trajectory (green arrived / red failed), start, goal, interface markers,
+and a per-panel title. `plot_rollout`, the never-called sibling with the same defect, was
+deleted rather than fixed.
+
+This is the **second** bug in this one file from the same cause, and the file already had
+a gotcha about it (*"`train.py`'s plotting path had zero test coverage, and it showed"*).
+So it got a gate: `static`'s "rollout figure actually draws the rollout" asserts on the
+Matplotlib artists, not on a file existing — the broken version wrote a perfectly valid
+PNG. **Verified non-vacuous**: replaying the old function body against the same
+assertions gives 0 full-length polylines (needs 1), 0 collections (needs >=3), and an
+empty title. All three fail.
+
+**Two claims retracted mid-task, both mine, same root cause.** `grep` in this shell is a
+wrapper passing `--ignore-files`, so it honours `.gitignore` — and `.gitignore` has
+`tests/*`. Every recursive `grep` silently skipped `tests/test_option_graph.py`,
+`tests/probe_edges.py` and `tests/summarize_horizon_sweep.py`:
+
+- `geometry.shortest_region_path` was called dead. It is **live**:
+  `tests/test_option_graph.py:163,175,177` golden-diffs it against `planner.bfs_route`
+  over every pair of every maze (part of the gate), and `tests/probe_edges.py:213,217`
+  calls it.
+- `domains/nav/base.py` was called dead. It is **live**: `domains/nav/car.py:24` does
+  `from .base import DynamicalSystem` and `DubinsCarSystem` inherits it. The import graph
+  missed it because the script only followed absolute imports (`node.level == 0`).
+
+Also retracted: `nav/maze.py`'s `bilinear_sample` (the block carries an explicit
+`# noqa: F401`) and `fixture_eval.py`'s `_pin_threads` (documented as a deliberate
+re-export). Both are intentional façades, not oversights. The AST scan, which walked
+`tests/` with `os.walk`, was sound throughout; only the ad-hoc greps were wrong.
+
+**Not touched, deliberately.** `contact/hooks.py`, `metrics.n_rho`/`aulc`,
+`records.flatten_episodes`, `push_arrival`'s `theta_target` path, the risk-aware planner
+and `replan` — all built ahead of need but named in `docs/TODO.md` as planned. The
+`unmask` and `min_progress_cm` knobs are closed science but still cheap; left for a
+separate decision.
+
+**Tier D executed the same day — the serializers are unified.**
+
+There were **five** copies, not four: `tests/probe_edges.py` held a fifth, invisible to
+the same `.gitignore`-aware grep that produced the two retractions above. All five now
+call `records.json_safe`, whose branch order matters and is documented at the definition
+(`np.float64` subclasses `float`, so the NaN test must stay ahead of the `np.floating`
+test).
+
+**How it was verified, in increasing strength.**
+
+1. **All five old bodies vs the new one on every real payload.** `model.json`,
+   `nine_rooms_n8_summary.json`, `metrics.json`, `edges_n8_h50.json`,
+   `eval_composition.json`, plus 400 lines each of `records.jsonl` and the calibration
+   jsonl: **byte-identical for all five copies on all seven payloads.** The divergence
+   was latent, never active — worth recording, because it means no artifact on disk was
+   ever wrong.
+2. **The exact `write_jsonl` path** (`separators=(",",":")`, no `sort_keys`): 400/400
+   lines byte-identical. `OptionRecord.__post_init__` coerces `entry_state`/`exit_state`/
+   `target` to `[float(v) for v in ...]`, which is *why* `records._clean` never needed an
+   ndarray branch.
+3. **`metrics.json` regenerated through the real Hydra CLI twice** — once on the old
+   local `_json_safe`, once on `records.json_safe`, identical args
+   (`draws=500 seed=0`) — **identical, md5 `e0609b25…`, 38,490 bytes.** This tests the
+   import wiring, not just the function. The run also reproduced the Stage 0 headline
+   unchanged: R=4.17, `d_point`=+0.1463, MAE 0.1924 marginal / 0.0461 handoff.
+4. **A `static` check that `json_safe` is defined in `records.py` and nowhere else**,
+   proven non-vacuous by planting a copy in `planner.py` (gate FAILs, naming both files)
+   and removing it (gate passes). It excludes `tests/fixture_eval.py`'s `_clean` **by
+   path**, with a comment — that one is a tol=0 value normalizer, not a serializer, and
+   relying on its parameter name to miss the regex would have been luck.
+
+`edge_model`'s `model.json` was deliberately **not** regenerated: refitting the MLP needs
+the original `--hidden/--epochs/--seed/--val-frac`, which are not recorded anywhere, so a
+mismatch would have been uninterpretable. The two-run identical-args comparison answers
+the actual question without that confound.
+
+**Behaviour deltas, stated rather than buried.** Against the three *weaker* copies the
+unified version now succeeds where they raised: `np.ndarray` (1-D and 2-D), nested
+ndarray, `np.int64`, `np.float32` NaN, and tuples containing NaN. Against the two
+stronger copies (`edge_model`, `metrics`) it is exactly equivalent. `np.bool_` still
+raises, in the new version as in all five old ones — left alone, since no writer produces
+one and inventing a branch would be speculative.
+
+**Process note.** A `git checkout -- option_graph/planner.py`, used to clean up a planted
+test copy, silently reverted the `route_cost` deletion from earlier the same day. Caught
+by re-grepping rather than by any gate. **Never use `git checkout --` as an undo on a
+file with unrelated uncommitted work** — the deletion had to be redone.
+
+**Gates after Tier D:** `static` 26/26, `geometry` 27/27, `contact` 41/41,
+`test_option_graph` 170/170, `fixture_eval` 18/18.
+
+## 2026-08-27 — the contact video shows the task, not just the object
+
+**Question.** The mp4s were hard to read. What is actually missing, and is it a drawing
+bug or a data-plumbing one?
+
+**Cause: data plumbing.** `visualize.Snapshot` had ten fields — board, object pose, both
+fingertips, contact flags, walls — and **no goal**. `plot_snapshot` therefore could not
+draw a goal even in principle, so every video showed an object moving for no visible
+reason. The goal was one stack frame away the whole time: `eval_contact.rollout` computes
+`dg`, `d0`, `min_dist` and `min_tick` in the same loop that collects the snapshots.
+
+**Five changes, all verified on a real v27 checkpoint** (`push_legacy_s0`, `model_best`):
+
+1. **Goal + tolerance.** `Snapshot` gains `goal_xy` and `arrival_eps_cm`, optional with
+   defaults so every prior caller renders exactly as before. Drawn as a star plus a dashed
+   ring. `arrival_eps=0.4cm` on a 50cm board is under 1% of frame width, so the ring has a
+   floor of `0.02 * board_w`.
+2. **Agency, separately from contact.** Fill stays green/grey for touching/not; the EDGE
+   now encodes which fingertip the policy drives — heavy solid for driven, dashed for a
+   masked one. Under `mask_inactive_finger` the free tip is servo-HELD in the object's
+   path, and contact colour cannot express that; it is the confusion that cost v26 an
+   iteration (`forbidden_contact` 8% -> 17-19%).
+3. **Object trail + closest approach.** The trail is drawn only up to the current tick, so
+   the video never reveals the object's future. The red ring marks `argmin` distance —
+   E3's statistic, and the one thing a final frame cannot show.
+4. **A two-line caption** replacing `tick N`: `d0 -> final`, `nearest @ tick`, termination
+   reason, success, distance bin, and which finger is driven. Everything except
+   `why`/`success`/`bin` is derived from the snapshots, so a caller passing nothing still
+   gets most of it.
+5. **`plot_trajectory` wired in.** It already drew start/end poses, per-finger paths and
+   contact make/break markers and was **never called**; `render_episode` now writes
+   `<ep>_path.png` beside each mp4.
+
+**Two legibility bugs found by looking at the output, not by reasoning about it.**
+The legend sat `loc="upper right"` — inside the board at 50x30, covering the region the
+object travels through; it is now below the axes. And `_GOAL_COLOR` was `#1f77b4`, which
+is **exactly `tab10[0]`**, the colour `plot_trajectory` gives finger L: the goal star was
+indistinguishable from finger L's own contact markers. Now deep purple, with a note at the
+constant. Object tan / walls black / fingers blue+orange / nearest red / goal purple are
+mutually distinguishable.
+
+**What the fixed render immediately shows** on a failing episode (seed 1000048, d0 7.51cm,
+ended `horizon` at 8.21cm, nearest 2.73cm at t98): the driven fingertip is pressing the
+object's left face, pushing it *away* from a goal that sits behind-left, while the masked
+fingertip is parked at (2,17) doing nothing. That is the E3 aiming failure as a picture
+rather than a percentile table.
+
+**Gate: nine new checks in `contact` (41 -> 50).** They assert the ARTISTS, not that a
+file appeared — the broken renderer wrote a perfectly valid mp4, which is exactly why this
+survived so long. Checked: the overlay survives `to_snapshot`; the goal star exists and
+sits at the goal; the tolerance ring is unfilled and floored above `arrival_eps`; driven
+and held fingertips get different linewidths; `goal_dist` and `nearest_index` agree with
+`argmin`; `nearest_index` is `None` when no snapshot carries a goal; and the caption names
+the termination reason and the driven finger. Same lesson as `plots._draw_rollout_ax`
+earlier today, now applied in both renderers.
+
+**Incidental cleanup.** The distance-bin label list was duplicated in
+`save_summary_png` and `_table`; both now call one `_bin_labels`, which `_bin_label` (new,
+for the caption) also uses — one definition instead of three.
+
+**Gates:** `static` 26/26, `geometry` 27/27, **`contact` 50/50**,
+`test_option_graph` 170/170, `fixture_eval` 18/18.
+
+
+
+## v28 RESULTS — 2026-08-27 — push works; the cone was the whole story
+
+**What ran.** Job `42248679`, all 18 cells COMPLETED at 400k (399.6-400.0k). Scored twice:
+the pinned same-room benchmark (`logs/eval/v28_42248679_sameroom/`, digest `3ddae0eb3e93`)
+and a cross-room benchmark (`logs/eval/v28_42248679_crossroom/`, digest `01cd2e4efd6b`,
+pins recorded in that directory's protocol note). 36 evals each.
+
+**The digest moved for the benign reason.** `3ddae0eb3e93` vs v27's group B
+`7b7d59c82155`, because `push_range_min_cm` was added to the hashed env kwargs. The 60
+initial states are **bit-identical** (checked episode by episode), so v28 and v27 group B
+numbers compare directly. This is exactly the two-causes gotcha, resolving the harmless way.
+
+**Result, same-room, final checkpoint, 3 seeds pooled:**
+
+```
+arm        0-3    3-6    6-9   9-12    12+    all   >=3cm
+full      0.92   0.86   0.81   0.67   0.44   0.74   0.694
+noclip    0.94   0.83   0.69   0.69   0.36   0.71   0.646
+nomin     0.97   0.83   0.83   0.61   0.50   0.75   0.694
+cone      0.83   0.42   0.08   0.06   0.03   0.28   0.146
+cross0    0.86   0.53   0.22   0.08   0.00   0.34   0.208
+cross50   0.86   0.72   0.53   0.61   0.33   0.61   0.549
+v27 base  0.78   0.19   0.08   0.00   0.00   0.21   0.069   <- same 60 episodes
+```
+
+**The distance cliff is gone.** 12+cm went 0.00 -> 0.44; overall 0.21 -> 0.74; goals >=3cm
+0.069 -> 0.694, a 10x. Seed sd is 0.036-0.059 and `cone`'s range (0.250-0.333) never
+overlaps the working arms' (0.633-0.800), so this is not seed noise.
+
+**Attribution, single-factor from `full`:**
+
+| removed | result | worth |
+|---|---|---|
+| flat slip -> `friction_cone` | 0.74 -> **0.28** | **-0.46** |
+| `target_clip=10` | 0.74 -> 0.71 | -0.03 |
+| the 3cm goal floor | 0.74 -> 0.75 | **0.00** |
+
+**It was the cone, and essentially nothing else.** The `cone` arm had the clip, the floor
+and 400k steps and still landed at 0.28. The v26 decision to derive the tangential budget
+from Coulomb friction cost 0.46 on the primary metric; the v27 estimate of 0.126 at 150k
+understated it by ~4x, because the two interact with budget (below).
+
+**The cone does not just cost performance, it CAPS the ceiling.** Mean in-training eval by
+step bucket:
+
+```
+             0-50k  50-100k  100-200k  200-300k  300-400k
+full         0.106    0.192     0.475     0.625     0.684
+cone         0.073    0.125     0.199     0.277     0.256   <- flat from 200k, then down
+cross0       0.050    0.362     0.553     0.655     0.696
+```
+
+Extra budget bought the flat arm ~+0.21 over the last half of training and the cone arm
+nothing. Reconciling against v27: flat slip went ~0.23-0.29 at 150k -> 0.74 at 400k
+(~+0.45 from budget), the cone 0.15-0.21 -> 0.28 (~+0.09). **v27's "nothing converged at
+150k" was right, and the reason the 150k arm comparison understated the cone's cost is that
+it ranked the arms by convergence speed rather than by asymptote** -- the failure mode
+recorded in the gotchas, observed.
+
+**Both preregistered predictions failed.**
+1. The 3cm floor did nothing: `full` and `nomin` are identical above 3cm (0.694 vs 0.694)
+   and `nomin` is BETTER below it (0.97 vs 0.92). Once the action space works, short goals
+   do not crowd out long ones. The floor is retained as harmless, not as a win. **The
+   train/eval mismatch was real as a measurement but was not the binding constraint.**
+2. `cross0` did not fail -- it reached 0.73 on its own benchmark. The prediction reasoned
+   from *current success at 12+cm* without checking *training density at 12+cm* (8% for
+   `full`, 100% for `cross0`).
+
+**The failure mode inverted.** `full`: 74% arrived, 12% horizon, 12% contact_lost, 2%
+forbidden_contact, retention 0.92. Of the failures **53% come within 1cm** against v27
+`base`'s 19%. Push no longer fails by never getting close; it fails by arriving and not
+settling. This is the first evidence that would justify revisiting `require_settled`, which
+has been ruled out since v26 -- E3's diagnosis was correct for the policy that existed then.
+
+**The critic is calibrated for the first time.** Q-minus-realized went +5.06 (v27 `base`)
+-> **+0.10** (`full`), with `noclip` at -0.36 and `nomin` -0.05. `cone` +2.53 and `cross0`
++3.08. **This closes TODO item 9:** the gap was a symptom of a policy that could not deliver
+the value it predicted, not a separate defect. `target_clip` contributes little on its own.
+
+**Cross-room, 32 episodes, goals 12-34cm (final / best):**
+
+```
+cross50  0.667 / 0.729      cross0  0.615 / 0.729
+noclip   0.604 / 0.490      full    0.531 / 0.458      nomin  0.542 / 0.438
+cone     0.073 / 0.052
+```
+
+**Transfer is asymmetric and the varied task is the better teacher.** `full` reaches 0.53
+cross-room having never trained there; `cross0` manages only 0.34 back on same-room, because
+it only ever learned to push east or west (measured: 100% of its pushes are +/-x, against
+34% north / 32% south / 18% east / 17% west for `full`). Best single cell anywhere is
+`full_s2` at **0.844 cross-room**, beating the specialists on their own task.
+
+**Also measured: the portal is not an obstacle.** Over 400 cross-room resets, the straight
+object->goal path is blocked by the wall in **0%** of episodes; the whole object clears the
+opening in 89.2%. The opening is y in [5,25] of a 30cm board, `wall_margin=6` confines
+objects to y in [6,24], and `_sample_goal_in_push_cone` explicitly requires the ray to pass
+through the portal. **"Crosses a room" currently means "a long straight push that passes a
+doorway", not a traversal.** Any claim about portal crossing needs a harder board.
+
+**Decision: `friction_cone` is DEPRECATED**, ablation arm only, never the default. NOT
+deleted -- the v26/v27 archived cells trained with it and must stay replayable.
+
+**Next.** Recontact at 400k under the same action-space fix; a board where the portal is a
+real constraint; and `require_settled`, reopened by the near-miss failure profile.

@@ -3,61 +3,78 @@
 Next action first for each item. Session history in `docs/PROGRESS.md`; repo map in
 `docs/STRUCTURE.md`; current state and gotchas in `status.md`.
 
-## Immediate — Stage 1, post-v26
+## Immediate — Stage 1, post-v28
 
-**contact_frame is established** (v25: `contact_lost` 75-83% -> 0-17%, first nonzero 12+cm
-bin in the project). v26 made slip physical, exposed the free finger as a real failure
-source, and used E3 to cancel a 12-cell sweep before it ran. Full numbers in
-`docs/PROGRESS.md` v25/v26.
+**The v28 sweep is built and verified but NOT SUBMITTED.** 18 cells,
+`slurm/submit_sweep.sh`, `{full, noclip, nomin, cone, cross0, cross50}` x seed `{0,1,2}`
+at 400k. All six arms smoke-trained, all 18 overrides expanded from the launcher itself,
+`target_clip` read back out of each checkpoint. Full rationale in the launcher header and
+`docs/PROGRESS.md` v28.
 
-1. **Submit `slurm/submit_sweep.sh`.** 15 cells, 150k, arm
-   {base, legacy, unmask, place, unmask_place} x seed {0,1,2}. Built, all five gates green,
-   all five arms smoke-trained end-to-end, index mapping checked. **Not submitted.** Commit
-   first — the v20 provenance hole is only closed by a clean tree at submit time.
-   ```bash
-   sbatch slurm/submit_sweep.sh
-   ```
-   The file previously held job 42007967's launcher; all 16 of its per-run copies in
-   `logs/sweep_42007967/*/submit_script.sh` were verified byte-identical before overwriting.
-2. **Score with `eval_contact.py`, and mind the two key classes.** INTERFACE keys
-   (`action_interface`, `slip_model`, `slip_limit`, `restrict_contact_actions`,
-   `mask_inactive_finger`) come **from each cell's `meta.txt`**; TASK keys
-   (`require_settled`, horizon, sampler, `disengaged_away_deg`) are **pinned at the protocol
-   value**. Getting the first wrong inverted the v25 result once already.
-3. **The arms split into two digest groups**, because `disengaged_away_deg` is a task key:
-   group A (uniform ring) = base/legacy/unmask, group B (60deg cone) = place/unmask_place.
-   Within a group the comparison is digest-exact; across groups it is not. **Also score
-   group A's `base` checkpoints under group B's overrides** — no extra training, one eval
-   each — to get the transfer number separating "placement helped" from "placement made an
-   easier task".
-4. **Push's real problem is now AIMING, not contact and not time.** E3 measured it: 0% of
-   failing episodes ever came within `arrival_eps`, only 24% within 1cm, median closest
-   approach 3.75cm, and they give up just 1.40cm between closest approach and stopping.
-   `require_settled` and a longer horizon are both ruled out. **If no v26 arm beats `base`
-   outside seed spread, go straight here** rather than to a fifth contact-interface fix.
-5. **Push: ramp the range, not just the direction** (memo Eq 15). At 21.5cm range a 12.5deg
-   misalignment misses by 4.7cm against `arrival_eps=0.4`, so long-range push is
-   **precision**-limited once direction is fixed. This is the concrete form item 4 most
-   likely takes: the cone sampler already takes a radius, so it is a schedule on one number.
-6. **Edge-definition fallback, now demoted.** One push option was worth ~2cm before
-   contact_frame; it is not any more, so "a push edge simply IS short, compose via
-   recontact" is no longer the leading alternative. Memo Eq 10's `A(v,e)` remains the
-   built-in test if item 4 and item 5 both stall.
-7. **Fairness commitment, to record before any composition claim.** The cone sampler *and*
-   `disengaged_away_deg` both change the reset distribution, and memo sec 5.2's baseline 3
-   is "Flat + local reset curriculum: **same resets and training-state coverage** as the
-   option policies". Memo sec 7's failure table names the exact risk: "Hierarchy wins only
-   with special resets -> curriculum advantage, not execution hierarchy -> compare against
-   flat policy with identical reset distribution." **Every flat baseline must get the
-   identical reset distribution**, cone, spawn placement and all. Also note `p_hat` will no
-   longer be calibrated on misaligned states — correct, since those are outside `I_e` and
-   the planner should route through recontact instead, but it means Phase B stops being
-   optional and `p_hat` must not be queried there.
-8. Tick-trace after any sign of life. Training-time CSVs and wandb alone are not
-   sufficient — and in v20 a strong, consistent correlation ranking over `progress.csv`
-   named the wrong mechanism outright.
-9. **`ruff` is not installed in the `tsmc` env**, so the lint gate in `CLAUDE.md` cannot be
-   run. Either install it or drop it from the gate list.
+1. **Submit it.** `sbatch slurm/submit_sweep.sh`. ~2.5-3.5h/cell (150k took 0.95h), 6h
+   walltime requested. Then score with
+   `python tools/score_sweep.py logs/sweep_<JOBID> --out-dir logs/eval/v28_<JOBID> --jobs 12`
+   on a compute node — one digest group this round, no transfer control needed, because
+   `disengaged_away_deg=60` is adopted in every cell rather than tested.
+2. **Report success on goals >=3cm next to the 5-bin mean.** 20% of the benchmark sits
+   under 3cm, where success needs under 1cm of object motion (pooled: 0.856 success under
+   1cm, median successful displacement 0.95cm). The restriction moved `base` 0.150 ->
+   0.042 and `legacy` 0.294 -> 0.174, i.e. the arm gap from 2x to 4x. It is a free
+   reweighting of episodes already scored — no re-run, no digest change.
+3. **Treat seed as the experimental unit for any arm claim.** v27's
+   `legacy - base = +0.144 [+0.078,+0.211]` is a correct statement about *those six
+   policies on more episodes*; the per-seed values are 0.183/0.433/0.267 against
+   0.150/0.150/0.150, and a seed-level exact test gives one-sided p = 0.05. Quote the
+   permutation p, or quote the CI with what it conditions on stated.
+4. **Fix `overshoot_report`'s `arrival_eps` row — it is 0% by construction.** Arrival is
+   `d < arrival_eps` and terminates, so a failure cannot have been closer. Measured over
+   2,160 episode scorings: min closest approach among failures 0.4010cm, max among
+   successes 0.4000cm. The 1cm band and the median closest approach are the live numbers.
+   Delete the row or relabel it, and do not cite it as evidence again.
+5. **Add cross-track/along-track error and object speed at closest approach to
+   `eval_contact.py`.** The triangle decomposition already changes the reading: failures
+   with `d0>=3cm` show `base` travelling 48% of the way with 2.26cm sideways error and
+   `legacy` 73% with 2.13cm, so `legacy` travels further rather than aiming better. Speed
+   at closest approach is worth one hypot: arrival is tested at 25Hz while the object can
+   move up to 0.8cm per tick against a 0.8cm-wide band, so a fast well-aimed pass can be
+   skipped over.
+6. **Score an untrained policy on the 60-episode benchmark.** 34 seconds, and there is no
+   floor number for push today. On the *in-training* eval an untrained network averages
+   **0.254** across 15 cells against a final 0.411 — that metric is nearly uninformative,
+   and the benchmark's floor is simply unknown.
+7. **Tick-trace `base` vs `legacy` for the (push, sideways) command distribution.** Zero
+   training. If `base` clusters at low push — where the cone bites hardest and freezes the
+   finger — the coupling account of the cone's cost is confirmed mechanically rather than
+   by dose-response alone. v20's lesson applies: a correlation over training logs named the
+   wrong mechanism once.
+8. **The critic gap is still unexplained** and push has now been clipped for the first
+   time (`full` and four other arms at `target_clip=10`). `base` was +5.06 against v26's
+   +1.77 with max Q 9.63 under the provable bound of 10. `noclip` is the control. Read
+   `train/target_clip_frac` — recontact's clip was active for ~5k steps out of 1M and still
+   decided the run, so judge it by *when* it fires, not its time-average.
+9. **`require_settled` and longer horizons stay ruled out for push** — but on the live
+   evidence (median closest approach 3.09cm among failures), not on the tautological line
+   in item 4.
+10. **Recontact seed variance.** s0 0.917, s3 0.783; four clipped seeds unscored. Measured
+   before the srg pin — check which protocol they used before quoting.
+11. **Fairness commitment, to record before any composition claim.** The cone sampler, the
+   action interface, `disengaged_away_deg`, **and now `push_range_min_cm`** each give the
+   option policy something a flat baseline would not have; memo sec 5.2's baseline 3 is
+   "same resets and training-state coverage", and memo sec 7 names "hierarchy wins only
+   with special resets" as a failure mode. Every flat baseline must inherit the identical
+   reset distribution. Also: `p_hat` will not be calibrated on misaligned states — correct,
+   since those sit outside `I_e`, but it means `p_hat` must not be queried there.
+12. **The range curriculum (memo Eq 15) still needs `push_range_max_cm`.** `push_range_min_cm`
+   landed in v28 and clamps the near end; the curriculum ramps the far end and needs the
+   matching clamp on `hi`, plus a gate test. `push_cone_deg` is a half-ANGLE and is not the
+   knob. `same_room_goal_prob` moves range coarsely (measured: 1.0 -> median 2.1cm,
+   0.5 -> 9.3cm, 0.0 -> 21.7cm) but also switches whether a portal must be crossed, which
+   is why v28 carries `cross0` and `cross50` as separate arms rather than as a range knob.
+13. **Edge-definition fallback, demoted.** A push edge is no longer worth only ~2cm, so
+   "a push edge simply IS short, compose via recontact" is not the leading alternative.
+   Memo Eq 10's `A(v,e)` stays the built-in test if items 1-3 stall.
+14. **`ruff` is not installed in the `tsmc` env**, so `CLAUDE.md`'s lint gate cannot be
+   run. Install it or drop it.
 
 ## Housekeeping — storage and visualization (v24, tooling built)
 
@@ -74,7 +91,9 @@ source, and used E3 to cancel a 12-cell sweep before it ran. Full numbers in
 - **Do not add periodic checkpointing** without revisiting this: at 3.26 MB each it
   multiplies exactly the thing the pruner exists to contain. Deliberately deferred.
 - **Render media with `eval_contact.py eval_video=true eval_summary_png=true`.** Output to
-  `media/eval/<cell>/`, ~8 KB per mp4. The rendered episode IS the scored episode, and
+  `media/eval/<cell>/`; the task overlay landed 2026-08-27 so an mp4 is now ~30-80 KB
+  (goal, arrival ring, trail, closest approach, caption), plus a `<ep>_path.png` still
+  per episode. The rendered episode IS the scored episode, and
   because the stratified seeds are fixed by the env digest, episode k is the same initial
   state across every checkpoint — so arm-vs-arm videos are directly comparable.
 - **`tools/compare_sweep.py <sweep_dir>` for the cross-cell figure.** It refuses to plot
@@ -258,8 +277,6 @@ robustness check, and F2.5 costs no rollouts.
   Deliberate and in the right direction; delete the copy in the probe when it goes.
 - **Do not consume the probe's `predictions` block.** Built from 30-trial probe edge
   rates, not from `edge_model.p_bar`. `metrics.py` supersedes it.
-- **`records._clean` and `metrics._json_safe`** overlap; only the latter has the
-  `np.ndarray` branch.
 - **`docs/stage1_env_spec.md`** still needs updating with the training code and results.
 - **`docs/stage0_result.md`** does not exist yet. When written, report `d_point` (the
   point difference), not `d_mean` — see `status.md`'s audit section. It should also state
@@ -269,9 +286,13 @@ robustness check, and F2.5 costs no rollouts.
 - **Parked:** `synthesize_interfaces` has three latent bugs (no `break` in the
   cell-extension loop, diagonal normals at corners, `_throats` groups by key proximity
   with no connectivity test) — all H4-only, and H4 is first on the cut list.
-  `geometry.shortest_region_path` should become a re-export from `planner.bfs_route`;
-  `option_graph/_port_eval.py` should be deleted once `train.py` and `fixture_eval.py`
-  import `eval_harness` directly.
-- **Unused escape hatch:** `test_code.py`'s stale-module-reference check exempts lines
-  containing `[legacy-ref]`. No source line uses that marker any more (the two docstrings
-  that did were rewritten); the hatch itself is harmless and left in place.
+  `geometry.shortest_region_path` should become a re-export from `planner.bfs_route`
+  — it is NOT dead: `tests/test_option_graph.py` golden-diffs the two over every pair of
+  every maze and `tests/probe_edges.py` calls it, both in gitignored files.
+- **Serializer duplication — DONE 2026-08-27.** There were **five** copies, not four
+  (`tests/probe_edges.py` held one, invisible to `.gitignore`-aware grep). All now call
+  `records.json_safe`. Verified byte-identical on all seven artifacts on disk plus a
+  400-line sample of both jsonl files, and `metrics.json` regenerated through the real
+  CLI twice — old serializer vs new, identical args — matched on md5. `static` guards
+  against regrowth. Remaining known gap: `np.bool_` raises in the unified version exactly
+  as it did in all five copies; not fixed, because no writer produces one today.

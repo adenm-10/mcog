@@ -14,13 +14,13 @@ import argparse
 import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (Any, Dict, Hashable, List, Optional, Sequence,
                     Tuple)
 
 import numpy as np
 
-from option_graph.records import edge_key, parse_edge_key
+from option_graph.records import edge_key, json_safe, parse_edge_key
 
 Node = Hashable
 
@@ -629,23 +629,6 @@ def predict_handoff(keys: Sequence[str], pbar_first: Dict[str, float],
 # CLI
 # --------------------------------------------------------------------------- #
 
-def _json_safe(o):
-    """NaN -> None, numpy -> python, recursively."""
-    if isinstance(o, dict):
-        return {str(k): _json_safe(v) for k, v in o.items()}
-    if isinstance(o, np.ndarray):
-        return _json_safe(o.tolist())
-    if isinstance(o, (list, tuple)):
-        return [_json_safe(v) for v in o]
-    if isinstance(o, float) and o != o:
-        return None
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return _json_safe(float(o))
-    return o
-
-
 def _split(n: int, frac: float, seed: int) -> Tuple[np.ndarray, np.ndarray]:
     idx = np.random.RandomState(int(seed)).permutation(n)
     cut = int(n * (1.0 - frac))
@@ -790,7 +773,7 @@ def main(argv=None) -> int:
                "p_bar": pb, "p_bar_first_leg": pb_first,
                "variation_by_edge": var, "handoff": H, "aliasing": A}
     with open(out, "w") as f:
-        json.dump(_json_safe(payload), f, indent=2, sort_keys=True,
+        json.dump(json_safe(payload), f, indent=2, sort_keys=True,
                   allow_nan=False)
     print(f"\n[edge_model] wrote {out}")
     return 0
