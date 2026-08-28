@@ -3,78 +3,131 @@
 Next action first for each item. Session history in `docs/PROGRESS.md`; repo map in
 `docs/STRUCTURE.md`; current state and gotchas in `status.md`.
 
-## Immediate — Stage 1, post-v28
+## Immediate — Stage 1, post-v29
 
-**The v28 sweep is built and verified but NOT SUBMITTED.** 18 cells,
-`slurm/submit_sweep.sh`, `{full, noclip, nomin, cone, cross0, cross50}` x seed `{0,1,2}`
-at 400k. All six arms smoke-trained, all 18 overrides expanded from the launcher itself,
-`target_clip` read back out of each checkpoint. Full rationale in the launcher header and
-`docs/PROGRESS.md` v28.
+**v30 FAMILY A IS BUILT AND VERIFIED BUT NOT SUBMITTED.** `sbatch slurm/submit_lean.sh`,
+6 cells = `{lean, lean_raw} x seed {0,1,2}` at 1.2M (~8h/cell, ~48 GPU-hours). Rationale in
+the launcher header. **It depends on UNCOMMITTED code** (`train_contact.py` +
+`config/train_contact.yaml`'s new `ckpt_freq`), so commit before submitting.
 
-1. **Submit it.** `sbatch slurm/submit_sweep.sh`. ~2.5-3.5h/cell (150k took 0.95h), 6h
-   walltime requested. Then score with
-   `python tools/score_sweep.py logs/sweep_<JOBID> --out-dir logs/eval/v28_<JOBID> --jobs 12`
-   on a compute node — one digest group this round, no transfer control needed, because
-   `disengaged_away_deg=60` is adopted in every cell rather than tested.
-2. **Report success on goals >=3cm next to the 5-bin mean.** 20% of the benchmark sits
-   under 3cm, where success needs under 1cm of object motion (pooled: 0.856 success under
-   1cm, median successful displacement 0.95cm). The restriction moved `base` 0.150 ->
-   0.042 and `legacy` 0.294 -> 0.174, i.e. the arm gap from 2x to 4x. It is a free
-   reweighting of episodes already scored — no re-run, no digest change.
-3. **Treat seed as the experimental unit for any arm claim.** v27's
-   `legacy - base = +0.144 [+0.078,+0.211]` is a correct statement about *those six
-   policies on more episodes*; the per-seed values are 0.183/0.433/0.267 against
-   0.150/0.150/0.150, and a seed-level exact test gives one-sided p = 0.05. Quote the
-   permutation p, or quote the CI with what it conditions on stated.
-4. **Fix `overshoot_report`'s `arrival_eps` row — it is 0% by construction.** Arrival is
-   `d < arrival_eps` and terminates, so a failure cannot have been closer. Measured over
-   2,160 episode scorings: min closest approach among failures 0.4010cm, max among
-   successes 0.4000cm. The 1cm band and the median closest approach are the live numbers.
-   Delete the row or relabel it, and do not cite it as evidence again.
-5. **Add cross-track/along-track error and object speed at closest approach to
-   `eval_contact.py`.** The triangle decomposition already changes the reading: failures
-   with `d0>=3cm` show `base` travelling 48% of the way with 2.26cm sideways error and
-   `legacy` 73% with 2.13cm, so `legacy` travels further rather than aiming better. Speed
-   at closest approach is worth one hypot: arrival is tested at 25Hz while the object can
-   move up to 0.8cm per tick against a 0.8cm-wide band, so a fast well-aimed pass can be
-   skipped over.
-6. **Score an untrained policy on the 60-episode benchmark.** 34 seconds, and there is no
-   floor number for push today. On the *in-training* eval an untrained network averages
-   **0.254** across 15 cells against a final 0.411 — that metric is nearly uninformative,
-   and the benchmark's floor is simply unknown.
-7. **Tick-trace `base` vs `legacy` for the (push, sideways) command distribution.** Zero
-   training. If `base` clusters at low push — where the cone bites hardest and freezes the
-   finger — the coupling account of the cone's cost is confirmed mechanically rather than
-   by dose-response alone. v20's lesson applies: a correlation over training logs named the
-   wrong mechanism once.
-8. **The critic gap is still unexplained** and push has now been clipped for the first
-   time (`full` and four other arms at `target_clip=10`). `base` was +5.06 against v26's
-   +1.77 with max Q 9.63 under the provable bound of 10. `noclip` is the control. Read
-   `train/target_clip_frac` — recontact's clip was active for ~5k steps out of 1M and still
-   decided the run, so judge it by *when* it fires, not its time-average.
-9. **`require_settled` and longer horizons stay ruled out for push** — but on the live
-   evidence (median closest approach 3.09cm among failures), not on the tautological line
-   in item 4.
-10. **Recontact seed variance.** s0 0.917, s3 0.783; four clipped seeds unscored. Measured
-   before the srg pin — check which protocol they used before quoting.
-11. **Fairness commitment, to record before any composition claim.** The cone sampler, the
-   action interface, `disengaged_away_deg`, **and now `push_range_min_cm`** each give the
-   option policy something a flat baseline would not have; memo sec 5.2's baseline 3 is
-   "same resets and training-state coverage", and memo sec 7 names "hierarchy wins only
-   with special resets" as a failure mode. Every flat baseline must inherit the identical
-   reset distribution. Also: `p_hat` will not be calibrated on misaligned states — correct,
-   since those sit outside `I_e`, but it means `p_hat` must not be queried there.
-12. **The range curriculum (memo Eq 15) still needs `push_range_max_cm`.** `push_range_min_cm`
-   landed in v28 and clamps the near end; the curriculum ramps the far end and needs the
-   matching clamp on `hi`, plus a gate test. `push_cone_deg` is a half-ANGLE and is not the
-   knob. `same_room_goal_prob` moves range coarsely (measured: 1.0 -> median 2.1cm,
-   0.5 -> 9.3cm, 0.0 -> 21.7cm) but also switches whether a portal must be crossed, which
-   is why v28 carries `cross0` and `cross50` as separate arms rather than as a range knob.
-13. **Edge-definition fallback, demoted.** A push edge is no longer worth only ~2cm, so
-   "a push edge simply IS short, compose via recontact" is not the leading alternative.
-   Memo Eq 10's `A(v,e)` stays the built-in test if items 1-3 stall.
-14. **`ruff` is not installed in the `tsmc` env**, so `CLAUDE.md`'s lint gate cannot be
-   run. Install it or drop it.
+`lean` = everything v29 showed to be free, all at once, keeping only the one scaffold v29
+showed to be load-bearing: `contact_frame` + `gap_assist=false` + `mask_inactive_finger=false`
++ `object_theta_spread_deg=90` + `angular_drag_arm_cm=3.12` + `push_cone_deg=90`. It has never
+been run as a combination -- each change was costed alone, and `unmask`/`randtheta` had the two
+steepest slopes in the sweep, so their "wash" verdicts were budget-limited. **This gates the
+goal-diversity sweep**: if `lean` lands well below `physdamp`'s 0.789, the four changes
+interact and every downstream number is confounded.
+
+`ckpt_freq=400000` is load-bearing, not a convenience: the comparison that answers the
+question is against v29 cells that ran at 400k, so the endpoint alone would confound the
+config change with 3x the budget. Score the 400k snapshot for the budget-matched row
+(`--ckpt model_400000_steps.zip` -- SB3 names them `model_<step>_steps.zip`). Prune the
+snapshots after scoring.
+
+**CUT before it ran: the portal/room-size sweep (18 cells, 144 GPU-hours).** A replay probe
+killed the axis. The cross-room sampler REQUIRES the goal's ray to pass through the portal, so
+a straight path exists in 93-100% of cross-room episodes even at a 6.5cm gap (barely wider
+than the 6cm object), and goal misalignment stays ~16deg at EVERY cone width cross-room
+(`tools/probe_misalignment.py`). Narrowing the portal tightens aim; it never forces the object
+around an obstacle. Board size additionally cannot share a benchmark at all -- SB3's
+`check_for_correct_spaces` compares the saved goal `Box` bounds.
+
+**The live axis is GOAL DIVERSITY, measured by replay at zero training cost**
+(`logs/eval/v30_conesweep/`, `tools/probe_goal_diversity.py`): cone 30 -> 90 -> 180 takes
+`nogapassist` 0.822 -> 0.767 -> 0.561 and `physdamp` 0.733 -> 0.733 -> 0.589. At cone=180,
+51.7% of same-room goals sit BEHIND the contacted face. NOTE a derivation of mine was WRONG
+here: I predicted a hard ceiling of 0.483 from "behind the face is unreachable" and the
+policies scored 0.507-0.514 on goals >=3cm, ABOVE it. A finger sliding ALONG a face keeps
+contact, so it can round a corner without tripping the 4cm guard. The face constraint is a
+cost, not a wall -- which is exactly why Eq 22 LEARNS reachability instead of deriving it.
+
+**v28 RAN AND IS SCORED (job 42248679).** Push works: 0.21 -> **0.739** on the same 60
+episodes, and the distance cliff is gone (12+cm bin 0.00 -> 0.44). Attribution is
+single-factor and lopsided: removing the friction cone is worth **-0.46**, the critic clip
+**-0.03**, the 3cm goal floor **0.00**. Full numbers in `docs/PROGRESS.md` v28 RESULTS.
+
+**v29 RAN AND IS SCORED (job 42300917).** Submitted 2026-08-27, finished, scored
+2026-08-28 with 108 evals in three passes. Full numbers in `docs/PROGRESS.md`
+v29 RESULTS; protocol records sit next to the numbers in `logs/eval/v29_combined_sameroom/`
+and `logs/eval/v29_42300917_ownsettings/`. Headline: four of five scaffolds are free, the
+action interface is the whole story, and the floor now exists (0.000 on goals >=3cm).
+
+1. **Adopt `angular_drag_arm_cm=3.12` as the default.** It is the physically derivable
+   value, it holds under BOTH checkpoints (0.789 final / 0.767 best against `full`'s 0.739 /
+   0.739), and Phase 0's -0.033 was a transfer penalty from replaying a policy trained at
+   6.00, not a cost of training at 3.12. Next action: change the default in
+   `config/train_contact.yaml`, note it in `docs/stage1_env_spec.md`, re-run the gates.
+2. **Settle the gap-assist result at a longer budget.** `nogapassist` is +0.083 paired
+   (3/3 seeds, McNemar p=0.017), the largest single-factor effect in the round, and it
+   points the WRONG WAY for a scaffold — removing an assist made push better. But
+   `model_best` inverts the ordering (0.711 vs 0.739), which by this repo's own rule means
+   the runs have not converged. Next action: 6 cells, `{full, nogapassist} x seed {0,1,2}`
+   at 800k-1M, nothing else changed. This is the only v29 number that needs more compute.
+3. **Do not read `hardmode` as a scaffold result.** 0.183 all / 0.028 >=3cm IS the floor,
+   but `rawact` alone gives 0.217/0.090, so the collapse is entirely the action interface
+   (known since v25). The arm bundles four changes and cannot attribute. If a "hard mode"
+   number is wanted, it must keep `contact_frame` and remove the rest.
+4. **`bigroom` is unscoreable and the arm should be retired.** SB3's
+   `check_for_correct_spaces` compares the goal `Box` bounds `[board_w, board_h]`, so a
+   90x60 checkpoint cannot load against a 50x30 env — all 12 cross-board evals raised
+   `ValueError`. Board size can NEVER be an arm in a sweep sharing a benchmark without
+   observation surgery (normalize the goal box to [0,1], or pad to a fixed max board).
+   Decide that before any further board-geometry experiment.
+4. **The geometry is the live problem, not the physics.** Phase 0 costed the two
+   physics-fairness worries at 0.033 (damping) and ~0.02 (goal cone), but halving the portal
+   costs **0.42**. The board is too small for long pushes (1.3 object-lengths of usable
+   width) and too open for crossing to mean anything (wall blocks 0 of 400 straight paths).
+   `narrowgap` and `bigroom` are the arms; a genuinely constraining board is the follow-up.
+5. **Two scaffolds still uncosted, both needing work, in this order.** (a) Orientation
+   goals — widen the goal space from `(x,y)` to `(x,y,theta)`, which touches the HER buffer;
+   ~1 day, and meaningless until `randtheta` lands. (b) The finger spawning already in
+   contact on the correct face — a decision about where push ends and recontact begins, not
+   a knob. Needs a call, not a cell.
+6. **Report goals >=3cm beside the 5-bin mean**, and **treat seed as the experimental unit**
+   for arm claims. 20% of the benchmark sits under 3cm where success needs <1cm of object
+   motion. v27's episode-level CI answers "would more episodes change this", not "would more
+   seeds"; the seed-level exact test gave one-sided p = 0.05, not 0.001.
+7. **`require_settled` is REOPENED by v28, and v29 says it applies to ONE failure family.**
+   Push's failures now split three ways: cannot-hold-contact (`rawact`, `hardmode`:
+   contact_lost 66-69%, 25-50 ticks, retention 0.60), runs-out-of-clock (`narrowgap`,
+   `cone`, `cross0`: horizon 42-68%, 128-158 ticks, median closest approach 3.0-11.6cm),
+   and arrives-without-settling (`full`, `nogapassist`, `physdamp`, `randtheta`: 42-69% of
+   failures within 1cm). Settling is the fix for the third family only. Original v28 note
+   follows. It was ruled out because failures never got
+   close. They do now: 53% of `full`'s failures come within 1cm (v27 `base`: 19%), and push
+   fails by arriving and not settling. E3's diagnosis was right for the policy that existed
+   then and is wrong for this one. Note the `arrival_eps` row of `overshoot_report` is 0% BY
+   CONSTRUCTION — delete or relabel it, and never cite it again.
+8. **The critic question is CLOSED.** Q-minus-realized went +5.06 -> **+0.10** (`noclip`
+   -0.36, `nomin` -0.05). The gap was a symptom of a policy that could not deliver the value
+   it predicted, not a separate defect. `target_clip` contributes ~0.03 on its own.
+9. **Add cross-track/along-track error and object speed at closest approach to
+   `eval_contact.py`.** The triangle decomposition is free from data already on disk and it
+   already revised a conclusion (`legacy` travels further, it does not aim better). Speed at
+   closest approach is one hypot: arrival is tested at 25Hz while the object can move 0.8cm
+   per tick against a 0.8cm band, so a fast well-aimed pass can be skipped over.
+10. **DONE 2026-08-28 — the floor exists.** `tools/make_untrained_ckpt.py` plus one eval
+   each: untrained `contact_frame` scores **0.150 all / 0.000 on goals >=3cm**, untrained
+   `finger_velocity` **0.067 / 0.021** (`logs/eval/v29_floor/`, same digest
+   `daee708c3fa6`). The contact_frame floor scores **0.75 in the 0-3cm bin and 0.00 in
+   every other bin** — gap_assist plus the contact frame keep it touching and pushing
+   (retention 0.98) with no skill at all. **So the 5-bin mean has a 0.150 floor and >=3cm
+   is the primary metric**, which upgrades item 6 from a reporting preference to a
+   correctness requirement.
+11. **Recontact has not been rerun since the action-space fix.** It is at 0.78-0.92 from
+   v23, four clipped seeds unscored, measured before the srg pin. Check which protocol
+   before quoting, and consider a 400k rerun under the current defaults.
+12. **Fairness commitment, before any composition claim.** The cone sampler, the action
+   interface, `disengaged_away_deg`, `push_range_min_cm`, **and now `gap_assist` and
+   `object_theta_spread_deg`** each give the option policy something a flat baseline would
+   not have. Memo sec 5.2 baseline 3 is "same resets and training-state coverage"; memo
+   sec 7 names "hierarchy wins only with special resets" as a failure mode. Every flat
+   baseline must inherit the identical reset distribution.
+13. **The range curriculum still needs `push_range_max_cm`.** `push_range_min_cm` landed in
+   v28 and clamps the near end; Eq 15 ramps the far end. NOTE the floor bought **0.00** in
+   v28, so the train/eval range mismatch was real as a measurement but was not the binding
+   constraint — do not assume the curriculum will be either.
+14. **`ruff` is not installed in `tsmc`**, so `CLAUDE.md`'s lint gate cannot be run.
 
 ## Housekeeping — storage and visualization (v24, tooling built)
 
@@ -240,10 +293,20 @@ success a product of edge probabilities.
 
 ### F6 — S8 retrain at correct semantics
 
-Correctly deferred. Fixture weights carry `wall_margin` 0.0 and `horizon` 200, a
-train/eval mismatch **constant across both arms and both phases**, so it cannot move the
-predictor comparison. It does confound a sample-efficiency claim, which Stage 0 does not
-make. Retrain at F4.
+Correctly deferred, but the mismatch is **wider than this entry used to say**. Audited
+2026-08-27 against `tests/fixtures/regions/summary.json`: eleven keys differ from
+`config/base.yaml`, five of them substantive — `step_pen` 0.00 vs **0.01**, `wall_margin`
+0.25 vs **0.0**, `horizon` 160 vs **200**, `eval_horizon` 640 vs **600**, `gamma` 0.99375
+vs **0.995**. The rest (`mode`, `partition`, `seed`, `output_dir`, `diag_eval_freq`,
+`total_steps`) are per-invocation by design.
+
+**So `base.yaml` does not reproduce the frozen weights**: a retrain from defaults trains a
+different task from the one every published Stage 0 number came from. The mismatch is
+constant across both arms and both phases, so it cannot move the predictor comparison, and
+it confounds only a sample-efficiency claim Stage 0 does not make. Deliberately NOT
+reconciled — the values are load-bearing for closed results. The warning now sits in
+`config/base.yaml` next to `step_pen`, where a retrainer will actually see it. **F4 must
+decide which side is correct, key by key**, before regenerating anything.
 
 ### F7 — giant as a second substrate. **Parked, with a warning.**
 
@@ -265,34 +328,60 @@ robustness check, and F2.5 costs no rollouts.
 
 ## Outstanding, none blocking
 
-- **S7 9a** (structure-preserving). Delete `_LABELS_BY_MAZE`; `_draw_rollout_ax`
-  hardcodes `vmin=0, vmax=9`; delete the reward-decomposition panel, which plots keys
-  nothing records; add `train_cells` alongside `cells` in `describe_partition`. Fold in
-  the `step_pen` discrepancy — `base.yaml` says 0.00 but every real run passed
-  `step_pen=0.01`.
-- **S7 9c** — required before F4.
+**Done 2026-08-27, kept only as a record of what was checked:**
+
+- **Serializer duplication.** There were **five** copies, not four (`tests/probe_edges.py`
+  held one, invisible to `.gitignore`-aware grep). All now call `records.json_safe`,
+  verified byte-identical on all seven artifacts plus a 400-line sample of both jsonl files,
+  and `metrics.json` regenerated through the real CLI twice and matched on md5. `static`
+  guards regrowth. Known gap: `np.bool_` raises exactly as it did in all five copies; not
+  fixed, because no writer produces one.
+- **`geometry.shortest_region_path` is now a re-export of `planner.bfs_route`.** Lazy import,
+  so `domains/` still loads without the core. **The old gate check went vacuous** (it
+  golden-diffed the two against each other) and was replaced with an exhaustive simple-path
+  oracle that checks validity and hop-optimality — a different algorithm, strictly stronger.
+- **`_port_eval.py` deleted**; `train.py` and `fixture_eval.py` import `eval_harness`
+  directly. **`_LABELS_BY_MAZE`, the hardcoded `vmin=0, vmax=9`, and the
+  reward-decomposition panel are gone.** `calibrate._load_run_cfg`'s duplicate in
+  `tests/probe_edges.py` is gone.
+- **`base.yaml` vs the frozen weights: audited, deliberately not reconciled.** See F6 — the
+  full eleven-key list lives there and the warning lives in `config/base.yaml`.
+
+**Still open:**
+
+- **S7 9c** — pin the `n_envs x gradient_steps` ratio, scale warmup with the rung. Blocks F4.
 - **`diag_eval_freq`** too low at smoke scale, so `eval_env_steps_periodic = 0` and the
-  entire periodic-eval path is untested by the gate.
-- **`calibrate._load_run_cfg`** duplicates ~20 lines from `tests/probe_edges.py`.
-  Deliberate and in the right direction; delete the copy in the probe when it goes.
-- **Do not consume the probe's `predictions` block.** Built from 30-trial probe edge
-  rates, not from `edge_model.p_bar`. `metrics.py` supersedes it.
-- **`docs/stage1_env_spec.md`** still needs updating with the training code and results.
-- **`docs/stage0_result.md`** does not exist yet. When written, report `d_point` (the
-  point difference), not `d_mean` — see `status.md`'s audit section. It should also state
-  the flat-arm exclusion explicitly: `build_routes` does `if not ep.plan: continue` and a
-  monolith episode has no plan, so every flat episode is skipped from the ladder. Correct
-  (the ladder is about the hierarchy) but it should be a stated deliberate exclusion.
+  entire periodic-eval path is untested by the gate. Needs a fixture; ~half a day.
+- **`docs/stage1_env_spec.md`** needs the training code and results folded in.
+- **`docs/stage0_result.md`** does not exist. When written, report `d_point` (the point
+  difference), not `d_mean`, and state the flat-arm exclusion explicitly: `build_routes`
+  does `if not ep.plan: continue` and a monolith episode has no plan, so every flat episode
+  is skipped from the ladder. Correct — the ladder is about the hierarchy — but say so.
+- **Do not consume the probe's `predictions` block.** Built from 30-trial probe edge rates,
+  not from `edge_model.p_bar`. `metrics.py` supersedes it.
+- **The `[legacy-ref]` escape hatch in `test_code.py` is now dead** (zero uses). Harmless;
+  deliberately left in place.
 - **Parked:** `synthesize_interfaces` has three latent bugs (no `break` in the
-  cell-extension loop, diagonal normals at corners, `_throats` groups by key proximity
-  with no connectivity test) — all H4-only, and H4 is first on the cut list.
-  `geometry.shortest_region_path` should become a re-export from `planner.bfs_route`
-  — it is NOT dead: `tests/test_option_graph.py` golden-diffs the two over every pair of
-  every maze and `tests/probe_edges.py` calls it, both in gitignored files.
-- **Serializer duplication — DONE 2026-08-27.** There were **five** copies, not four
-  (`tests/probe_edges.py` held one, invisible to `.gitignore`-aware grep). All now call
-  `records.json_safe`. Verified byte-identical on all seven artifacts on disk plus a
-  400-line sample of both jsonl files, and `metrics.json` regenerated through the real
-  CLI twice — old serializer vs new, identical args — matched on md5. `static` guards
-  against regrowth. Remaining known gap: `np.bool_` raises in the unified version exactly
-  as it did in all five copies; not fixed, because no writer produces one today.
+  cell-extension loop, diagonal normals at corners, `_throats` groups by key proximity with
+  no connectivity test) — all H4-only, and H4 is first on the cut list.
+
+## THE STAGE 1 LADDER IS A BUILD, NOT A CONFIG — read this before planning Phase B
+
+Measured 2026-08-27. `domains/contact/hooks.py` defines `contact_hooks` and **nothing calls
+it**. The calibration and predictor machinery is nav-only underneath: `MazeBundle` is
+grid-native (cell tables, `region_train_cells` as cell arrays), `nav_entry_conditions`
+samples via `sample_xy_in_cell`/`free_set`, and `nav_descriptors` walks the grid with
+`bfs_hops` and `cell_size`. There is **no contact calibration file and no contact records on
+disk** — only nav's.
+
+So "replicate Stage 0's ladder in the contact domain" needs: a contact bundle,
+`contact_entry_conditions`, `contact_descriptors`, wiring `contact_hooks` into
+`calibrate`/`run_eval`, and an `eval_harness` adapter (its `dt`/`omega_max` are
+Dubins-flavoured). Estimate **4-8 days of build**, then ~1-3h of compute.
+
+**It does not need push to be good, and it can be built in parallel with the push sweeps.**
+A badly-calibrated `p_hat` still exercises every line. And the bar push must clear for the
+ladder is not "good" but "success that VARIES predictably across states" — which it already
+does (0.86 under 1cm, 0.21 at 3-4.5cm, 0.07 at 6-9cm, 0.01 beyond 12cm). Stage 0's real
+problem was strata floored at zero, where `p_hat` had nothing to learn. Push is graded, not
+floored.

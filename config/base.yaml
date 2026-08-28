@@ -38,6 +38,20 @@ arrival_eps: 0.4
 goal_reward: 10.0
 collision_pen: 0.0
 step_pen: 0.00
+# ^ WARNING, measured 2026-08-27: base.yaml does NOT reproduce the frozen Stage 0
+# weights in tests/fixtures/regions/. Retraining from these defaults gives a
+# DIFFERENT task from the one every published Stage 0 number came from. Eleven
+# keys differ; five are substantive:
+#     key           base.yaml   frozen weights
+#     step_pen         0.00          0.01
+#     wall_margin      0.25          0.0
+#     horizon          160           200
+#     eval_horizon     640           600
+#     gamma            0.99375       0.995
+# The rest (mode, partition, seed, output_dir, diag_eval_freq, total_steps) are
+# per-invocation by design. NOT reconciled here on purpose: the values are load
+# bearing for closed results, and docs/TODO.md F6 defers the retrain to F4.
+# Whoever does F4 must decide which side is correct, key by key.
 wall_margin: 0.25
 gamma: 0.99375               # shared by env PBRS and agent (MUST match)
 omega_max: 8.0

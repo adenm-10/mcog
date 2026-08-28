@@ -1705,3 +1705,305 @@ deleted -- the v26/v27 archived cells trained with it and must stay replayable.
 
 **Next.** Recontact at 400k under the same action-space fix; a board where the portal is a
 real constraint; and `require_settled`, reopened by the near-miss failure profile.
+
+## v29 — 2026-08-27 — costing the scaffolds; two came back negative for free
+
+**Question.** v28 got push to 0.739 by removing the friction cone. But the setup contains
+at least nine things that make the task easier than "push an object to a pose", and none
+had been costed. Which are load-bearing?
+
+**The nine, all confirmed in code.**
+
+| # | scaffold | where | status |
+|---|---|---|---|
+| 1 | gap assist: cannot command retreat faster than the object recedes | `_contact_frame_velocity` | v29 arm |
+| 2 | idle finger zeroed | `mask_inactive_finger` | v29 arm |
+| 3 | action read as push/slide in the contacted face's frame | `action_interface` | v29 arm |
+| 4 | finger spawns ALREADY touching the correct face | `clearance = finger_radius - 0.02` | not a knob |
+| 5 | goals confined to a 30deg reachable cone | `push_cone_deg` | **costed, ~0.02** |
+| 6 | no orientation requirement | `theta_target` never passed | needs goal-space work |
+| 7 | object always spawns at heading 0deg (measured 300/300) | `_place_object_for_push` | v29 arm |
+| 8 | rotational damping tuned 6x | `angular_drag_arm_cm` | **costed, 0.033** |
+| 9 | portal too open / rooms too small | board geometry | **costed, 0.42** |
+
+**PHASE 0 — three costed at ZERO training cost by replaying v28 checkpoints**
+(`logs/eval/v29_phase0/`, 9 evals, ~10 min):
+
+```
+damping 6.00 -> 3.12   0.739 -> 0.706   MATCHED (identical 60 episodes)
+goal cone 30 -> 90deg  0.739 -> 0.722   (different episodes -- absolute, not matched)
+portal 20 -> 10cm      0.615 -> 0.198   3x COLLAPSE
+```
+
+Paired per seed, the damping delta is -0.017 / -0.083 / 0.000, mean **-0.033**. **Two of
+the three came back negative**, which cut `widecone` from the sweep entirely and reframed
+the round: the physics-fairness concerns are NOT propping up the result; the GEOMETRY is.
+
+**The damping value is unphysical anyway, and that is derivable.** `angular_drag_arm_cm` is
+the lever arm in `tau = mu*m*g*L`. `L` is not free: for a body sliding on a plane it is the
+pressure-weighted mean radius of the contact patch. For this 10x6cm object:
+
+```
+uniform pressure (standard assumption)   L = 3.12 cm
+uniform disc of the same half-diagonal   L = 3.89 cm
+ALL load on the two farthest corners     L = 5.83 cm   <- HARD PHYSICAL CEILING
+value shipped in the code                L = 6.00 cm   <- above the ceiling
+```
+
+No pressure distribution can produce 6.00. It is 1.92x the standard value and 0.17cm past
+the half-diagonal. The comment claimed "measured, not derived"; what was measured is that
+1.0 spun the object out and 6.0 did not. Second friction-model mistake in this repo, the
+mirror of v26's: that one was OVER-derived (a second friction model over the solver's),
+this one UNDER-derived (a tuned constant where a closed form exists).
+
+**A claim of mine was wrong and the data killed it.** I wrote that rotation "dominated
+every failure mode". Tick-tracing `full_s2` over all 60 episodes says otherwise:
+
+```
+group          n   max |rotation| median   p90
+arrived       48        4.8deg          10.7deg
+contact_lost   5        7.2deg           7.5deg
+horizon        6       13.1deg          13.8deg
+```
+
+Median 4.9deg over a whole episode; 9 of 60 ever exceed 10deg. The -81deg spin that seeded
+that story was the `angular_drag_arm_cm=1.0` BUG, fixed long ago, and the v21
+steering-vs-retention tension was a property of the raw action space, replaced in v25.
+Both were carried forward as if still live. **Rotation is a non-issue here largely BECAUSE
+of scaffolds 7 and 8** — which is why orientation goals (6) cost so little today.
+
+**The geometry, quantified.**
+
+```
+room 25 x 30 cm; usable object-centre box 13 x 18 (wall_margin 6); object 10 x 6
+  usable width / object length = 1.3     max same-room goal = 22.2cm = 2.2 object lengths
+portal 20cm of a 30cm wall = 67% OPEN; 2.0x object length; 5.0cm clearance each side
+  objects spawn at y in [6,24] -- entirely INSIDE the gap [5,25]
+  straight object->goal path blocked by the wall in 0 of 400 cross-room resets
+```
+
+The board is simultaneously **too small for long pushes** (which is why 12+cm same-room
+goals are 8% of episodes) and **too open for crossing to mean anything**. "Crosses a room"
+currently means "a long straight push that passes a doorway". A 10cm gap is exactly one
+object length, so a broadside crossing has zero clearance -- hence the 3x collapse above.
+
+**Built.**
+
+- **`gap_assist`** (INTERFACE key). The clamp only fires when the object recedes FASTER
+  than the finger pushes, and then drags the finger inward to chase it -- a 0.1 push against
+  a 12cm/s recession is applied as 12cm/s. A stationary object never triggers it, so the
+  first version of the gate test asserted on a case where the branch provably cannot fire.
+  Rewritten to test it where it bites, with an explicit "the branch fired" check.
+- **`object_theta_spread_deg`** (TASK key). More than a flag: the finger's face offset, the
+  face normal, and the coned goal direction all had the axis-aligned assumption baked in and
+  all now rotate with the object. Raises if set without `push_cone_deg`, since the historical
+  sampler picks faces from an axis-aligned table. `obs()` already carries `IDX_OBJ_HEADING`
+  first, so no observation change was needed; the rotated bounding box reaches at most the
+  half-diagonal 5.83cm, inside `wall_margin=6.0`, so no rotation can clip a wall.
+- **v29 launcher**, 24 cells = `{nogapassist, unmask, rawact, randtheta, physdamp, hardmode,
+  narrowgap, bigroom} x seed {0,1,2}` at 400k. Baselines REUSED not retrained: v28's `full`
+  is Family A's control, `cross0` is Family B's.
+
+**Cleanup finished this session.**
+
+- **`geometry.shortest_region_path` is now a re-export of `planner.bfs_route`.** One
+  implementation, so they cannot drift; lazy import so `domains/` still loads without the
+  core. **This made the old gate check vacuous** (it golden-diffed the two against each
+  other), so it was replaced with an EXHAUSTIVE simple-path oracle -- a different algorithm
+  that checks every pair's route is a valid walk with correct endpoints and optimal hop
+  count. Strictly stronger than what it replaced.
+- **`base.yaml` audited against the frozen Stage 0 weights.** The TODO flagged `step_pen`;
+  in fact **eleven keys differ, five substantively** (`step_pen` 0.00 vs 0.01, `wall_margin`
+  0.25 vs 0.0, `horizon` 160 vs 200, `eval_horizon` 640 vs 600, `gamma` 0.99375 vs 0.995).
+  So `base.yaml` does not reproduce the weights every published Stage 0 number came from.
+  **Deliberately NOT reconciled** -- the values are load-bearing for closed results and F4
+  must pick a side key by key. The warning now sits in `base.yaml` next to `step_pen`.
+- Already landed before this session, by the in-progress refactor: `_port_eval.py` deleted,
+  `json_safe` consolidated into `records.py`, `_LABELS_BY_MAZE` and the hardcoded `vmax=9`
+  and the reward-decomposition panel gone, `_load_run_cfg` de-duplicated.
+
+**Gates:** static 26/26, geometry 27/27, **contact 60/60**, test_option_graph **172/172**,
+fixture_eval 18/18.
+
+**Verification before submission.** All 24 cells expanded from the launcher FILE (a retyped
+copy had a typo the file did not). All 8 arms smoke-trained. Every arm verified
+BEHAVIOURALLY. That check caught a bug in my own probe twice -- it let
+`PlanarFingertipParams` fall back to its default 80x60 board, which made `narrowgap` look
+like it had a broken goal distribution. Re-measured with the board pinned: `narrowgap` has
+0.2% sampler fallback and a 22.5cm median against `cross0`'s 21.7cm, so it IS a clean
+single-factor change. `bigroom` is not: median 42.6cm vs 21.7cm, so it moves room size AND
+push distance together -- unavoidable, but state it.
+
+**Next.** Submit v29. `hardmode` is the number that matters: near 0.7 and the scaffolds were
+scaffolding, near 0.2 and v28's result is mostly the setup. My guess is 0.35-0.5.
+
+## v29 RESULTS — 2026-08-28 — the sweep had already run; four of five scaffolds are free
+
+**Correction to the handoff docs.** `status.md` and `docs/TODO.md` both said the v29 sweep
+was built and NOT SUBMITTED. It was submitted and finished: job **42300917**, 24 cells, all
+24 at ~400k steps with `model.zip` on disk, launched 2026-08-27 14:36 — the same minute as
+commit `775bf98`. The docs were written before submission and never updated. Trained but
+unscored is the state that looks identical to not-run in a handoff doc, and it lasted a day.
+
+**Scored three ways, 108 evals.**
+`logs/eval/v29_combined_sameroom/` (pass a, 78 evals: all 24 v29 cells plus all 18 v28
+cells RE-SCORED under identical pins), `logs/eval/v29_42300917_ownsettings/` (passes b and
+c, 54 evals), `logs/eval/v29_floor/` (2 evals, the floor). Each directory carries a
+`PROTOCOL.md` next to its numbers.
+
+**The digest moved and the reason was checked, not guessed.** `3ddae0eb3e93` ->
+`daee708c3fa6`, caused by ADDING `object_theta_spread_deg` and `angular_drag_arm_cm` to the
+hashed kwargs. All 60 initial goal distances are identical episode by episode and
+`full_s0/model` re-scores at exactly 0.750 against the stored v28 json, so v27/v28/v29
+numbers compare directly. Re-scoring v28 rather than quoting it means every number in the
+pass-(a) directory shares one digest by construction.
+
+### PASS (a) — common same-room benchmark, digest `daee708c3fa6`, final checkpoint
+
+```
+arm            0-3   3-6   6-9  9-12   12+    all     sd   >=3cm  reten   Qgap   len
+nogapassist   0.94  0.97  0.89  0.81  0.50  0.822  0.048  0.792   0.94  -0.57    57
+physdamp      0.94  0.92  0.86  0.67  0.56  0.789  0.035  0.750   0.93  -0.09    61
+unmask        0.97  0.94  0.81  0.61  0.44  0.756  0.084  0.701   0.94  -0.11    59
+nomin (v28)   0.97  0.83  0.83  0.61  0.50  0.750  0.073  0.694   0.93  -0.05    69
+full  (v28)   0.92  0.86  0.81  0.67  0.44  0.739  0.067  0.694   0.92  +0.10    65
+noclip (v28)  0.94  0.83  0.69  0.69  0.36  0.706  0.067  0.646   0.90  -0.36    71
+randtheta     0.92  0.92  0.64  0.58  0.42  0.694  0.038  0.639   0.92  +0.22    72
+cross50 (v28) 0.86  0.72  0.53  0.61  0.33  0.611  0.048  0.549   0.92  +0.71    91
+cross0  (v28) 0.86  0.53  0.22  0.08  0.00  0.339  0.059  0.208   0.90  +3.08   110
+narrowgap     0.89  0.36  0.19  0.08  0.06  0.317  0.060  0.174   0.93  +3.33   128
+cone   (v28)  0.83  0.42  0.08  0.06  0.03  0.283  0.044  0.146   0.98  +2.53   152
+rawact        0.72  0.25  0.06  0.06  0.00  0.217  0.029  0.090   0.62  +1.19    50
+hardmode      0.81  0.08  0.00  0.03  0.00  0.183  0.017  0.028   0.60  +2.57    25
+UNTRAINED cf  0.75  0.00  0.00  0.00  0.00  0.150      -  0.000   0.98  -1.26   146
+UNTRAINED fv  0.25  0.08  0.00  0.00  0.00  0.067      -  0.021   0.38  -0.57    15
+```
+
+**THE FLOOR EXISTS NOW** (TODO Immediate #10, closed). A zero-gradient-step network scores
+**0.150 / 0.000** (contact_frame) and **0.067 / 0.021** (finger_velocity) on all / >=3cm.
+Two consequences. (1) The 5-bin mean has a 0.150 floor from the 0-3cm bin alone — an
+untrained contact_frame policy scores **0.75 in that bin** while scoring 0.00 in every other
+bin, because gap_assist plus the contact frame keep it touching and pushing (retention 0.98
+doing nothing useful). **The >=3cm column is the primary metric; the 5-bin mean is not.**
+(2) `hardmode` at 0.028 >=3cm against a 0.021 floor is **indistinguishable from untrained**.
+
+### The preregistered `hardmode` prediction failed, and the arm cannot answer its question
+
+Guess was 0.35-0.5; measured **0.183 all / 0.028 >=3cm**, i.e. the floor. But `hardmode`
+bundles four changes and `rawact` alone gives 0.217/0.090, so **the collapse is fully
+accounted for by the action interface** — the one scaffold already known to matter since
+v25. Removing the other three costs nothing (below). `hardmode` is confounded by
+construction and should not be read as "the scaffolds were the result".
+
+### Single-factor attribution: FOUR of five scaffolds are free, and two are NEGATIVE
+
+Paired on the same 60 episodes, per seed, against `full`:
+
+```
+                per-seed delta        mean     McNemar (episode-level)
+nogapassist   +0.100 +0.100 +0.050  +0.083   25 win / 10 loss   p = 0.017
+physdamp      +0.000 +0.150 +0.000  +0.050   27 win / 18 loss   p = 0.233
+unmask        -0.083 +0.100 +0.033  +0.017   26 win / 23 loss   p = 0.775
+randtheta     -0.033 -0.017 -0.083  -0.044   21 win / 29 loss   p = 0.322
+rawact                                -0.522
+```
+
+**Removing the gap assist made push BETTER**, +0.083 paired, 3/3 seeds positive, p = 0.017
+episode-level. It is the largest single-factor effect in the round and it points the wrong
+way for a scaffold. Mechanism is visible in the failure histogram: `nogapassist` has the
+lowest failure count of any cell scored (32 of 180) and the lowest `contact_lost` (9%
+against `full`'s 12%). Inferred, not yet tick-traced: the assist drags the finger inward to
+chase a receding object, which keeps contact but commits the finger to a face the policy
+would rather leave.
+
+**Caveat that must travel with that number: `model_best` disagrees.** On the best
+checkpoint `nogapassist` is 0.711 against `full`'s 0.739 — the ordering inverts. By the
+repo's own rule (`model_best` is the max of a 16-episode eval, so a lucky draw as often as
+a peak; if the two disagree the runs have not converged), the gap-assist result is
+**PLAUSIBLE, NOT CONFIRMED**, and 400k is not enough to settle it. `physdamp` holds under
+both (0.789 final / 0.767 best), so that one is solid.
+
+**`physdamp` is now the default-worthy value.** The physically correct 3.12cm lever arm
+costs nothing and may help: +0.050 paired here, and Phase 0's frozen-checkpoint replay said
+-0.033. Those two disagree in sign, which is the expected difference between *replaying* a
+policy trained at 6.00 under 3.12 (a transfer penalty) and *training* at 3.12. Retraining
+recovers the loss and then some. **The unphysical constant was never buying performance.**
+
+### PASS (b) and (c) — own settings, and the baseline replayed under them
+
+```
+arm        own    baseline-transferred    read
+randtheta  0.717  full -> 0.578           +0.139 for training on it; task NOT harder
+physdamp   0.733  full -> 0.706           +0.027; confirms pass (a)
+hardmode   0.228  full -> 0.589           full BEATS hardmode on hardmode's own task by 2.6x
+narrowgap  0.344  cross0 -> 0.198         +0.146 for training on it (cross-room bins)
+bigroom    0.354  no control possible     standalone only
+```
+
+**The transfer control kills the "random heading is free" reading and replaces it with a
+better one.** On pass (a) `randtheta` looks slightly worse than `full` (0.694 vs 0.739).
+On its OWN task it scores 0.717 while `full` transferred in scores 0.578. So a 90deg
+heading spread is not a harder task that the policy barely survives — it is a task the
+baseline is measurably worse at, and training on it recovers the gap. Same shape as v27's
+`place` lesson, opposite conclusion: pass (c) manufactured nothing here, it *rescued* an
+arm that pass (a) alone would have written off.
+
+**`hardmode` fails its own task worse than the baseline that never saw it** (0.228 against
+`full`'s 0.589). A policy trained 400k steps on a distribution is beaten 2.6x by one that
+never trained there. That is not a hard task, it is a **broken learning setup** — consistent
+with `rawact`, and with `hardmode`'s in-training eval buckets going 0.072 / 0.065 / 0.126 /
+0.128 / **0.096**: declining at the cap, 1/3 seeds rising, against 3/3 for every working
+arm.
+
+### Failure modes split cleanly into three families
+
+```
+arm            terminations (pass a, final)                      ep_len  mode
+nogapassist    arrived 82%  contact_lost  9%  horizon  8%           57   healthy
+full           arrived 74%  horizon 12%  contact_lost 12%           65   healthy
+unmask         arrived 76%  horizon  9%  FORBIDDEN 8%  c_lost 7%    59   own-finger collisions
+rawact         CONTACT_LOST 66%  arrived 22%  horizon 12%           50   cannot hold contact
+hardmode       CONTACT_LOST 69%  arrived 18%  FORBIDDEN 11%         25   cannot hold contact
+narrowgap      HORIZON 53%  arrived 32%  contact_lost 10%          128   runs out of clock
+cone (v28)     HORIZON 68%  arrived 28%  contact_lost  4%          152   runs out of clock
+```
+
+1. **Cannot hold contact** (`rawact`, `hardmode`): `contact_lost` 66-69%, episodes 25-50
+   ticks, retention 0.60-0.62 against 0.92-0.94 for every working arm. Dies early. This is
+   the v21 steering-vs-retention tension, exactly as `contact_frame` was built to fix.
+2. **Runs out of clock** (`narrowgap`, `cone`, `cross0`): `horizon` 42-68%, episodes
+   128-158 ticks, retention 0.90-0.98 — holds contact fine, never arrives. Median closest
+   approach 3.0-3.3cm same-room and **11.6cm** for `narrowgap` on its own cross-room task,
+   so it is never-got-close, not fails-to-settle.
+3. **Arrives and does not settle** (`full`, `nogapassist`, `physdamp`, `randtheta`): 42-69%
+   of the few failures come within 1cm, median closest approach 0.5-2.1cm.
+   `require_settled` is a live question for family 3 ONLY, and is beside the point for 1
+   and 2 — the same E3 split, re-derived per arm.
+
+**`unmask` is a wash on success and worse on safety.** 0.756 vs `full`'s 0.739 (p = 0.775,
+one seed negative), but `forbidden_contact` goes 2% -> 8% final and 2% -> 11% best. v27
+measured 26.7-31.7% against a 19% prereg bar; the 8-11% here is much lower, and the
+difference is `disengaged_away_deg=60`, which every v29 cell trains with and v27's `unmask`
+arm did not. **Keep masking** stands, on the safety column rather than the success column.
+
+### The geometry result survived and is the one worth acting on
+
+`narrowgap` 0.344 on its own task against `cross0` transferred in at 0.198 — training helps,
+but the ceiling is low and the mode is `horizon` 59% with median closest approach 11.6cm.
+Halving the portal is still the largest task-side effect anywhere in v28/v29, and unlike
+`hardmode` it is a single clean factor (0.2% sampler fallback, 22.5cm median goal against
+`cross0`'s 21.7cm).
+
+**`bigroom` cannot be scored on a common benchmark AT ALL, and this is a new hard
+constraint.** SB3's `check_for_correct_spaces` compares the saved `Dict` observation space
+including the goal `Box` bounds, which are `[board_w, board_h]`. So a 90x60 checkpoint
+raises `ValueError` against a 50x30 env and vice versa — all 6 pass-(c) transfer evals and
+all 6 pass-(a) evals for that arm failed. The Phase 0 gotcha said a board change "confounds
+transfer and must be trained"; it is stronger than that — **it is not loadable**, so board
+size can never be an arm in a sweep that shares a benchmark. Its standalone 0.354 stands
+next to a median goal of 42.6cm against `cross0`'s 21.7cm, so it moves room size and push
+distance together and is uninterpretable as a single factor.
+
+**Gates:** static 26/26, geometry 27/27, contact 60/60, test_option_graph 172/172,
+fixture_eval 18/18. New: `tools/score_v29_bc.py`, `tools/summarize_v29.py`,
+`tools/make_untrained_ckpt.py`, `slurm/score_v29_bc.sh`.

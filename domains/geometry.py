@@ -205,26 +205,13 @@ def infer_adjacency(table: Dict[Cell, int]) -> Dict[int, Set[int]]:
 def shortest_region_path(adjacency: Dict[int, Set[int]], start: int, goal: int
                          ) -> Optional[List[int]]:
     """BFS hop-count shortest path over the region graph, None if disconnected.
-    Sorted neighbours keep the tie-break deterministic so both arms stay paired."""
-    if start == goal:
-        return [start]
-    prev: Dict[int, Optional[int]] = {start: None}
-    q = deque([start])
-    while q:
-        cur = q.popleft()
-        if cur == goal:
-            break
-        for nb in sorted(adjacency.get(cur, ())):
-            if nb not in prev:
-                prev[nb] = cur
-                q.append(nb)
-    if goal not in prev:
-        return None
-    path, node = [], goal
-    while node is not None:
-        path.append(node)
-        node = prev[node]
-    return path[::-1]
+
+    Thin re-export of planner.bfs_route -- there is one implementation, so the
+    two cannot drift. Imported inside the body to keep domains/ importable
+    without pulling the option-graph core at module load.
+    """
+    from option_graph.planner import bfs_route
+    return bfs_route(adjacency, start, goal)
 
 
 def region_hop_table(adjacency: Dict[int, Set[int]]) -> Dict[Tuple[int, int], int]:

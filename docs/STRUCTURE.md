@@ -12,7 +12,7 @@ Current state and gotchas live in `status.md`; session history in
 | Train one contact template (SAC+HER) | `train_contact.py` | works; Hydra `contact=push\|recontact` |
 | Score a contact checkpoint on a fixed stratified set | `eval_contact.py` | works; the only cross-cell-comparable push/recontact number. `eval_video=true` / `eval_summary_png=true` for local media. `overshoot_report` splits failures into aiming vs braking (v26) |
 | Compare every cell of a sweep on the common eval set | `tools/compare_sweep.py` | works; refuses to plot cells whose env digests disagree |
-| Score every cell of a sweep, keys handled by class | `tools/score_sweep.py` | works; INTERFACE keys read from each cell's `meta.txt`, TASK keys pinned, `--transfer-arm` for the cross-digest-group control |
+| Score every cell of a sweep, keys handled by class | `tools/score_sweep.py` | works; INTERFACE keys read from each cell's `meta.txt`, TASK keys pinned, `--transfer-arm` for the cross-digest-group control, `--pins` to swap the whole protocol (e.g. a cross-room benchmark) |
 | Run that scoring on a compute node | `slurm/score_sweep.sh` | works; the login node has `nproc=1`, so 36 evals belong here |
 | Reclaim checkpoint bytes under `logs/` | `tools/prune_runs.py` | works; dry-run by default, `--apply` to act |
 | wandb hygiene, remote runs + local dirs | `tools/prune_wandb.py` | works; dry-run by default |
@@ -43,7 +43,7 @@ Current state and gotchas live in `status.md`; session history in
 | Arrival tests, guards, templates (nav's DRIVE lives here too) | `domains/contact_templates.py` | push/recontact done, incl. `theta_target` orientation goal |
 | Held-out eval callback, contact-generic | `domains/contact/callbacks.py` | reads only the `achieved_goal`/`desired_goal` contract |
 | Eq 14 reward, HER-safe split | `domains/contact/reward.py` | works; `RewardWeights` ablated to `goal_reward=10.0` only |
-| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=speed_fraction\|friction_cone`, `mask_inactive_finger`, `disengaged_away_deg`, `push_range_min_cm` (all push only) |
+| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=speed_fraction\|friction_cone` (the cone is DEPRECATED, ablation only), `mask_inactive_finger`, `gap_assist`, `disengaged_away_deg`, `push_range_min_cm`, `object_theta_spread_deg` (all push only) |
 | HER buffer fixes | `domains/contact/her_buffer.py` | `DonePatchedHerReplayBuffer` (done-flag, both templates) + `PushRelabelSafeHerReplayBuffer` (adds stale-obs patch and relabel tick lag) |
 | SAC with a clipped TD target | `domains/contact/sac_clipped.py` | `TargetClippedSAC`; `target_clip=None` is bit-identical to stock SAC |
 
@@ -80,8 +80,8 @@ since `DomainHooks` (executor.py) is already the abstraction boundary.
 ```bash
 python test_code.py static                                    # 26/26
 python test_code.py geometry                                  # 27/27
-python test_code.py contact                                   # 50/50
-python -m tests.test_option_graph all                         # 170/170
+python test_code.py contact                                   # 60/60
+python -m tests.test_option_graph all                         # 172/172
 python -m tests.fixture_eval fixtures tests/fixtures_smoke    # 18/18
 ```
 

@@ -181,7 +181,15 @@ def main(cfg: DictConfig) -> None:
                                           n_eval_episodes=d["diag_eval_episodes"],
                                           seed=d["seed"] + 777,
                                           best_model_path=os.path.join(out_dir, "model_best"))
-    cb = CallbackList([TrainMetricsCallback(n_envs=d["n_envs"]), eval_cb])
+    cbs = [TrainMetricsCallback(n_envs=d["n_envs"]), eval_cb]
+    if d["ckpt_freq"]:
+        # model_best is the max of a 16-episode eval, so it is a lucky draw as
+        # often as a peak. These snapshots are step-addressed instead, which is
+        # what a budget-matched comparison against a shorter run needs.
+        from stable_baselines3.common.callbacks import CheckpointCallback
+        cbs.append(CheckpointCallback(save_freq=int(d["ckpt_freq"]),
+                                      save_path=out_dir, name_prefix="model"))
+    cb = CallbackList(cbs)
     model.learn(total_timesteps=d["total_steps"], callback=cb)
 
     model.save(os.path.join(out_dir, "model"))

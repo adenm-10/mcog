@@ -29,8 +29,9 @@ def _tie(node: Node) -> str:
 def bfs_route(adjacency: Adjacency, start: Node, goal: Node) -> Optional[Route]:
     """Hop-count shortest path, None if disconnected.
 
-    Same results as domains.geometry.shortest_region_path, which the test
-    golden-diffs over every pair of every maze until that copy is retired.
+    domains.geometry.shortest_region_path is a thin re-export of this, so there
+    is one implementation. The gate checks this against an exhaustive
+    simple-path oracle rather than against that former copy.
     """
     if start == goal:
         return [start]
