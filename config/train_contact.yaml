@@ -196,3 +196,100 @@ min_progress_ticks: null
 # distance, no velocity check) for those same four things, closing the gap
 # with HER's compute_reward, which was already position-only for push.
 require_settled: true
+theta_tol_deg: null          # PUSH ONLY. Eq 13's orientation bin half-width (deg).
+                             # null (default) = 2-D position goal, bit-identical to
+                             # every run so far AND keeps archived checkpoints
+                             # loadable (SB3 bakes the goal Box into the zip).
+                             # Set it and the goal becomes a POSE (x,y,cos,sin),
+                             # obs() grows a relative-heading pair, and arrival
+                             # requires position AND bin.
+theta_goal_window_deg: null  # PUSH ONLY. Half-width (deg) the goal heading is drawn
+                             # from, around the object's OWN starting heading.
+                             # null -> reuse theta_tol_deg (always satisfiable at
+                             # reset). MEASURED: push rotates the object a median
+                             # 1.8deg per episode (p90 7.0deg), so a uniform +/-180
+                             # window would be reachable in ~16% of episodes.
+                             # Diversity comes from object_theta_spread_deg.
+gamma_goal: false            # RECONTACT ONLY. false (default, bit-identical, keeps
+                             # the v23 checkpoints loadable) = the historical
+                             # single-finger 2-D goal. true = Eq 13's canonical
+                             # interface: BOTH fingertip targets in the object's
+                             # frame + the desired touching flag for each (6-D).
+                             # The object's pose is NOT in it -- recontact must not
+                             # move the object. Per-finger tolerance comes from the
+                             # interface table: the anchoring contact gets a few mm,
+                             # a retracted finger only has to be clear.
+goal_gamma_modes: null       # which interface classes the GOAL is drawn from.
+                             # null -> all of (push, pivot, pinch).
+init_gamma_modes: null       # which interface the fingers START in. null -> (free,),
+                             # the historical both-disengaged reset. Adding the
+                             # contact classes lets recontact represent a
+                             # GRASP-TO-GRASP transition, which composition needs.
+rich_obs: false              # adds Eq 18's xi block (which template, which finger is
+                             # active, which face) plus contact normals, force and the
+                             # four nearest wall distances -- all object-centric.
+                             # false is bit-identical. NOTE the force feature is
+                             # CUMULATIVE PEAK force: instantaneous normal force is
+                             # not recorded by the physics wrapper.
+portal_arrival: false        # PUSH ONLY. Eq 13's crossing target is the PORTAL
+                             # INTERFACE, not a point ("a portal is passed through,
+                             # not stopped at"). true routes cross-room arrival
+                             # through push_arrival's `iface` branch. Same-room
+                             # keeps the point target either way. NOTE HER still
+                             # scores relabeled pairs on the POINT goal: a portal
+                             # set cannot be relabeled to from an achieved state.
+push_range_max_cm: null      # PUSH ONLY, cone sampler only -- cap on the goal's
+                             # distance at reset. Eq 15's ramp moves this.
+curriculum_levels: null      # null -> OFF (bit-identical). Number of Eq 15 levels
+                             # I^(1) subset ... subset I_e, expanding BACKWARD from
+                             # the target along the goal-range axis.
+curriculum_start_cm: null    # Low end of the Eq 15 ramp, in cm. MUST be >= the
+                             # edge's geometric minimum goal distance or the cap is
+                             # unsatisfiable: cross-room goals are >= ~15cm because
+                             # the object must reach the other room, and a level-0
+                             # cap below that leaks 100%. null -> derive from
+                             # push_range_min_cm (fine same-room, WRONG cross-room).
+curriculum_threshold: 0.6    # Alg 1 line 13: advance when HELD-OUT local success
+                             # clears this. The eval env is the held-out one and is
+                             # NOT advanced, so the yardstick stays fixed.
+her_settled: false           # PUSH ONLY. Whether an HER-RELABELED transition must
+                             # also be settled, not just position-arrived.
+                             # false (default, bit-identical to every run so far)
+                             # keeps HER's rich position-only signal but lets a
+                             # relabeled pair be marked terminal when the real env
+                             # would not have terminated -- an optimistic critic.
+                             # true is consistent but costs signal, and the cost is
+                             # MEASURED: only 6% of push ticks pass object_settled
+                             # (a pushing policy keeps the object moving), so HER
+                             # positives fall 51-61% -> 5-8%, retaining 10-13%
+                             # (tools/probe_p0_readiness.py settling). An ARM.
+
+# --- contact-mode enforcement + portal target sets (P0) ---
+guard_face: false         # push only -- also enforce the edge's contact FACE.
+                          # Without it a finger that walks around a corner onto
+                          # another face still passes "is touching", so the
+                          # option can violate the edge it was told to execute
+                          # and still be scored a success.
+guard_object_still: false # recontact only -- the object must not move. That is
+                          # recontact's standing invariant (the target interface
+                          # cannot be, since acquiring it is the point). As a
+                          # guard rather than an arrival term it is also visible
+                          # to her_valid_filter.
+portal_goal: false        # push only -- draw CROSSING-edge goals as poses from
+                          # the portal region, and the object's start heading
+                          # from the same admissible band. MEASURED: a 10x6
+                          # object passes a 10cm gap at only 31% of
+                          # orientations, so an unconstrained draw is ~69%
+                          # geometrically impossible at any skill level.
+portal_depth_cm: 2.0      # half-depth in x of the portal goal band
+portal_clearance_cm: 0.5  # sec 3.1.2's "object width + 5-30mm"; the low end
+continuous_gamma: false   # recontact only -- draw interfaces UNIFORMLY inside
+                          # a class instead of from its 4/2/8 canonical
+                          # placements, so Gamma_l is a target SET (sec 6.1).
+gamma_min_sep_cm: 2.0     # floor on init-vs-goal interface separation, so a
+                          # start that nearly matches the goal is not a free win
+her_valid_filter: false   # relabel only TO ticks that were settled and
+                          # guard-valid. Filters the candidate POOL, not the
+                          # scored pair: her_settled rejects ~94% of a batch at
+                          # the measured 6% settle rate, this costs no batch
+                          # size at all.

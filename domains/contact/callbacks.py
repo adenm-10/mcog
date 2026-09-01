@@ -36,7 +36,8 @@ class ContactPeriodicEvalCallback(BaseCallback):
 
     def __init__(self, eval_env, eval_freq: int, n_eval_episodes: int = 16,
                  dist_edges=(3.0, 6.0, 9.0, 12.0), seed: int = 777,
-                 best_model_path=None):
+                 best_model_path=None, train_env=None,
+                 curriculum_levels=None, curriculum_threshold: float = 0.6):
         super().__init__()
         self.env = eval_env
         self.freq = int(eval_freq)
@@ -47,6 +48,14 @@ class ContactPeriodicEvalCallback(BaseCallback):
         self.env_steps_consumed = 0
         self.best_model_path = best_model_path
         self.best_success_rate = -1.0
+        # Alg 1 line 13: "advance curriculum when held-out local success exceeds
+        # threshold". The eval env is the held-out one, so the decision is made
+        # here and pushed to the TRAIN envs -- advancing the eval env too would
+        # move the yardstick with the task and the threshold could never bite.
+        self.train_env = train_env
+        self.curriculum_levels = curriculum_levels
+        self.curriculum_threshold = float(curriculum_threshold)
+        self.curriculum_level = 0
 
     def _on_step(self) -> bool:
         if self.num_timesteps >= self._next:
@@ -74,6 +83,13 @@ class ContactPeriodicEvalCallback(BaseCallback):
         if self.best_model_path is not None and success_rate > self.best_success_rate:
             self.best_success_rate = success_rate
             self.model.save(self.best_model_path)
+        if (self.curriculum_levels is not None and self.train_env is not None
+                and self.curriculum_level < self.curriculum_levels - 1
+                and success_rate >= self.curriculum_threshold):
+            self.curriculum_level += 1
+            self.train_env.env_method("set_curriculum_level", self.curriculum_level)
+        if self.curriculum_levels is not None:
+            self.logger.record("eval/curriculum_level", int(self.curriculum_level))
         self.logger.record("eval/ep_rew_mean", float(np.mean(rets)))
         self.logger.record("eval/env_steps_consumed", int(self.env_steps_consumed))
         if tta: self.logger.record("eval/tta", float(np.mean(tta)))

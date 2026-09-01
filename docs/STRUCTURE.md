@@ -40,11 +40,11 @@ Current state and gotchas live in `status.md`; session history in
 | Rendering, png/mp4, local disk only | `domains/contact/visualize.py` | works; no wandb import at all. `Snapshot` carries an optional TASK OVERLAY (goal, arrival ring, which fingertip is driven) — the goal is not in the state vector, so it is passed to `to_snapshot`. `eval_contact` writes `<ep>.mp4` **and** `<ep>_path.png` |
 | Multi-room board geometry (regions/portals) | `domains/contact/board.py` | works; degenerates to one region when `portals=()` |
 | `DomainHooks` builder (contact sibling of `nav_hooks`) | `domains/contact/hooks.py` | works |
-| Arrival tests, guards, templates (nav's DRIVE lives here too) | `domains/contact_templates.py` | push/recontact done, incl. `theta_target` orientation goal |
+| Arrival tests, guards, templates (nav's DRIVE lives here too) | `domains/contact_templates.py` | push/recontact done, incl. `theta_target` orientation goal, the Gamma_l interface table (`interface_targets` canonical / `sample_interface` continuous), and the mode-enforcing guards (`push_guard(face=)` -> `wrong_face`, `recontact_guard(object_still=)` -> `object_disturbed`) |
 | Held-out eval callback, contact-generic | `domains/contact/callbacks.py` | reads only the `achieved_goal`/`desired_goal` contract |
 | Eq 14 reward, HER-safe split | `domains/contact/reward.py` | works; `RewardWeights` ablated to `goal_reward=10.0` only |
-| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=speed_fraction\|friction_cone` (the cone is DEPRECATED, ablation only), `mask_inactive_finger`, `gap_assist`, `disengaged_away_deg`, `push_range_min_cm`, `object_theta_spread_deg` (all push only) |
-| HER buffer fixes | `domains/contact/her_buffer.py` | `DonePatchedHerReplayBuffer` (done-flag, both templates) + `PushRelabelSafeHerReplayBuffer` (adds stale-obs patch and relabel tick lag) |
+| `ContactEnv(gym.Env)`, push+recontact curriculum | `domains/contact/gym_env.py` | works; `action_interface=finger_velocity\|contact_frame`, `slip_model=speed_fraction\|friction_cone` (the cone is DEPRECATED, ablation only), `mask_inactive_finger`, `gap_assist`, `disengaged_away_deg`, `push_range_min_cm`, `object_theta_spread_deg`, `portal_goal`, `guard_face` (all push only), `gamma_goal`/`continuous_gamma`/`guard_object_still` (recontact only), `rich_obs`, `her_valid_filter` |
+| HER buffer fixes | `domains/contact/her_buffer.py` | `DonePatchedHerReplayBuffer` (done-flag, both templates) + `PushRelabelSafeHerReplayBuffer` (adds stale-obs patch and relabel tick lag). `valid_filter=True` restricts relabel CANDIDATES to settled, guard-valid ticks |
 | SAC with a clipped TD target | `domains/contact/sac_clipped.py` | `TargetClippedSAC`; `target_clip=None` is bit-identical to stock SAC |
 
 ## Layering — the architectural claim

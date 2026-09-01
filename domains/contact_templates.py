@@ -305,9 +305,27 @@ def _force_ok(x: State, params) -> bool:
         _peak_force(x, "R") <= params.force_abort_kgcms2
 
 
-def push_guard(x: State, allowed, cell_size, leg=None, *, params):
+def nearest_face(x: State, finger: Finger, ow: float, oh: float) -> int:
+    """Index of the object face `finger` is nearest, in the OBJECT's frame:
+    0=+x 1=-x 2=+y 3=-y. Same rule as planar_fingertips.face_frame, reimplemented
+    here so the guard does not have to import the pymunk-backed module."""
+    lx, ly = _to_object_frame(x, _finger_xy(x, finger))
+    if abs(lx) / (ow / 2.0) >= abs(ly) / (oh / 2.0):
+        return 0 if lx >= 0.0 else 1
+    return 2 if ly >= 0.0 else 3
+
+
+def push_guard(x: State, allowed, cell_size, leg=None, *, params,
+               face: Optional[int] = None):
     """`allowed`/`cell_size` are signature-compat only -- push has no cell grid.
-    `leg.direction` names the active (pushing) finger."""
+    `leg.direction` names the active (pushing) finger.
+
+    `face` is the edge's contact face (Eq 7 makes it an edge parameter, and xi
+    shows it to the policy). Given, the guard also enforces it: a finger that
+    walks around a corner onto a DIFFERENT face still satisfies "is touching",
+    so without this check the option can violate the edge it was told to execute
+    and be scored a success. None keeps the historical three-check guard.
+    """
     if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
     if not _force_ok(x, params):
@@ -320,25 +338,170 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params):
         return "forbidden_contact"
     if _no_contact_steps(x, active_finger) > CONTACT_N_GRACE_STEPS:
         return "contact_lost"
+    # Only while actually touching: off-contact the "nearest face" is whatever
+    # the grace window happens to drift past, which is not a mode violation.
+    if face is not None and _touching(x, active_finger) and \
+            nearest_face(x, active_finger, params.object_w_cm,
+                         params.object_h_cm) != int(face):
+        return "wrong_face"
     return True
 
 
-def recontact_guard(x: State, allowed, cell_size, leg=None, *, params):
-    """Only the two universal checks; see the section note above."""
+def recontact_guard(x: State, allowed, cell_size, leg=None, *, params,
+                    eps_v_cm_s: Optional[float] = None,
+                    eps_omega_deg_s: Optional[float] = None,
+                    object_still: bool = False):
+    """Universal checks, plus the recontact invariant when `object_still`.
+
+    What must hold THROUGHOUT a recontact is that the object does not move --
+    the target interface cannot be, since acquiring it is the whole point. That
+    invariant used to live in ContactEnv as a sticky flag folded into the
+    arrival test; as a guard it also becomes visible to the HER validity filter.
+    """
     if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
     if not _force_ok(x, params):
         return "force_limit"
+    if object_still and not object_settled(x, eps_v_cm_s, eps_omega_deg_s):
+        return "object_disturbed"
     return True
 
 
 PUSH = Template(name="push", score_arrival=push_arrival, guard=push_guard,
-                guards=("off_board", "force_limit", "forbidden_contact", "contact_lost"))
+                guards=("off_board", "force_limit", "forbidden_contact",
+                        "contact_lost", "wrong_face"))
 RECONTACT = Template(name="recontact", score_arrival=recontact_arrival,
                      guard=recontact_guard,
                      # "overshoot" comes from ContactEnv.step, not from
                      # recontact_guard, but it is a real observable outcome.
-                     guards=("off_board", "force_limit", "overshoot"))
+                     guards=("off_board", "force_limit", "overshoot",
+                             "object_disturbed"))
 TEMPLATES[PUSH.name] = PUSH
 TEMPLATES[RECONTACT.name] = RECONTACT
 K = frozenset(TEMPLATES)
+
+# --- canonical contact interfaces (memo Eq 11's Gamma_l) -------------------
+# A lookup table from an interface CLASS to where the two fingertips must end
+# up, in the OBJECT's frame, plus whether each must be touching. Fixed per
+# class -- this is the target-set description Eq 13 asks for and sec 6.1 says
+# must replace point goals.
+#
+# Tolerances are PER FINGER and deliberately asymmetric: the anchoring contact
+# is what the next option starts from, so it gets a few mm; a retracted finger
+# only has to be clear of the object, so it gets a loose one.
+#
+# Placement VARIANTS are sampled rather than fixed (e.g. pinch on the short ends
+# or the long sides), and which variant is in play is an edge parameter the
+# policy sees. That is what makes Gamma_l a genuinely multi-valued input and so
+# tests Eq 9's "one shared network instantiates many edges".
+GAMMA_CLASSES = ("push", "pivot", "pinch")
+ANCHOR_TOL_CM = 0.3      # "a few mm" -- the contact the successor starts from
+RETRACT_TOL_CM = 2.0     # a retracted finger only needs to be clear
+RETRACT_CLEAR_CM = 3.0   # how far outside the face counts as clear
+
+
+def _opposite(face: int) -> int:
+    """Faces are indexed 0=+x 1=-x 2=+y 3=-y, so the opposite face is face^1.
+    NOT (face+2)%4 -- that maps +x to +y, i.e. an ADJACENT face, which silently
+    made "two opposing contacts" (sec 6.3's pinch requirement) a corner grip."""
+    return face ^ 1
+
+
+def _face_point(face: int, along: float, ow: float, oh: float, out: float):
+    """A point `out` cm outside face `face`, `along` in [-1,1] across it."""
+    hw, hh = ow / 2.0 + out, oh / 2.0 + out
+    return {0: (hw, along * oh / 2.0), 1: (-hw, along * oh / 2.0),
+            2: (along * ow / 2.0, hh), 3: (along * ow / 2.0, -hh)}[face]
+
+
+def interface_targets(gamma: str, variant: int, active: str, ow: float, oh: float,
+                      clearance: float):
+    """(targets, touch, tol) for one canonical interface, in the object's frame.
+
+    `variant` selects the placement, so one class covers several geometries.
+    `clearance` is the CONTACT offset (fingertip radius minus a hair): a larger
+    value puts a must-TOUCH finger where it provably cannot touch, which makes
+    the goal unsatisfiable -- measured, radius+0.3 touched in 0 of 400 resets.
+    """
+    other = "R" if active == "L" else "L"
+    if gamma == "push":
+        # one finger on a face, the other retracted and clear.
+        face = variant % 4
+        t = {active: _face_point(face, 0.0, ow, oh, clearance),
+             other: _face_point(_opposite(face), 0.0, ow, oh, RETRACT_CLEAR_CM)}
+        return t, {active: True, other: False}, \
+            {active: ANCHOR_TOL_CM, other: RETRACT_TOL_CM}
+    if gamma == "pinch":
+        # two OPPOSING contacts (sec 6.3). variant 0 = the short ends, 1 = the
+        # long sides -- both are valid opposing pairs for a rectangle.
+        f0 = 0 if variant % 2 == 0 else 2
+        f1 = _opposite(f0)
+        t = {active: _face_point(f0, 0.0, ow, oh, clearance),
+             other: _face_point(f1, 0.0, ow, oh, clearance)}
+        return t, {active: True, other: True}, \
+            {active: ANCHOR_TOL_CM, other: ANCHOR_TOL_CM}
+    if gamma == "pivot":
+        # one contact ANCHORS, the other drives rotation (sec 6.3). variant 0
+        # anchors near a corner (longest lever), 1 anchors mid-face.
+        face = (variant // 2) % 4
+        along = 0.8 if variant % 2 == 0 else 0.0
+        t = {active: _face_point(face, along, ow, oh, clearance),
+             other: _face_point(_opposite(face), -along, ow, oh, clearance)}
+        return t, {active: True, other: True}, \
+            {active: ANCHOR_TOL_CM, other: ANCHOR_TOL_CM * 2.0}
+    raise ValueError(f"unknown interface class {gamma!r}")
+
+
+def n_variants(gamma: str) -> int:
+    return {"push": 4, "pinch": 2, "pivot": 8}[gamma]
+
+
+# Fraction of the half-face a contact may be placed at. Below 1.0 so a "face"
+# contact is not sampled exactly on a corner, where which face it is on is
+# ill-defined and the guard's nearest_face test flips on rounding.
+ALONG_MAX_FACE = 0.7
+ALONG_MAX_PIVOT = 0.9   # pivot WANTS the long lever, so it goes closer out
+
+
+def sample_interface(gamma: str, active: str, ow: float, oh: float,
+                     clearance: float, rng):
+    """Draw one instance uniformly from inside interface class `gamma`.
+
+    interface_targets returns the 4/2/8 canonical placements; this returns a
+    continuous draw from the same class, which is what makes Gamma_l a target
+    SET (sec 6.1) rather than a handful of points. Returns
+    (targets, touch, tol, face_idx) -- face_idx is the anchor's face, for xi.
+    """
+    other = "R" if active == "L" else "L"
+    if gamma == "push":
+        face = int(rng.randint(4))
+        along = float(rng.uniform(-ALONG_MAX_FACE, ALONG_MAX_FACE))
+        # "clear of the object" is a REGION, not a point: draw the retracted
+        # target anywhere on a ring outside the object's own footprint.
+        ang = float(rng.uniform(0.0, 2.0 * np.pi))
+        rad = 0.5 * float(np.hypot(ow, oh)) + RETRACT_CLEAR_CM
+        t = {active: _face_point(face, along, ow, oh, clearance),
+             other: (rad * np.cos(ang), rad * np.sin(ang))}
+        return t, {active: True, other: False}, \
+            {active: ANCHOR_TOL_CM, other: RETRACT_TOL_CM}, face
+    if gamma == "pinch":
+        # ONE shared `along`, so the two contacts sit directly opposite each
+        # other (sec 6.3). Independent draws would give a torque couple, which
+        # is a pivot, not a pinch.
+        face = 0 if rng.randint(2) == 0 else 2
+        along = float(rng.uniform(-ALONG_MAX_FACE, ALONG_MAX_FACE))
+        t = {active: _face_point(face, along, ow, oh, clearance),
+             other: _face_point(_opposite(face), along, ow, oh, clearance)}
+        return t, {active: True, other: True}, \
+            {active: ANCHOR_TOL_CM, other: ANCHOR_TOL_CM}, face
+    if gamma == "pivot":
+        # The anchor holds; the other contact drives rotation, so its placement
+        # is INDEPENDENT -- that offset is exactly the moment arm.
+        face = int(rng.randint(4))
+        a0 = float(rng.uniform(-ALONG_MAX_PIVOT, ALONG_MAX_PIVOT))
+        a1 = float(rng.uniform(-ALONG_MAX_PIVOT, ALONG_MAX_PIVOT))
+        t = {active: _face_point(face, a0, ow, oh, clearance),
+             other: _face_point(_opposite(face), a1, ow, oh, clearance)}
+        return t, {active: True, other: True}, \
+            {active: ANCHOR_TOL_CM, other: ANCHOR_TOL_CM * 2.0}, face
+    raise ValueError(f"unknown interface class {gamma!r}")

@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import types
 
 MAZE_YAML = "config/maze/nine_rooms.yaml"
 
@@ -866,6 +867,292 @@ def cmd_contact() -> None:
         check(False, "contact_frame on recontact raises")
     except ValueError:
         check(True, "contact_frame on recontact raises")
+
+    section("her_settled gates push's relabeled arrival, and only when asked")
+    # Eq 13 puts ||v_obj|| <= eps_v in the target set. Velocity can never live
+    # in the goal vector (there is no goal of "arrive at 5cm/s", and HER would
+    # relabel it to whatever speed the trajectory had), so it is read from info
+    # -- the same route recontact has always used. This check asserts the branch
+    # FIRES on real data, because a settled term that never triggers would pass
+    # against a completely broken implementation.
+    for flag in (False, True):
+        env = _contact_env(her_settled=flag)
+        obs, _ = env.reset(seed=11)
+        ags, infos = [], []
+        for _ in range(60):
+            obs, _r, term, trunc, info = env.step(env.action_space.sample())
+            ags.append(np.asarray(obs["achieved_goal"], dtype=float).copy())
+            infos.append(dict(info))
+            if term or trunc:
+                obs, _ = env.reset(seed=12)
+        ag = np.asarray(ags)
+        # Relabel every transition onto its OWN achieved goal: position-arrival
+        # is then true by construction, so the only thing that can turn an
+        # entry False is the settled term.
+        got = np.asarray(env._her_arrived(ag, ag.copy(), infos), dtype=bool)
+        if flag:
+            settled = np.asarray([i["obj_settled"] for i in infos], dtype=bool)
+            check(all("obj_settled" in i for i in infos),
+                  "push emits obj_settled in info when her_settled=True")
+            check(int((~settled).sum()) > 0,
+                  "the settled flag is False somewhere (branch is reachable)",
+                  f"{int((~settled).sum())}/{len(settled)} unsettled ticks")
+            check(np.array_equal(got, settled),
+                  "her_settled=True: self-relabeled arrival == the settled flag")
+            check(int((~got).sum()) > 0,
+                  "the settled term actually REJECTED some pairs",
+                  f"rejected {int((~got).sum())}/{len(got)}")
+        else:
+            check(not any("obj_settled" in i for i in infos),
+                  "push does NOT emit obj_settled when her_settled=False")
+            check(bool(got.all()),
+                  "her_settled=False: every self-relabeled pair arrives",
+                  f"{int((~got).sum())} unexpectedly rejected")
+
+    section("guards enforce the CONTACT MODE, not just 'is touching'")
+    from domains.contact_templates import (nearest_face, push_guard,
+                                           recontact_guard)
+    from domains.contact.planar_fingertips import IDX_CONTACT, IDX_OBJ_VEL
+    from types import SimpleNamespace
+    e = _contact_env(guard_face=True)
+    e.reset(seed=7)
+    x, prm, leg = e._x.copy(), e.params, SimpleNamespace(direction=e._active_finger)
+    face = nearest_face(x, e._active_finger, prm.object_w_cm, prm.object_h_cm)
+    x[IDX_CONTACT[e._active_finger]] = 1.0
+    x[IDX_CONTACT["R" if e._active_finger == "L" else "L"]] = 0.0
+    check(push_guard(x, frozenset(), 1.0, leg, params=prm, face=face) is True,
+          "push guard passes when the finger is on the edge's own face")
+    wrong = next(f for f in range(4) if f != face)
+    check(push_guard(x, frozenset(), 1.0, leg, params=prm, face=wrong) == "wrong_face",
+          "push guard rejects a finger that walked onto ANOTHER face",
+          "without this the option violates the edge it was told to execute "
+          "and is still scored a success")
+    check(push_guard(x, frozenset(), 1.0, leg, params=prm) is True,
+          "face=None keeps the historical three-check guard (bit-identical)")
+
+    r = _contact_env.__globals__["ContactEnv"] if False else None
+    from domains.contact.gym_env import ContactEnv
+    re_ = ContactEnv(template="recontact", seed=0)
+    re_.reset(seed=3)
+    xs = re_._x.copy()
+    xs[IDX_OBJ_VEL] = (0.0, 0.0); xs[6] = 0.0
+    check(recontact_guard(xs, frozenset(), 1.0, params=re_.params,
+                          object_still=True) is True,
+          "recontact guard passes while the object is at rest")
+    xm = xs.copy(); xm[IDX_OBJ_VEL] = (9.0, 0.0)
+    check(recontact_guard(xm, frozenset(), 1.0, params=re_.params,
+                          object_still=True) == "object_disturbed",
+          "recontact guard rejects a MOVED object -- its standing invariant")
+    check(recontact_guard(xm, frozenset(), 1.0, params=re_.params) is True,
+          "object_still=False keeps the two universal checks (bit-identical)")
+
+    section("portal goals are drawn only from orientations that FIT the gap")
+    import math
+    from domains.contact.planar_fingertips import (PlanarFingertipParams as _PP,
+                                                    Portal as _Pt)
+    pe = ContactEnv(template="push", seed=0, require_settled=False,
+                    push_cone_deg=30.0, same_room_goal_prob=0.0,
+                    params=_PP(board_w_cm=50.0, board_h_cm=30.0,
+                               portals=(_Pt(x=25.0, y_lo=10.0, y_hi=20.0),)),
+                    theta_tol_deg=22.5, theta_goal_window_deg=45.0,
+                    portal_goal=True, object_theta_spread_deg=90.0)
+    ow, oh = pe.params.object_w_cm, pe.params.object_h_cm
+    port = pe.params.portals[0]
+    half = pe._portal_theta_half(port)
+    worst, n_fit = 0.0, 0
+    for k in range(120):
+        pe.reset(seed=k)
+        g = pe._goal_xy
+        th = math.atan2(float(g[3]), float(g[2]))
+        ext = ow * abs(math.sin(th)) + oh * abs(math.cos(th))
+        worst = max(worst, ext / 2.0 + abs(float(g[1]) - 0.5 * (port.y_lo + port.y_hi)))
+        n_fit += int(ext / 2.0 + abs(float(g[1]) - 0.5 * (port.y_lo + port.y_hi))
+                     <= 0.5 * (port.y_hi - port.y_lo) + 1e-6)
+        th0 = math.atan2(float(pe._x[3]), float(pe._x[2]))
+        check_quiet = abs(th0) <= half + 1e-6
+        if not check_quiet:
+            break
+    check(n_fit == 120,
+          "every portal goal POSE physically fits through the gap",
+          f"{n_fit}/120, worst half-extent {worst:.2f} vs half-gap "
+          f"{0.5 * (port.y_hi - port.y_lo):.2f}")
+    check(check_quiet,
+          "the object's START heading is inside the same admissible band",
+          "a start outside it cannot cross at any skill level (sec 6.4)")
+    check(abs(math.degrees(pe._portal_theta_half(
+              type(port)(x=port.x, y_lo=0.0, y_hi=99.0))) - 90.0) < 1e-6,
+          "a gap wider than the object's diagonal admits every orientation")
+
+    section("HER relabels only to settled, guard-valid ticks")
+    import numpy as _np
+    from domains.contact.her_buffer import DonePatchedHerReplayBuffer as _B
+    sl = slice(0, 0)
+    class _Fake(_B):
+        def __init__(self):          # bypass SB3's ctor; exercise _sample_goals only
+            self.buffer_size, self.n_envs = 20, 1
+            self._valid_filter = True
+            self._valid = _np.zeros((20, 1), dtype=bool)
+            self._valid[[3, 7], 0] = True
+            self.ep_start = _np.zeros((20, 1), dtype=_np.int64)
+            self.ep_length = _np.full((20, 1), 10, dtype=_np.int64)
+            self.goal_selection_strategy = "GoalSelectionStrategy.FUTURE"
+            self.next_observations = {"achieved_goal":
+                                      _np.arange(20, dtype=_np.float32).reshape(20, 1, 1)}
+            self.observations = {"desired_goal":
+                                 _np.full((20, 1, 1), -1.0, dtype=_np.float32)}
+    fb = _Fake()
+    bi = _np.array([0, 0, 0, 4, 4, 8]); ei = _np.zeros(6, dtype=_np.int64)
+    got = fb._sample_goals(bi, ei).reshape(-1)
+    check(set(got[:3].tolist()) <= {3.0, 7.0},
+          "a goal drawn from tick 0 lands on a VALID tick only",
+          f"drew {got[:3].tolist()} from valid ticks [3, 7]")
+    check(set(got[3:5].tolist()) <= {7.0},
+          "tick 4 can only reach the valid tick still AHEAD of it (7)",
+          f"drew {got[3:5].tolist()}")
+    check(float(got[5]) == -1.0,
+          "no valid tick ahead -> NO relabel, the real goal is kept",
+          "reaching backwards would break the future-causality HER relies on")
+    _frac = getattr(fb, "her_valid_frac", None)   # absent if the filter was bypassed
+    check(_frac is not None and abs(_frac - 5.0 / 6.0) < 1e-9,
+          "her_valid_frac reports the relabelable fraction", f"{_frac}")
+
+    section("continuous interface draws stay inside their class")
+    from domains.contact_templates import (ANCHOR_TOL_CM, sample_interface,
+                                           _opposite as _opp)
+    rng = _np.random.RandomState(0)
+    n_opp = 0
+    for g in ("push", "pivot", "pinch"):
+        for _ in range(300):
+            t, touch, tol, fidx = sample_interface(g, "L", 10.0, 6.0, 1.18, rng)
+            if touch["L"] and touch["R"]:
+                L = _np.asarray(t["L"], float); R = _np.asarray(t["R"], float)
+                if float(_np.dot(L / _np.linalg.norm(L), R / _np.linalg.norm(R))) >= 0.0:
+                    check(False, f"{g}: continuous draw gave NON-opposing contacts")
+                    break
+                n_opp += 1
+            if tol["L"] > tol["R"] + 1e-9:
+                check(False, f"{g}: anchor tolerance is not the tighter one")
+                break
+            if not (0 <= fidx < 4):
+                check(False, f"{g}: face index out of range")
+                break
+        else:
+            check(True, f"{g}: 300 continuous draws all stay inside the class")
+    check(n_opp > 0, "two-contact classes were actually exercised", f"{n_opp} draws")
+    # A pinch's two contacts must be DIRECTLY opposed, i.e. the segment joining
+    # them is normal to the faces. Merely "on opposite faces" is far weaker: with
+    # independent along-face draws the contacts form a torque couple, which is a
+    # pivot. So this is the check that separates the two classes.
+    worst_off = 0.0
+    for _ in range(300):
+        t, _tc, _tl, f = sample_interface("pinch", "L", 10.0, 6.0, 1.18, rng)
+        d = _np.asarray(t["L"], float) - _np.asarray(t["R"], float)
+        worst_off = max(worst_off, abs(d[1]) if f in (0, 1) else abs(d[0]))
+    check(worst_off < 1e-9,
+          "pinch contacts are DIRECTLY opposed, not a torque couple",
+          f"worst off-axis offset {worst_off:.2e} cm")
+    # The anchor's free parameter is its position ALONG the face, which lands
+    # in x or y depending on the face -- so count distinct (x, y) pairs.
+    xs_ = {tuple(_np.round(sample_interface("push", "L", 10.0, 6.0, 1.18, rng)[0]["L"], 6))
+           for _ in range(200)}
+    check(len(xs_) > 190,
+          "placement is CONTINUOUS, not the 4/2/8 canonical points",
+          f"{len(xs_)} distinct anchor placements in 200 draws")
+
+    section("canonical interfaces: opposing contacts and per-finger tolerance")
+    from domains.contact_templates import (GAMMA_CLASSES, interface_targets,
+                                           n_variants, _opposite)
+    check([_opposite(f) for f in range(4)] == [1, 0, 3, 2],
+          "opposite face is face^1, not (face+2)%4",
+          "the latter maps +x to +y, an ADJACENT face, which would make "
+          "sec 6.3's 'two opposing contacts' a corner grip")
+    n_two = 0
+    for g in GAMMA_CLASSES:
+        for v in range(n_variants(g)):
+            t, touch, tol = interface_targets(g, v, "L", 10.0, 6.0, 1.18)
+            if touch["L"] and touch["R"]:
+                L = np.asarray(t["L"], float); R = np.asarray(t["R"], float)
+                cosang = float(np.dot(L / np.linalg.norm(L), R / np.linalg.norm(R)))
+                check(cosang < 0.0,
+                      f"{g} v{v}: the two contacts are OPPOSING", f"cos {cosang:+.3f}")
+                n_two += 1
+            check(tol["L"] <= tol["R"] + 1e-9,
+                  f"{g} v{v}: the anchoring finger's tolerance is the tighter one",
+                  f"L {tol['L']} R {tol['R']}")
+    check(n_two > 0, "two-contact interfaces exist (check is not vacuous)",
+          f"{n_two} of them")
+
+    section("obs()'s goal-derived tail is exactly the slice her_buffer patches")
+    # SB3's HerReplayBuffer relabels desired_goal and never touches
+    # observation, so a goal-derived feature outside this slice goes stale on
+    # ~80% of every batch with no error -- the v18 bug. These checks are what
+    # make widening obs() safe, so they exist BEFORE the widening.
+    from domains.contact.physics import (OBS_STATE_DIM, goal_derived_slice,
+                                         n_goal_derived, obs_dim)
+
+    for pose in (False, True):
+        lab = "pose goal" if pose else "2-D goal"
+        sl, dim = goal_derived_slice(pose), obs_dim(pose)
+        check(sl.stop == dim, f"{lab}: the goal-derived block is obs()'s TAIL",
+              f"stop={sl.stop} obs_dim={dim}")
+        check(sl.stop - sl.start == n_goal_derived(pose),
+              f"{lab}: slice width == n_goal_derived = {n_goal_derived(pose)}")
+        check(sl.start == OBS_STATE_DIM,
+              f"{lab}: the head is the goal-INDEPENDENT state block")
+
+        env = _contact_env(**({"theta_tol_deg": 22.5} if pose else {}))
+        check(env.observation_space["observation"].shape == (dim,),
+              f"{lab}: the Box agrees with obs_dim", 
+              str(env.observation_space["observation"].shape))
+        check(env.observation_space["desired_goal"].shape == (4 if pose else 2,),
+              f"{lab}: goal Box is {4 if pose else 2}-D")
+
+        obs, _ = env.reset(seed=7)
+        x = env._x.copy()
+        g0 = np.asarray(env._goal_xy, dtype=np.float32)
+        o0 = env._physics.obs(x, g0)
+        moved = g0.copy(); moved[:2] += np.array([5.0, -3.0], dtype=np.float32)
+        o1 = env._physics.obs(x, moved)
+        head = slice(0, sl.start)
+        check(np.allclose(o0[head], o1[head]),
+              f"{lab}: moving the goal leaves the non-tail features untouched",
+              f"max delta {float(np.abs(o0[head] - o1[head]).max()):.3e}")
+        check(not np.allclose(o0[sl], o1[sl]),
+              f"{lab}: moving the goal DOES change the tail (not vacuous)")
+
+        # Relabel-consistency: her_buffer's patch must reproduce a from-scratch
+        # obs() under a new goal, or the critic trains on a state that never was.
+        from domains.contact.her_buffer import PushRelabelSafeHerReplayBuffer as _B
+        pos_scale = max(env.params.board_w_cm, env.params.board_h_cm)
+        ng = g0.copy(); ng[:2] += np.array([4.0, 2.0], dtype=np.float32)
+        if pose:
+            th = math.radians(17.0)
+            ng[2], ng[3] = math.cos(th), math.sin(th)
+        ob = {"observation": o0.copy()[None, :],
+              "achieved_goal": np.asarray(env._achieved_xy(x))[None, :]}
+        _B._patch_observations(
+            types.SimpleNamespace(_goal_slice=sl, _pos_scale=pos_scale),
+            ob, ob, ng[None, :])
+        check(np.allclose(ob["observation"][0], env._physics.obs(x, ng), atol=1e-6),
+              f"{lab}: her_buffer's patch reproduces a from-scratch obs()",
+              f"max delta {float(np.abs(ob['observation'][0] - env._physics.obs(x, ng)).max()):.3e}")
+
+    section("pose goals: orientation gates arrival, and only when asked")
+    from domains.contact.reward import goal_theta_err, pose_arrived
+    a = np.array([[10.0, 10.0, 1.0, 0.0]])
+    for deg, want in ((0.0, True), (10.0, True), (30.0, False)):
+        th = math.radians(deg)
+        d = np.array([[10.0, 10.0, math.cos(th), math.sin(th)]])
+        got = bool(pose_arrived(a, d, 0.4, math.radians(22.5))[0])
+        check(got == want, f"pose_arrived at {deg:.0f}deg off -> {want}",
+              f"theta_err {math.degrees(float(goal_theta_err(a, d)[0])):.1f}deg")
+    th = math.radians(179.0)
+    d = np.array([[10.0, 10.0, math.cos(th), math.sin(th)]])
+    check(abs(math.degrees(float(goal_theta_err(a, d)[0])) - 179.0) < 1e-6,
+          "goal_theta_err wraps correctly near +/-pi",
+          f"{math.degrees(float(goal_theta_err(a, d)[0])):.3f}deg")
+    check(bool(pose_arrived(a, d, 0.4, None)[0]),
+          "theta_tol_rad=None reduces EXACTLY to the position-only test")
 
 
 def main() -> int:

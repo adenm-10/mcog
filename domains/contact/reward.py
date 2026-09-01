@@ -30,6 +30,36 @@ def arrived_loose(achieved_xy, desired_xy, arrival_eps: float) -> np.ndarray:
     return goal_dist(achieved_xy, desired_xy) < float(arrival_eps)
 
 
+def goal_theta_err(achieved, desired) -> np.ndarray:
+    """Wrapped |angle| between two POSE goals, in radians.
+
+    A pose goal is (x, y, cos_theta, sin_theta): heading is carried as a unit
+    vector, not a raw angle, for two reasons. HER relabels a goal to an ACHIEVED
+    state, and achieved headings are already unit vectors, so every relabeled
+    goal lands on the manifold by construction. And a raw angle in a Box would
+    need wraparound handling at the +/-pi seam, which is exactly the kind of
+    silent-on-most-batches bug this file's history is full of.
+    """
+    a, d = np.asarray(achieved), np.asarray(desired)
+    # cross/dot of the two unit headings -> the signed angle between them.
+    cross = a[..., 2] * d[..., 3] - a[..., 3] * d[..., 2]
+    dot = a[..., 2] * d[..., 2] + a[..., 3] * d[..., 3]
+    return np.abs(np.arctan2(cross, dot))
+
+
+def pose_arrived(achieved, desired, arrival_eps: float,
+                 theta_tol_rad=None) -> np.ndarray:
+    """Eq 13's position AND orientation-bin test, vectorized for HER batches.
+
+    `theta_tol_rad=None` reduces EXACTLY to arrived_loose, so a 2-D goal space
+    and a pose goal with no orientation requirement stay bit-identical.
+    """
+    hit = arrived_loose(achieved, desired, arrival_eps)
+    if theta_tol_rad is None:
+        return hit
+    return hit & (goal_theta_err(achieved, desired) <= float(theta_tol_rad))
+
+
 @dataclass(frozen=True)
 class RewardWeights:
     """Eq 14's six weights, defaulting to a pure sparse arrival bonus.

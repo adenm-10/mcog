@@ -3,131 +3,103 @@
 Next action first for each item. Session history in `docs/PROGRESS.md`; repo map in
 `docs/STRUCTURE.md`; current state and gotchas in `status.md`.
 
-## Immediate — Stage 1, post-v29
+## Immediate — Stage 1, recovering from v31
 
-**v30 FAMILY A IS BUILT AND VERIFIED BUT NOT SUBMITTED.** `sbatch slurm/submit_lean.sh`,
-6 cells = `{lean, lean_raw} x seed {0,1,2}` at 1.2M (~8h/cell, ~48 GPU-hours). Rationale in
-the launcher header. **It depends on UNCOMMITTED code** (`train_contact.py` +
-`config/train_contact.yaml`'s new `ckpt_freq`), so commit before submitting.
+**v31 RAN AND FAILED.** Jobs `42617855` (push spec, 9 cells, 1.2M) and `42617867`
+(recontact, 9 cells, 1M), both COMPLETED 2026-08-29, ~126 GPU-hours. **All nine push cells
+scored 0.000; `recon_goal`/`recon_full` scored ~0.00-0.05; `recon_base` scored 0.906-0.941
+on 3/3 seeds.** Numbers, per-cell table and tick-traced diagnosis in `status.md` and
+`docs/PROGRESS.md` v31 RESULTS.
 
-`lean` = everything v29 showed to be free, all at once, keeping only the one scaffold v29
-showed to be load-bearing: `contact_frame` + `gap_assist=false` + `mask_inactive_finger=false`
-+ `object_theta_spread_deg=90` + `angular_drag_arm_cm=3.12` + `push_cone_deg=90`. It has never
-been run as a combination -- each change was costed alone, and `unmask`/`randtheta` had the two
-steepest slopes in the sweep, so their "wash" verdicts were budget-limited. **This gates the
-goal-diversity sweep**: if `lean` lands well below `physdamp`'s 0.789, the four changes
-interact and every downstream number is confounded.
+0. **COMMIT.** Three sweeps have now run against an uncommitted tree (~1550 lines from v31
+   alone). Each cell saved `uncommitted.diff` so provenance is recoverable, but this is past
+   the repo's own rule. `git diff --stat` first. Next action: one commit per concern —
+   guards, portal goals, xi, HER filter, continuous interfaces, gate, docs.
 
-`ckpt_freq=400000` is load-bearing, not a convenience: the comparison that answers the
-question is against v29 cells that ran at 400k, so the endpoint alone would confound the
-config change with 3x the budget. Score the 400k snapshot for the budget-matched row
-(`--ckpt model_400000_steps.zip` -- SB3 names them `model_<step>_steps.zip`). Prune the
-snapshots after scoring.
+1. **Bisect v31; do NOT re-run it.** The bundle moved ~8 factors and a 3-arm design cannot
+   attribute across them. Cheapest informative cell: **`lean` + `guard_face` alone**, 3
+   seeds. `wrong_face` fired on 72% of episodes and cut the median episode 66 -> 12 ticks,
+   so it is the leading suspect and one arm settles it. If that recovers, add `portal_goal`,
+   then `theta_tol_deg`, one factor per arm.
 
-**CUT before it ran: the portal/room-size sweep (18 cells, 144 GPU-hours).** A replay probe
-killed the axis. The cross-room sampler REQUIRES the goal's ray to pass through the portal, so
-a straight path exists in 93-100% of cross-room episodes even at a 6.5cm gap (barely wider
-than the 6cm object), and goal misalignment stays ~16deg at EVERY cone width cross-room
-(`tools/probe_misalignment.py`). Narrowing the portal tightens aim; it never forces the object
-around an obstacle. Board size additionally cannot share a benchmark at all -- SB3's
-`check_for_correct_spaces` compares the saved goal `Box` bounds.
+2. **Decide whether `wrong_face` should TERMINATE at all.** v30 measured that a finger
+   sliding along a face rounds a corner and keeps contact (policies scored 0.507-0.514
+   against a predicted 0.483 ceiling), so this guard kills a real, previously-rewarded
+   behaviour. Options, cheapest first: make it a penalty (`guard_terminates` is already
+   per-env), widen it to "starting face OR an adjacent one", or drop it. **A decision, not
+   a knob.**
 
-**The live axis is GOAL DIVERSITY, measured by replay at zero training cost**
-(`logs/eval/v30_conesweep/`, `tools/probe_goal_diversity.py`): cone 30 -> 90 -> 180 takes
-`nogapassist` 0.822 -> 0.767 -> 0.561 and `physdamp` 0.733 -> 0.733 -> 0.589. At cone=180,
-51.7% of same-room goals sit BEHIND the contacted face. NOTE a derivation of mine was WRONG
-here: I predicted a hard ceiling of 0.483 from "behind the face is unreachable" and the
-policies scored 0.507-0.514 on goals >=3cm, ABOVE it. A finger sliding ALONG a face keeps
-contact, so it can round a corner without tripping the 4cm guard. The face constraint is a
-cost, not a wall -- which is exactly why Eq 22 LEARNS reachability instead of deriving it.
+3. **Recontact's Gamma goal needs a smaller step, not more budget.** Measured over 60
+   episodes of `recon_goal_s0`: L within its 0.3cm anchor tol 1/60, R within 2.0cm 2/60,
+   touch flags matching 4/60 — the 4-way conjunction essentially never fires. Terminations
+   are `horizon` 47 / `object_disturbed` 13, so the new guard is NOT the cause. Next
+   actions, cheapest first: (a) raise the recontact horizon above 100 ticks — it was sized
+   when ONE fingertip had to be placed and now two do; (b) relax `ANCHOR_TOL_CM` from 0.3cm;
+   (c) score only the anchor and demote the retracted finger to a guard.
 
-**v28 RAN AND IS SCORED (job 42248679).** Push works: 0.21 -> **0.739** on the same 60
-episodes, and the distance cliff is gone (12+cm bin 0.00 -> 0.44). Attribution is
-single-factor and lopsided: removing the friction cone is worth **-0.46**, the critic clip
-**-0.03**, the 3cm goal floor **0.00**. Full numbers in `docs/PROGRESS.md` v28 RESULTS.
+4. **`recon_base` 0.906-0.941 is bankable — score it properly.** This is the rerun this file
+   has asked for since v23, and it confirms recontact survived every interface change since.
+   It is also the ONLY v31 number comparable to history. Next action: score on the
+   stratified protocol rather than the 16-episode diag eval, so it can be quoted.
 
-**v29 RAN AND IS SCORED (job 42300917).** Submitted 2026-08-27, finished, scored
-2026-08-28 with 108 evals in three passes. Full numbers in `docs/PROGRESS.md`
-v29 RESULTS; protocol records sit next to the numbers in `logs/eval/v29_combined_sameroom/`
-and `logs/eval/v29_42300917_ownsettings/`. Headline: four of five scaffolds are free, the
-action interface is the whole story, and the floor now exists (0.000 on goals >=3cm).
+5. **Regenerate the untrained floor for the new goal spaces.** Push went 2-D point -> 4-D
+   pose and recontact 2-D -> 6-D interface, so `logs/eval/v29_floor` does not apply and no
+   v31 number is anchored. `tools/make_untrained_ckpt.py`, ~34s per eval.
 
-1. **Adopt `angular_drag_arm_cm=3.12` as the default.** It is the physically derivable
-   value, it holds under BOTH checkpoints (0.789 final / 0.767 best against `full`'s 0.739 /
-   0.739), and Phase 0's -0.033 was a transfer penalty from replaying a policy trained at
-   6.00, not a cost of training at 3.12. Next action: change the default in
-   `config/train_contact.yaml`, note it in `docs/stage1_env_spec.md`, re-run the gates.
-2. **Settle the gap-assist result at a longer budget.** `nogapassist` is +0.083 paired
-   (3/3 seeds, McNemar p=0.017), the largest single-factor effect in the round, and it
-   points the WRONG WAY for a scaffold — removing an assist made push better. But
-   `model_best` inverts the ordering (0.711 vs 0.739), which by this repo's own rule means
-   the runs have not converged. Next action: 6 cells, `{full, nogapassist} x seed {0,1,2}`
-   at 800k-1M, nothing else changed. This is the only v29 number that needs more compute.
-3. **Do not read `hardmode` as a scaffold result.** 0.183 all / 0.028 >=3cm IS the floor,
-   but `rawact` alone gives 0.217/0.090, so the collapse is entirely the action interface
-   (known since v25). The arm bundles four changes and cannot attribute. If a "hard mode"
-   number is wanted, it must keep `contact_frame` and remove the rest.
-4. **`bigroom` is unscoreable and the arm should be retired.** SB3's
-   `check_for_correct_spaces` compares the goal `Box` bounds `[board_w, board_h]`, so a
-   90x60 checkpoint cannot load against a 50x30 env — all 12 cross-board evals raised
-   `ValueError`. Board size can NEVER be an arm in a sweep sharing a benchmark without
-   observation surgery (normalize the goal box to [0,1], or pad to a fixed max board).
-   Decide that before any further board-geometry experiment.
-4. **The geometry is the live problem, not the physics.** Phase 0 costed the two
-   physics-fairness worries at 0.033 (damping) and ~0.02 (goal cone), but halving the portal
-   costs **0.42**. The board is too small for long pushes (1.3 object-lengths of usable
-   width) and too open for crossing to mean anything (wall blocks 0 of 400 straight paths).
-   `narrowgap` and `bigroom` are the arms; a genuinely constraining board is the follow-up.
-5. **Two scaffolds still uncosted, both needing work, in this order.** (a) Orientation
-   goals — widen the goal space from `(x,y)` to `(x,y,theta)`, which touches the HER buffer;
-   ~1 day, and meaningless until `randtheta` lands. (b) The finger spawning already in
-   contact on the correct face — a decision about where push ends and recontact begins, not
-   a knob. Needs a call, not a cell.
-6. **Report goals >=3cm beside the 5-bin mean**, and **treat seed as the experimental unit**
-   for arm claims. 20% of the benchmark sits under 3cm where success needs <1cm of object
-   motion. v27's episode-level CI answers "would more episodes change this", not "would more
-   seeds"; the seed-level exact test gave one-sided p = 0.05, not 0.001.
-7. **`require_settled` is REOPENED by v28, and v29 says it applies to ONE failure family.**
-   Push's failures now split three ways: cannot-hold-contact (`rawact`, `hardmode`:
-   contact_lost 66-69%, 25-50 ticks, retention 0.60), runs-out-of-clock (`narrowgap`,
-   `cone`, `cross0`: horizon 42-68%, 128-158 ticks, median closest approach 3.0-11.6cm),
-   and arrives-without-settling (`full`, `nogapassist`, `physdamp`, `randtheta`: 42-69% of
-   failures within 1cm). Settling is the fix for the third family only. Original v28 note
-   follows. It was ruled out because failures never got
-   close. They do now: 53% of `full`'s failures come within 1cm (v27 `base`: 19%), and push
-   fails by arriving and not settling. E3's diagnosis was right for the policy that existed
-   then and is wrong for this one. Note the `arrival_eps` row of `overshoot_report` is 0% BY
-   CONSTRUCTION — delete or relabel it, and never cite it again.
-8. **The critic question is CLOSED.** Q-minus-realized went +5.06 -> **+0.10** (`noclip`
-   -0.36, `nomin` -0.05). The gap was a symptom of a policy that could not deliver the value
-   it predicted, not a separate defect. `target_clip` contributes ~0.03 on its own.
-9. **Add cross-track/along-track error and object speed at closest approach to
-   `eval_contact.py`.** The triangle decomposition is free from data already on disk and it
-   already revised a conclusion (`legacy` travels further, it does not aim better). Speed at
-   closest approach is one hypot: arrival is tested at 25Hz while the object can move 0.8cm
-   per tick against a 0.8cm band, so a fast well-aimed pass can be skipped over.
-10. **DONE 2026-08-28 — the floor exists.** `tools/make_untrained_ckpt.py` plus one eval
-   each: untrained `contact_frame` scores **0.150 all / 0.000 on goals >=3cm**, untrained
-   `finger_velocity` **0.067 / 0.021** (`logs/eval/v29_floor/`, same digest
-   `daee708c3fa6`). The contact_frame floor scores **0.75 in the 0-3cm bin and 0.00 in
-   every other bin** — gap_assist plus the contact frame keep it touching and pushing
-   (retention 0.98) with no skill at all. **So the 5-bin mean has a 0.150 floor and >=3cm
-   is the primary metric**, which upgrades item 6 from a reporting preference to a
-   correctness requirement.
-11. **Recontact has not been rerun since the action-space fix.** It is at 0.78-0.92 from
-   v23, four clipped seeds unscored, measured before the srg pin. Check which protocol
-   before quoting, and consider a 400k rerun under the current defaults.
-12. **Fairness commitment, before any composition claim.** The cone sampler, the action
-   interface, `disengaged_away_deg`, `push_range_min_cm`, **and now `gap_assist` and
-   `object_theta_spread_deg`** each give the option policy something a flat baseline would
-   not have. Memo sec 5.2 baseline 3 is "same resets and training-state coverage"; memo
-   sec 7 names "hierarchy wins only with special resets" as a failure mode. Every flat
-   baseline must inherit the identical reset distribution.
-13. **The range curriculum still needs `push_range_max_cm`.** `push_range_min_cm` landed in
-   v28 and clamps the near end; Eq 15 ramps the far end. NOTE the floor bought **0.00** in
-   v28, so the train/eval range mismatch was real as a measurement but was not the binding
-   constraint — do not assume the curriculum will be either.
-14. **`ruff` is not installed in `tsmc`**, so `CLAUDE.md`'s lint gate cannot be run.
+6. **`spec_raw` is UNINTERPRETABLE, not a result about the action interface.** It scored
+   0.000 like every other push arm, so the preregistered verdict rule ("raw works if it
+   clears the floor on >=2 seeds") cannot be applied — the control failed too. Re-ask it off
+   a working config.
+
+7. **Orientation is NOT push's binding constraint** — 34/60 episodes hit |dtheta| <= 22.5deg
+   while only 1/60 hit position < 0.4cm. Do not spend a sweep on the orientation window
+   until position is recovered.
+
+8. **v30 `lean` (job 42569985) was cancelled at ~600k of 1.2M.** All six 400k snapshots
+   survived, so the budget-matched v29 comparison is recoverable:
+   `python tools/score_sweep.py logs/sweep_42569985 --out-dir logs/eval/v30_lean_400k
+   --ckpt model_400000_steps.zip`. The 1.2M endpoint is gone; re-run if it is wanted.
+
+9. **Still open from v29, unchanged:** adopt `angular_drag_arm_cm=3.12` as the config
+   default; settle the gap-assist result (+0.083 paired, but `model_best` inverts it) at
+   800k-1M; report goals >=3cm beside the 5-bin mean and treat seed as the experimental
+   unit; add cross-track/along-track error and speed at closest approach to
+   `eval_contact.py`; record the **fairness commitment** before any composition claim (the
+   list of things the option policy gets and a flat baseline would not is now eight items).
+   `ruff` is still not installed in `tsmc`, so `CLAUDE.md`'s lint gate cannot be run.
+
+10. **Known-and-unfixed, both measured over 400 resets:** push's active finger spawns at the
+    exact face CENTRE (max along-face offset 0.0000cm) against the memo's "random point
+    along the face, corners excluded"; the retracted finger's surface gap is 0.7-12.9cm
+    (median 7.4) against a spec of 4-8cm. Also deferred: **object-frame observations plus a
+    matching action frame** — fingertip positions are object-relative but world-oriented
+    while wall distances are already object-frame, so the observation is internally
+    inconsistent. It strands every checkpoint and must move obs and actions together.
+
+11. **Curriculum stays off** until it has its own sweep. The ramp caps goal RADIUS and
+    cross-room goals are geometrically >=~15cm, so its low levels are unsatisfiable
+    cross-room (measured: a 10.1cm cap drew a 24.6cm median).
+
+## Historical — v28/v29/v30, all superseded by the entries above
+
+Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bearing:
+
+- **v28 (job 42248679):** push 0.21 -> **0.739** on 60 episodes, distance cliff gone
+  (12+cm 0.00 -> 0.44). Attribution: removing the friction cone **-0.46**, critic clip
+  **-0.03**, 3cm goal floor **0.00**.
+- **v29 (job 42300917):** four of five scaffolds free; the action interface is the whole
+  story. `nogapassist` 0.822 (+0.083 paired, p=0.017, but `model_best` inverts it),
+  `physdamp` 0.789, `unmask` 0.756, `full` 0.739, `randtheta` 0.694, `rawact` 0.217.
+  **The floor exists:** untrained `contact_frame` 0.150 all / **0.000 on goals >=3cm**, so
+  **>=3cm is the primary metric**. `bigroom` is unscoreable on a shared benchmark ever —
+  SB3's `check_for_correct_spaces` compares the goal `Box` bounds.
+- **v30:** the portal/room-size sweep was **CUT before it ran** (18 cells, 144 GPU-h) — the
+  cross-room sampler requires the goal ray to pass through the portal, so a straight path
+  exists in 93-100% of episodes even at a 6.5cm gap. The live axis was GOAL DIVERSITY: cone
+  30 -> 90 -> 180 takes `nogapassist` 0.822 -> 0.767 -> 0.561. **A derivation of mine was
+  WRONG here** — I predicted a 0.483 ceiling from "behind the face is unreachable" and
+  policies scored 0.507-0.514, because a finger sliding ALONG a face can round a corner
+  without tripping the 4cm guard. That fact is now load-bearing for Immediate #2.
 
 ## Housekeeping — storage and visualization (v24, tooling built)
 

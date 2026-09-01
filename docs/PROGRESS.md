@@ -2007,3 +2007,154 @@ distance together and is uninterpretable as a single factor.
 **Gates:** static 26/26, geometry 27/27, contact 60/60, test_option_graph 172/172,
 fixture_eval 18/18. New: `tools/score_v29_bc.py`, `tools/summarize_v29.py`,
 `tools/make_untrained_ckpt.py`, `slurm/score_v29_bc.sh`.
+
+## v31 — the push/recontact spec: target sets, mode guards, HER pool filtering (2026-08-28)
+
+**Question.** An audit of the code against the memo's own definitions of push and
+recontact: does what we train match what the graph needs? Nine things did not. This
+entry records the eight that were fixed and the one that was deliberately deferred.
+
+**Found by auditing, confirmed by measuring:**
+
+1. `portal_arrival` was DEAD in exactly the configuration that sets it. `ContactEnv.step`
+   built `theta_kw` with the portal interface and then REASSIGNED the dict inside the
+   `pose_goal` branch, dropping `iface`. Measured: set on 30/30 resets, discarded on all
+   30. `_her_arrived` never consulted it either. The portal-region contrast would have run
+   as *pose only, twice* — the v16 dropped-variable failure, third occurrence.
+2. **A 10x6 object passes a 10cm portal at only 31.2% of orientations.** The admissible
+   band is |theta| <= 28.1deg (worst-case y-extent 11.66cm at 59deg). So a portal goal with
+   a freely-drawn orientation is ~69% geometrically impossible — a ceiling no training run
+   can move. Both ends of a crossing edge are now drawn from the band; that is edge
+   FEASIBILITY (sec 6.4), a graph property, not something a policy should discover.
+   Verified 300/300 portal goals fit; with the band removed, 73/120.
+3. `push_guard` never checked the contact FACE, though Eq 7 makes it an edge parameter and
+   xi shows it to the policy. A finger that rounds a corner onto another face still passed
+   "is touching" — the option violates its own edge and is scored a success. This is also
+   the mechanism behind v30's reachability surprise (predicted ceiling 0.483, measured
+   0.507-0.514).
+4. `recontact_guard` enforced NOTHING about contact mode — only `off_board`/`force_limit`.
+   Pivot and pinch had no guard at all.
+5. `_face_idx` was never set for push, so xi's face block was the constant 0 on every push
+   episode.
+6. Interfaces were 4/2/8 fixed points, not the target SET sec 6.1 asks for.
+7. Push's active finger spawned at the exact face CENTRE every time — measured max
+   along-face offset 0.0000cm over 400 resets, against a spec of "a random point along the
+   face". (Not yet fixed; see below.)
+8. The retracted finger's surface gap ran 0.7-12.9cm (median 7.4) against a spec of 4-8cm.
+   (Not yet fixed.)
+
+**HER goal-pool filtering — the change with the best measured payoff.** `her_settled`
+applies the settle requirement to the SCORED PAIR: draw a goal, then reject it. At the
+measured settle rate that discards most of every batch. `her_valid_filter` applies the same
+constraint to the CANDIDATE POOL: only draw from settled, guard-valid ticks. Measured on
+the spec config: **16.3% of ticks are settled+guard-valid, but 74.5% of future windows
+contain at least one** — 4.6x the retained signal for the same constraint, and no batch-size
+cost at all. A window with none falls back to no relabel; reaching backwards for a valid
+tick would break the future-causality HER relies on. It also aligns HER's implicit goal
+distribution with the option's real target set: places the object came to rest, reached
+without breaking the contact mode.
+
+**Design finding, recorded because it constrains the architecture.** "Parameterize the
+policy by its init and terminal node" cannot be done the obvious way. Eq 18 splits
+`pi(a | o(s), rho(g), xi)`; the terminal node is what `rho(g)` MEANS, and HER rewrites
+`rho(g)` within an episode. A target-node label in xi would disagree with the goal on ~80%
+of every relabeled batch — the v18 bug, in the one block that is supposed to be immune to
+it. So xi carries the SOURCE node's interface class and the edge's face/finger/template;
+the terminal node lives in the goal, where HER can rewrite it consistently.
+
+**Measured before launch, so they are not open questions.** Spawning into pinch/pivot does
+NOT kick the object: 0.0000cm of object motion on the first tick, max over 400 resets.
+Contact flags read 0 at reset for EVERY mode including push — pymunk populates them only
+after a step, which had already produced one false alarm this project.
+
+**Deferred, deliberately.** Fingertip positions are object-RELATIVE but world-ORIENTED,
+while `_wall_distances` already ray-casts along the object's own axes: the observation is
+internally inconsistent, and rotation equivariance has to be learned from data. Fixing it
+must move the ACTION frame too (object-frame observations with world-frame raw actions make
+the policy undo a rotation it was never told about), and it strands every checkpoint. Its
+own change. Also deferred: a brake action — the finger servo already brakes at a=0, but
+note that under `contact_frame`, `push = 0.5*(a+1)`, so "stop pushing" sits at a=-1, the
+edge of the range where a tanh-squashed Gaussian has vanishing density. That is a real cost
+specific to `require_settled`; measure before adding a dimension.
+
+**Gate.** `contact` 113 -> 132 checks. Four mutation tests, each producing a clean,
+informative failure: pinch drawn as a torque couple, HER ignoring the valid mask, portal
+orientation unconstrained (120 -> 73/120 fitting), guard dropping the face check.
+
+**Submitted** as jobs `42617855` (push spec) and `42617867` (recontact), 2026-08-28 16:05.
+
+---
+
+## v31 RESULTS — the bundle went to zero; the control is the only thing that worked (2026-08-29)
+
+Both sweeps COMPLETED, 18 cells, ~126 GPU-hours. Final / best / last-25% mean, from each
+cell's own 16-episode diag eval (NOT the stratified benchmark — enough to read 0.000, not
+enough for an arm comparison):
+
+```
+job 42617855  push spec  1.2M, 8.0-9.4h/cell
+  spec          s0 0.000/0.062/0.002   s1 0.000/0.062/0.005   s2 0.000/0.000/0.000
+  spec_raw      s0 0.000/0.062/0.001   s1 0.000/0.062/0.000   s2 0.000/0.000/0.000
+  spec_settled  s0 0.000/0.062/0.003   s1 0.000/0.062/0.002   s2 0.062/0.125/0.007
+
+job 42617867  recontact  1.0M, 6.3-7.1h/cell
+  recon_base    s0 0.938/1.000/0.906   s1 1.000/1.000/0.941   s2 0.875/1.000/0.935
+  recon_goal    s0 0.000/0.062/0.003   s1 0.000/0.062/0.001   s2 0.000/0.125/0.005
+  recon_full    s0 0.000/0.125/0.020   s1 0.000/0.188/0.051   s2 0.000/0.125/0.012
+```
+
+**The one positive result.** `recon_base` at 0.906-0.941 on 3/3 seeds is the rerun
+`docs/TODO.md` had asked for since v23. It confirms recontact survived every interface and
+slip change since, and it is the only v31 number comparable to history.
+
+**Push diagnosis, tick-traced on `spec_s0` over 60 episodes.**
+
+```
+terminations   wrong_face 43/60 (72%)  forbidden 9  contact_lost 4  horizon 3  arrived 1
+median episode length 12 ticks   (66 with the guard off)
+counterfactual replay, SAME checkpoint:
+  guard_face=TRUE   1/60   median closest approach 6.38cm
+  guard_face=FALSE  2/60   median closest approach 4.84cm
+  + no theta req    3/60   median closest approach 4.84cm
+```
+
+`wrong_face` terminated 72% of episodes at 12 ticks, which is the most likely reason nothing
+learned. **But that is INFERRED:** turning the guard off recovers almost nothing on an
+already-broken policy, so the replay bounds the SCORING artifact, not the TRAINING one. The
+clean test is one retrain with `guard_face=false`.
+
+The guard was correct on its own terms — Eq 7 makes the contact face an edge parameter, so a
+finger on another face has left the edge. What it missed is that **v30 had already measured
+the forbidden behaviour being used**: policies scored 0.507-0.514 where a "behind the face is
+unreachable" derivation predicted 0.483, precisely because a finger sliding ALONG a face
+rounds a corner without tripping the 4cm `contact_lost` guard.
+
+**The preregistered worry was wrong about which term failed.** The concern was orientation
+(push rotates a 1.8deg median, and the goal window was +/-45deg). Measured: 34/60 episodes
+reach |dtheta| <= 22.5deg at some tick; only **1/60** ever reach position < 0.4cm; removing
+the orientation requirement entirely moves success 2/60 -> 3/60. This is failure family 2
+(never got close), not family 3 (arrives, no settle).
+
+**Recontact-Gamma diagnosis, `recon_goal_s0` over 60 episodes.** Terminations are `horizon`
+47 and `object_disturbed` 13, so the new `object_still` guard is NOT the cause. The 4-way
+conjunction is what never fires: L within its 0.3cm anchor tolerance **1/60**, R within
+2.0cm **2/60**, both touch flags matching **4/60**. HER relabels the whole 6-vector, so
+relabeled goals are achieved by construction — which is exactly why the buffer looked
+healthy while the real task stayed unreachable. Note the horizon is 100 ticks, sized when
+ONE fingertip had to be placed; two now do.
+
+**The methodological result, and it is the important one.** Every v31 change was
+individually justified by a measurement and the gate grew 60 -> 132 checks with four
+mutation tests. The bundle still went to zero on 9 of 9 push cells, and a 3-arm design
+cannot attribute across ~8 factors. This is `hardmode`'s v29 mistake repeated at larger
+scale, two screens below where that mistake is written down. **A justified change is not a
+free change; count factors against arms before launching.**
+
+**Next.** Bisect, do not re-run: `lean` + `guard_face` alone, 3 seeds, is the cheapest
+informative cell. Then decide whether `wrong_face` should terminate at all or only penalize.
+For recontact, raise the horizon and/or relax the anchor tolerance before spending more
+budget. Regenerate the untrained floor for both new goal spaces — nothing here is anchored.
+
+**Also this round:** v30 `lean` (job 42569985) was cancelled at ~600k of 1.2M on all 6
+cells. The 400k snapshots survived, so the budget-matched comparison against v29 that the
+sweep was designed for is still recoverable; the 1.2M endpoint is not.

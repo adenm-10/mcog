@@ -23,18 +23,22 @@ except ModuleNotFoundError as e:  # pragma: no cover
     ) from e
 
 from domains.contact.board import Board
-from domains.contact.physics import Physics
-from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+from domains.contact.physics import (OBS_DIM, Physics, goal_derived_slice,
+                                     obs_dim)
+from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_XY,
+                                               IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
                                                IDX_PEAK_FORCE, SLIP_MODELS,
                                                ContactFrameCommand,
                                                PlanarFingertipParams, Portal,
                                                face_frame)
-from domains.contact.reward import RewardWeights, arrived_loose, goal_dist, step_reward
-from domains.contact_templates import (RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
-                                       object_settled)
+from domains.contact.reward import (RewardWeights, arrived_loose, goal_dist,
+                                    pose_arrived, step_reward)
+from domains.contact_templates import (GAMMA_CLASSES,
+                                       RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
+                                       interface_targets, n_variants,
+                                       object_settled, sample_interface)
 
-OBS_DIM = 17             # Physics.obs()'s fixed shape (object-centric state + rel_target)
 _WALL_MARGIN_CM = 6.0    # > the object's half-diagonal (~5.8cm) plus a margin
 _OBS_BOUND = 500.0       # generous, non-tight Box bound; SAC does not clip against it
 _DISENGAGED_REACH_MULT = 2.0  # upper end of the disengaged-finger sampling range
@@ -74,6 +78,25 @@ class ContactEnv(gym.Env):
                 min_progress_cm: Optional[float] = None,
                 min_progress_ticks: Optional[int] = None,
                 require_settled: bool = True,
+                her_settled: bool = False,
+                theta_tol_deg: Optional[float] = None,
+                theta_goal_window_deg: Optional[float] = None,
+                portal_arrival: bool = False,
+                push_range_max_cm: Optional[float] = None,
+                curriculum_levels: Optional[int] = None,
+                curriculum_start_cm: Optional[float] = None,
+                gamma_goal: bool = False,
+                goal_gamma_modes: Optional[tuple] = None,
+                init_gamma_modes: Optional[tuple] = None,
+                rich_obs: bool = False,
+                guard_face: bool = False,
+                guard_object_still: bool = False,
+                portal_goal: bool = False,
+                portal_depth_cm: float = 2.0,
+                portal_clearance_cm: float = 0.5,
+                continuous_gamma: bool = False,
+                her_valid_filter: bool = False,
+                gamma_min_sep_cm: float = 2.0,
                 same_room_goal_prob: float = 0.0,
                 push_cone_deg: Optional[float] = None,
                 push_range_min_cm: Optional[float] = None,
@@ -117,6 +140,124 @@ class ContactEnv(gym.Env):
         # Push only: False swaps reached_interface for reached_position in
         # step(), matching compute_reward, which is already position-only.
         self.require_settled = bool(require_settled)
+        # PUSH ONLY, and a measured tradeoff rather than a correctness fix.
+        # Eq 13 puts ||v_obj|| <= eps_v in the target set, and `require_settled`
+        # already enforces it on the REAL reward. This flag decides whether an
+        # HER-RELABELED transition must also be settled. Leaving it off is
+        # inconsistent -- a relabeled pair scored "arrived" on position alone
+        # gets marked terminal (her_buffer fix 1) even though the real env would
+        # not have terminated -- so the critic learns an optimistic termination.
+        # Turning it on costs signal, and the cost is large: measured on two
+        # v29 checkpoints (tools/probe_p0_readiness.py settling), only 6% of
+        # push ticks pass object_settled, because a policy that is pushing keeps
+        # the object MOVING. HER positives fall 51-61% -> 5-8%, retaining
+        # 10-13%. So this is an ARM, not a default. Recontact is unaffected: it
+        # has always ANDed in `settled` (its object is supposed to stay still).
+        self.her_settled = bool(her_settled)
+        # PUSH ONLY. Eq 13's orientation bin Theta_j'. None (default) keeps the
+        # 2-D position goal and is bit-identical to every run so far -- which
+        # matters beyond tidiness: SB3 bakes the goal Box into the checkpoint,
+        # so an unconditional widening would strand every archived policy.
+        # Set it and the goal becomes a POSE (x, y, cos, sin), obs() grows a
+        # relative-heading pair, and arrival needs both position and bin.
+        self.theta_tol_deg = None if theta_tol_deg is None else float(theta_tol_deg)
+        self.pose_goal = self.theta_tol_deg is not None
+        if self.pose_goal and template != "push":
+            raise ValueError("theta_tol_deg is push-only: recontact's goal is a "
+                             "fingertip position in the OBJECT's frame, so the "
+                             "object's own heading is an input, not a target")
+        # Half-width (deg) of the window the goal heading is drawn from, around
+        # the object's own starting heading. MEASURED CONSTRAINT: push produces a
+        # median 1.8deg and p90 7.0deg of object rotation over a whole episode
+        # (tools/probe_p0_readiness.py orientation), so a window drawn uniformly
+        # over +/-180deg would be reachable in roughly 16% of episodes. None ->
+        # reuse theta_tol_deg, i.e. the loosest window that is always feasible.
+        self.theta_goal_window_deg = (None if theta_goal_window_deg is None
+                                      else float(theta_goal_window_deg))
+        # PUSH ONLY. Eq 13's target set for a CROSSING edge is the portal
+        # interface P_{i->r}, not a point: "a portal is passed through, not
+        # stopped at". True routes cross-room arrival through push_arrival's
+        # `iface` branch, which push_arrival has always accepted and nothing has
+        # ever passed. Same-room edges keep the point target either way, which
+        # is what "specific pose in the current region" means.
+        # NOTE the deliberate asymmetry: HER keeps scoring relabeled pairs on
+        # the POINT goal, because a portal set cannot be relabeled to from an
+        # achieved state. HER shapes exploration; the real reward defines
+        # success. Eval must use the real one.
+        self.portal_arrival = bool(portal_arrival)
+        self._goal_iface = None
+        # Eq 15's curriculum: I^(1) subset ... subset I_e, expanding BACKWARD
+        # from the target. Implemented on the goal RANGE, which is the axis the
+        # initiation set actually varies along here. None -> off, bit-identical.
+        # Levels advance on held-out success (Alg 1 line 13), so the reset
+        # distribution is TIME-VARYING and differs per seed -- the schedule is
+        # logged per cell or none of it is interpretable.
+        self.push_range_max_cm = (None if push_range_max_cm is None
+                                  else float(push_range_max_cm))
+        self.curriculum_levels = (None if curriculum_levels is None
+                                  else int(curriculum_levels))
+        self._curr_level = 0
+        # Low end of the ramp. MUST be >= the edge's geometric minimum or the
+        # cap is unsatisfiable and every draw falls through to an uncapped one.
+        # Measured 2026-08-28: cross-room goals are >= ~15cm because the object
+        # has to reach the other room, so a level-0 cap of 10.1cm derived from
+        # push_range_min_cm leaked totally (24.6cm median against a 10.1 cap).
+        # There is no safe universal default, so it is set per task.
+        self.curriculum_start_cm = (None if curriculum_start_cm is None
+                                    else float(curriculum_start_cm))
+        # Counts draws that could not honour the cap, so a leak is VISIBLE in
+        # info rather than silently making the curriculum a no-op.
+        self.curriculum_leaks = 0
+        self.curriculum_draws = 0
+        # RECONTACT ONLY. False (default) keeps the single-finger 2-D goal and is
+        # bit-identical, which also keeps the v23 checkpoints loadable. True
+        # makes the goal Eq 13's canonical interface: BOTH fingertip targets in
+        # the object's frame plus the desired touching flag for each (6-D). The
+        # object's pose is deliberately not in it -- recontact must not move it.
+        self.gamma_goal = bool(gamma_goal)
+        if self.gamma_goal and template != "recontact":
+            raise ValueError("gamma_goal is recontact-only: it is the template "
+                             "whose target set IS another template's initiation set")
+        self.goal_gamma_modes = tuple(goal_gamma_modes or GAMMA_CLASSES)
+        # Which interface the fingers START in. 'free' = both disengaged, the
+        # historical behaviour. Including the contact classes is what lets
+        # recontact represent a GRASP-TO-GRASP transition, which composition
+        # needs (push -> recontact -> pinch starts holding a push contact).
+        self.init_gamma_modes = tuple(init_gamma_modes or ("free",))
+        for g in self.goal_gamma_modes:
+            if g not in GAMMA_CLASSES:
+                raise ValueError(f"goal_gamma_modes: unknown class {g!r}")
+        for g in self.init_gamma_modes:
+            if g != "free" and g not in GAMMA_CLASSES:
+                raise ValueError(f"init_gamma_modes: unknown class {g!r}")
+        self.rich_obs = bool(rich_obs)
+        # The guard is what enforces the CONTACT MODE (the memo's Gamma_l). Both
+        # default off so every archived run replays unchanged.
+        #   guard_face: push's contact face is an edge parameter, so a finger
+        #     that walks onto another face has left the edge, not just drifted.
+        #   guard_object_still: recontact's standing invariant. Promoting it out
+        #     of the arrival test also makes it visible to the HER validity
+        #     filter, which is the point.
+        self.guard_face = bool(guard_face)
+        self.guard_object_still = bool(guard_object_still)
+        if self.guard_object_still and template != "recontact":
+            raise ValueError("guard_object_still is recontact-only: push exists "
+                             "precisely to move the object")
+        self.portal_goal = bool(portal_goal)
+        if self.portal_goal and template != "push":
+            raise ValueError("portal_goal is push-only")
+        self.portal_depth_cm = float(portal_depth_cm)
+        self.portal_clearance_cm = float(portal_clearance_cm)
+        self.continuous_gamma = bool(continuous_gamma)
+        # Restrict which ticks HER may relabel TO: settled and guard-valid only.
+        # Cheaper than her_settled and strictly better -- see her_buffer.
+        self.her_valid_filter = bool(her_valid_filter)
+        self.gamma_min_sep_cm = float(gamma_min_sep_cm)
+        self._gamma = None          # (class, variant) of the TARGET interface
+        self._gamma_tol = None      # per-finger tolerance, from the table
+        self._face_idx = 0          # xi's "which face"
+        self._init_gamma = "push" if template == "push" else "free"
+
         # Push only: half-angle (deg) of the cone around the contact face's own
         # push direction that the goal is drawn from. None keeps the historical
         # sampler, bug included, so it stays a faithful control -- see
@@ -212,13 +353,23 @@ class ContactEnv(gym.Env):
         if template == "push":
             g_lo = np.zeros(2, dtype=np.float32)
             g_hi = np.array([self.params.board_w_cm, self.params.board_h_cm], dtype=np.float32)
+            if self.pose_goal:
+                # heading carried as a unit vector, so every HER relabel (which
+                # copies an ACHIEVED heading) lands on the manifold by
+                # construction and there is no +/-pi seam to wrap.
+                g_lo = np.concatenate([g_lo, np.full(2, -1.0, dtype=np.float32)])
+                g_hi = np.concatenate([g_hi, np.full(2, 1.0, dtype=np.float32)])
         else:
             # recontact's goal is object-frame (see _achieved_xy), so the board
             # does not bound it; reuse "observation"'s non-tight bound.
-            g_lo = np.full(2, -_OBS_BOUND, dtype=np.float32)
-            g_hi = np.full(2, _OBS_BOUND, dtype=np.float32)
+            n_g = 6 if self.gamma_goal else 2
+            g_lo = np.full(n_g, -_OBS_BOUND, dtype=np.float32)
+            g_hi = np.full(n_g, _OBS_BOUND, dtype=np.float32)
         self.observation_space = spaces.Dict(dict(
-            observation=spaces.Box(-_OBS_BOUND, _OBS_BOUND, shape=(OBS_DIM,), dtype=np.float32),
+            observation=spaces.Box(
+                -_OBS_BOUND, _OBS_BOUND,
+                shape=(obs_dim(self.pose_goal, self.rich_obs, template,
+                               self.gamma_goal),), dtype=np.float32),
             achieved_goal=spaces.Box(g_lo, g_hi, dtype=np.float32),
             desired_goal=spaces.Box(g_lo, g_hi, dtype=np.float32)))
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self._physics.control_dim,),
@@ -295,8 +446,10 @@ class ContactEnv(gym.Env):
     _FACE_NORMALS = {"east": (1.0, 0.0), "west": (-1.0, 0.0),
                      "north": (0.0, 1.0), "south": (0.0, -1.0)}
     _FACES = ("west", "east", "north", "south")
+    # contact_templates.nearest_face's indexing: 0=+x 1=-x 2=+y 3=-y.
+    _FACE_IDX = {"east": 0, "west": 1, "north": 2, "south": 3}
 
-    def _place_object_for_push(self, src, face, active, inactive):
+    def _place_object_for_push(self, src, face, active, inactive, theta_half=None):
         """Given a contact face, sample the object's position (keeping the
         finger's offset clear of the wall) and place both fingers. Shared by
         _sample_push_edge's two branches, which pick `face` in different
@@ -309,9 +462,18 @@ class ContactEnv(gym.Env):
         }[face]
         # One draw either way, in the same order, so the None path stays
         # bit-identical -- the discipline used for disengaged_away_deg.
-        theta = 0.0 if self.object_theta_spread_deg is None else math.radians(
-            float(self._rng.uniform(-float(self.object_theta_spread_deg),
-                                    float(self.object_theta_spread_deg))))
+        # theta_half (rad) overrides the configured spread: a CROSSING edge can
+        # only start at an orientation the portal will admit, so the initiation
+        # set is narrower there. That is edge feasibility (sec 6.4), not a
+        # convenience -- a start outside the band cannot succeed at any skill.
+        if theta_half is not None:
+            theta = float(self._rng.uniform(-theta_half, theta_half))
+        elif self.object_theta_spread_deg is None:
+            theta = 0.0
+        else:
+            theta = math.radians(
+                float(self._rng.uniform(-float(self.object_theta_spread_deg),
+                                        float(self.object_theta_spread_deg))))
         # `face` names a face of the OBJECT, so both the finger's offset and the
         # face normal live in the object's frame and rotate with it. The object's
         # rotated bounding box reaches at most its half-diagonal, which is inside
@@ -331,7 +493,42 @@ class ContactEnv(gym.Env):
         inactive_xy = self._sample_disengaged_point((x0, y0), away_from=face_normal)
         obj_state = self._place_finger(obj_state, inactive, inactive_xy)
         self._last_face_normal = face_normal
+        self._face_idx = self._FACE_IDX[face]
         return obj_state
+
+    def _portal_theta_half(self, portal) -> Optional[float]:
+        """Half-width (rad) of the orientation band an object can pass `portal` at.
+
+        The object's extent across the gap is ow*|sin t| + oh*|cos t|
+        = R*sin(t + phi), so the admissible band around t=0 closes at
+        asin(G/R) - phi. MEASURED for the locked 10x6 object and 10cm gap:
+        28.1deg, i.e. 31% of orientations -- the rest cannot pass at ANY skill
+        level, which is why the sampler must respect this rather than let the
+        policy discover it.
+        """
+        ow, oh = self.params.object_w_cm, self.params.object_h_cm
+        gap = float(portal.y_hi - portal.y_lo) - self.portal_clearance_cm
+        r = float(np.hypot(ow, oh))
+        if gap >= r:
+            return math.pi / 2.0
+        if gap <= oh:
+            raise ValueError(
+                f"portal gap {gap:.2f}cm admits no orientation of a "
+                f"{ow}x{oh}cm object (needs > {oh}cm)")
+        return math.asin(gap / r) - math.atan2(oh, ow)
+
+    def _sample_portal_pose(self, portal, theta_lo, theta_hi):
+        """A POSE drawn uniformly from the portal region: heading inside the
+        admissible band, then the y-interval that heading still fits in."""
+        ow, oh = self.params.object_w_cm, self.params.object_h_cm
+        th = float(self._rng.uniform(theta_lo, theta_hi))
+        ext = ow * abs(math.sin(th)) + oh * abs(math.cos(th))
+        lo = portal.y_lo + ext / 2.0 + self.portal_clearance_cm / 2.0
+        hi = portal.y_hi - ext / 2.0 - self.portal_clearance_cm / 2.0
+        y = 0.5 * (lo + hi) if lo >= hi else float(self._rng.uniform(lo, hi))
+        x = float(portal.x + self._rng.uniform(-self.portal_depth_cm,
+                                               self.portal_depth_cm))
+        return np.array([x, y, math.cos(th), math.sin(th)], dtype=np.float32)
 
     def _ray_interval_in_room(self, room: int, p, u):
         """t-interval (t >= 0) over which `p + t*u` stays inside `room`'s
@@ -362,6 +559,11 @@ class ContactEnv(gym.Env):
             if iv is None:
                 continue
             lo, hi = iv
+            cap = self._range_cap()
+            if cap is not None:
+                hi = min(hi, float(cap))
+                if hi <= 0.0:
+                    continue
             lo = max(lo, min(self.arrival_eps, hi))  # never start already arrived
             if self.push_range_min_cm is not None:
                 # Reject rather than clamp: clamping would pile goals onto `hi`
@@ -401,6 +603,24 @@ class ContactEnv(gym.Env):
         else:
             face = str(self._rng.choice(self._FACES))
             portal = None
+        self._goal_iface = portal if self.portal_arrival else None
+
+        if portal is not None and self.portal_goal:
+            # A CROSSING edge's goal is a pose drawn from the portal region, and
+            # the start is drawn from the same admissible band -- otherwise the
+            # object physically cannot pass and no amount of training helps.
+            half = self._portal_theta_half(portal)
+            obj_state = self._place_object_for_push(src, face, active, inactive,
+                                                    theta_half=half)
+            th0 = float(np.arctan2(obj_state[IDX_OBJ_HEADING][1],
+                                   obj_state[IDX_OBJ_HEADING][0]))
+            w = math.radians(self.theta_goal_window_deg
+                             if self.theta_goal_window_deg is not None
+                             else (self.theta_tol_deg or 0.0))
+            goal = self._sample_portal_pose(portal, max(-half, th0 - w),
+                                            min(half, th0 + w))
+            return obj_state, goal
+
         obj_state = self._place_object_for_push(src, face, active, inactive)
         # _place_object_for_push may have rotated the object, so take the face's
         # normal from there rather than from the axis-aligned table.
@@ -413,12 +633,30 @@ class ContactEnv(gym.Env):
             # too -- otherwise it leaks back exactly the near-zero goals the
             # floor exists to remove (measured 3.7% at a 3cm floor). With no
             # floor this draws once and breaks, bit-identical to before.
+            # The cap has to bind here too. Measured 2026-08-28: without this
+            # the curriculum leaked completely cross-room -- level 0 capped at
+            # 10.1cm still drew a 24.6cm median and a 35.7cm max, because the
+            # coned ray must ALSO pass the portal, so it fails often and every
+            # failure fell through to an uncapped uniform draw. Same shape as
+            # push_range_min_cm's original 3.7% leak, but total rather than
+            # marginal, because cross-room fallback is the common path.
+            cap = self._range_cap()
+            self.curriculum_draws += 1
+            ok = False
             for _ in range(64):
                 goal_xy = self._sample_room_xy(dst)
-                if self.push_range_min_cm is None or float(np.hypot(
-                        goal_xy[0] - obj_xy[0],
-                        goal_xy[1] - obj_xy[1])) >= float(self.push_range_min_cm):
-                    break
+                r = float(np.hypot(goal_xy[0] - obj_xy[0], goal_xy[1] - obj_xy[1]))
+                if self.push_range_min_cm is not None and r < float(self.push_range_min_cm):
+                    continue
+                if cap is not None and r > float(cap):
+                    continue
+                ok = True
+                break
+            if not ok and cap is not None:
+                # Unsatisfiable at this level -- the edge's geometry floors the
+                # distance above the cap. Record it; a nonzero rate means the
+                # ramp's low end is set below what the task can produce.
+                self.curriculum_leaks += 1
         return obj_state, goal_xy
 
     def _sample_push_edge(self):
@@ -477,9 +715,15 @@ class ContactEnv(gym.Env):
         return obj_state, goal_xy
 
     def _sample_recontact_task(self):
-        """Single open region: the object sits still at a random orientation
-        while one random finger travels to a new contact point on its perimeter.
-        Both fingers start disengaged, independently sampled."""
+        """Object still at a random orientation; the fingers must reach a
+        canonical interface.
+
+        gamma_goal=False is the historical single-finger task, unchanged. True
+        draws the TARGET interface from goal_gamma_modes and the STARTING one
+        from init_gamma_modes -- including the contact classes, so recontact can
+        represent a grasp-to-grasp transition rather than only acquisition from
+        free space.
+        """
         ow, oh = self.params.object_w_cm, self.params.object_h_cm
         ox, oy = self.params.board_w_cm / 2.0, self.params.board_h_cm / 2.0
         theta = float(self._rng.uniform(0.0, 2.0 * np.pi))
@@ -487,20 +731,82 @@ class ContactEnv(gym.Env):
 
         active = "L" if self._rng.randint(2) == 0 else "R"
         self._active_finger = active
-
-        # A point just outside a random face, in the object's own frame, so it
-        # holds for the whole episode and is never rotated to world.
+        # Two different offsets: a finger the goal says must TOUCH has to sit at
+        # contact distance (radius minus a hair, push's own spawn convention),
+        # while the historical single-finger target sits just outside.
+        contact_clear = self.params.finger_radius_cm - 0.02
         clearance = self.params.finger_radius_cm + 0.3
-        face = int(self._rng.randint(4))
-        along = float(self._rng.uniform(-1.0, 1.0))
-        half_w, half_h = ow / 2.0 + clearance, oh / 2.0 + clearance
-        target = {0: (half_w, along * oh / 2.0), 1: (-half_w, along * oh / 2.0),
-                 2: (along * ow / 2.0, half_h), 3: (along * ow / 2.0, -half_h)}[face]
 
-        for side in ("L", "R"):
-            obj_state = self._place_finger(obj_state, side,
-                                           self._sample_disengaged_point((ox, oy)))
-        return obj_state, target
+        if not self.gamma_goal:
+            face = int(self._rng.randint(4))
+            self._face_idx = face
+            along = float(self._rng.uniform(-1.0, 1.0))
+            half_w, half_h = ow / 2.0 + clearance, oh / 2.0 + clearance
+            target = {0: (half_w, along * oh / 2.0), 1: (-half_w, along * oh / 2.0),
+                     2: (along * ow / 2.0, half_h), 3: (along * ow / 2.0, -half_h)}[face]
+            for side in ("L", "R"):
+                obj_state = self._place_finger(obj_state, side,
+                                               self._sample_disengaged_point((ox, oy)))
+            return obj_state, target
+
+        gamma = str(self._rng.choice(self.goal_gamma_modes))
+        if self.continuous_gamma:
+            tgt, touch, tol, face = sample_interface(gamma, active, ow, oh,
+                                                     contact_clear, self._rng)
+            self._gamma, self._face_idx = (gamma, -1), face
+        else:
+            variant = int(self._rng.randint(n_variants(gamma)))
+            self._gamma = (gamma, variant)
+            self._face_idx = variant % 4
+            tgt, touch, tol = interface_targets(gamma, variant, active, ow, oh,
+                                                contact_clear)
+        self._gamma_tol = tol
+
+        init = str(self._rng.choice(self.init_gamma_modes))
+        self._init_gamma = init
+        if init == "free":
+            for side in ("L", "R"):
+                obj_state = self._place_finger(obj_state, side,
+                                               self._sample_disengaged_point((ox, oy)))
+        elif self.continuous_gamma:
+            # Start IN an interface, drawn continuously from that class. Redraw
+            # until it is far enough from the goal: with continuous placement an
+            # exact match has measure zero, but a NEAR match is common and is a
+            # free win -- the failure push_range_min_cm exists to remove.
+            for _ in range(32):
+                itgt, _it, _ito, _if = sample_interface(init, active, ow, oh,
+                                                        contact_clear, self._rng)
+                sep = max(float(np.hypot(itgt[s][0] - tgt[s][0],
+                                         itgt[s][1] - tgt[s][1]))
+                          for s in ("L", "R"))
+                if sep >= self.gamma_min_sep_cm:
+                    break
+            for side in ("L", "R"):
+                obj_state = self._place_finger(
+                    obj_state, side, self._object_to_world(obj_state, itgt[side]))
+        else:
+            # A start equal to the goal would be a free win, so redraw the
+            # variant until it differs.
+            iv = int(self._rng.randint(n_variants(init)))
+            if init == gamma and iv == variant:
+                iv = (iv + 1) % n_variants(init)
+            itgt, _it, _ito = interface_targets(init, iv, active, ow, oh,
+                                                contact_clear)
+            for side in ("L", "R"):
+                obj_state = self._place_finger(
+                    obj_state, side, self._object_to_world(obj_state, itgt[side]))
+
+        goal = np.array([*tgt["L"], *tgt["R"],
+                         1.0 if touch["L"] else 0.0,
+                         1.0 if touch["R"] else 0.0], dtype=np.float32)
+        return obj_state, goal
+
+    def _object_to_world(self, x, obj_xy):
+        theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
+        c, sn = float(np.cos(theta)), float(np.sin(theta))
+        p = np.asarray(obj_xy, dtype=np.float32)
+        return (float(x[IDX_OBJ_XY][0] + c * p[0] - sn * p[1]),
+                float(x[IDX_OBJ_XY][1] + sn * p[0] + c * p[1]))
 
     # --- observation / reward -------------------------------------------------
     def _world_to_object_frame(self, x, world_xy) -> np.ndarray:
@@ -509,15 +815,116 @@ class ContactEnv(gym.Env):
         rel = np.asarray(world_xy, dtype=np.float32) - x[IDX_OBJ_XY]
         return np.array([c * rel[0] + s * rel[1], -s * rel[0] + c * rel[1]], dtype=np.float32)
 
+    def set_curriculum_level(self, level: int) -> None:
+        """Advance Eq 15's ramp. Called by the eval callback, not by step()."""
+        if self.curriculum_levels is not None:
+            self._curr_level = int(np.clip(level, 0, self.curriculum_levels - 1))
+
+    def _range_cap(self):
+        """Upper bound on the coned goal's radius at the current level.
+
+        Level 0 starts near the target end of the range and the cap expands to
+        push_range_max_cm (or unbounded) at the last level -- Eq 15's "starting
+        near the portal and expanding backward into the source region".
+        """
+        if self.curriculum_levels is None:
+            return self.push_range_max_cm
+        lo = (self.curriculum_start_cm if self.curriculum_start_cm is not None
+              else float(self.push_range_min_cm or 0.0) + self.arrival_eps)
+        hi = self.push_range_max_cm
+        frac = (self._curr_level + 1) / float(self.curriculum_levels)
+        if hi is None:
+            # unbounded top end: ramp a multiple of the near end instead
+            return lo * (1.0 + frac * 24.0)
+        return lo + frac * (hi - lo)
+
+    _GAMMA_IDX = {"free": 0, "push": 1, "pivot": 2, "pinch": 3}
+
+    def _xi(self) -> np.ndarray:
+        """Eq 18's edge parameters: template, active finger, contact face, and
+        the SOURCE node's interface class. EPISODE-CONSTANT, which is why it is
+        its own block and not part of the goal-derived tail -- HER changes the
+        goal within an episode, never the edge, so xi stays valid on relabel.
+
+        The TARGET node is deliberately NOT here. Eq 18 splits pi(a | o(s),
+        rho(g), xi): the terminal node is what rho(g) means, and HER rewrites
+        rho(g) within an episode. Putting a target-node label in xi would make
+        it disagree with the goal on ~80% of every relabeled batch -- the v18
+        bug, in the one block that is supposed to be immune to it.
+        """
+        v = np.zeros(12, dtype=np.float32)
+        v[0 if self.template == "push" else 1] = 1.0
+        v[2 if self._active_finger == "L" else 3] = 1.0
+        v[4 + int(self._face_idx) % 4] = 1.0
+        v[8 + self._GAMMA_IDX[self._init_gamma]] = 1.0
+        return v
+
+    def _gamma_arrived(self, achieved_goal, desired_goal) -> np.ndarray:
+        """Per-finger tolerance, per the interface table: the anchoring contact
+        gets a few mm, a retracted finger only has to be clear."""
+        ag = np.atleast_2d(np.asarray(achieved_goal, dtype=np.float64))
+        dg = np.atleast_2d(np.asarray(desired_goal, dtype=np.float64))
+        tol = self._gamma_tol or {"L": self.arrival_eps, "R": self.arrival_eps}
+        ok = np.ones(ag.shape[0], dtype=bool)
+        for i, side in enumerate(("L", "R")):
+            d = np.hypot(ag[:, 2 * i] - dg[:, 2 * i],
+                         ag[:, 2 * i + 1] - dg[:, 2 * i + 1])
+            ok &= d <= float(tol[side])
+            # the desired touching flag is part of the goal, so it relabels
+            ok &= (ag[:, 4 + i] > 0.5) == (dg[:, 4 + i] > 0.5)
+        return ok
+
+    def _theta_tol_rad(self):
+        return None if self.theta_tol_deg is None else math.radians(self.theta_tol_deg)
+
+    def _goal_with_heading(self, goal_xy, x0) -> np.ndarray:
+        """Append Eq 13's target heading to a position goal.
+
+        Drawn around the object's OWN starting heading, not uniformly over the
+        circle: push produces a median 1.8deg of object rotation per episode
+        (p90 7.0deg), so a uniform bin would be unreachable in ~84% of episodes.
+        Diversity comes from object_theta_spread_deg spreading the START.
+        """
+        g = np.asarray(goal_xy, dtype=np.float32).reshape(-1)
+        if not self.pose_goal:
+            return g   # recontact's goal is 2-D or 6-D and never carries heading
+        if g.shape[0] >= 4:
+            return g[:4]   # the portal sampler already drew a full pose
+        g = g[:2]
+        th0 = float(np.arctan2(x0[IDX_OBJ_HEADING][1], x0[IDX_OBJ_HEADING][0]))
+        half = math.radians(self.theta_goal_window_deg
+                            if self.theta_goal_window_deg is not None
+                            else self.theta_tol_deg)
+        th = th0 + float(self._rng.uniform(-half, half))
+        return np.concatenate([g, np.array([math.cos(th), math.sin(th)],
+                                           dtype=np.float32)])
+
     def _achieved_xy(self, x) -> np.ndarray:
         if self.template == "push":
-            return np.asarray(x[IDX_OBJ_XY], dtype=np.float32)
+            xy = np.asarray(x[IDX_OBJ_XY], dtype=np.float32)
+            if not self.pose_goal:
+                return xy
+            return np.concatenate([xy, np.asarray(x[IDX_OBJ_HEADING],
+                                                  dtype=np.float32)])
         # recontact: finger position in the OBJECT's frame, so it stays a valid
         # HER-relabel target even if the object moved between the paired ticks.
-        return self._world_to_object_frame(x, x[IDX_FINGER_XY[self._active_finger]])
+        if not self.gamma_goal:
+            return self._world_to_object_frame(x, x[IDX_FINGER_XY[self._active_finger]])
+        # Eq 13's interface: BOTH fingertips plus whether each is touching.
+        # HER relabels the whole 6-vector together, so a relabeled goal is
+        # achieved by construction -- conjunctions are safe here; what is hard
+        # is EXPLORATION, which is what HER exists for.
+        return np.concatenate([
+            self._world_to_object_frame(x, x[IDX_FINGER_XY["L"]]),
+            self._world_to_object_frame(x, x[IDX_FINGER_XY["R"]]),
+            np.array([float(x[IDX_CONTACT["L"]]), float(x[IDX_CONTACT["R"]])],
+                     dtype=np.float32)])
 
     def _observation(self, x) -> Dict[str, np.ndarray]:
-        return {"observation": self._physics.obs(x, self._goal_xy[:2]),
+        return {"observation": self._physics.obs(
+                    x, self._goal_xy, xi=self._xi(), rich=self.rich_obs,
+                    template=self.template, finger_targets=self._goal_xy,
+                    two_finger=self.gamma_goal),
                 "achieved_goal": self._achieved_xy(x),
                 "desired_goal": self._goal_xy.copy()}
 
@@ -525,7 +932,17 @@ class ContactEnv(gym.Env):
         """Whether a (possibly relabeled) transition counts as arrived. Shared
         with her_buffer.py's done-patch so the two cannot disagree."""
         ag, dg = np.asarray(achieved_goal), np.asarray(desired_goal)
-        arrived = arrived_loose(ag, dg, self.arrival_eps)
+        if self.template == "recontact" and self.gamma_goal:
+            arrived = self._gamma_arrived(ag, dg)
+        else:
+            arrived = pose_arrived(ag, dg, self.arrival_eps, self._theta_tol_rad())
+        if self.template == "push" and self.her_settled:
+            # Goal-independent, so a relabeled transition reads it from info --
+            # velocity can never live in the goal vector, because there is no
+            # goal of "arrive at 5cm/s" and HER would relabel it to whatever
+            # speed the trajectory happened to have.
+            settled = np.asarray([d["obj_settled"] for d in info], dtype=bool)
+            arrived = arrived & settled
         if self.template == "recontact":
             # Settled now AND never disturbed earlier. Both are
             # goal-independent, so a relabeled transition reads them from info
@@ -565,13 +982,14 @@ class ContactEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self.seed(seed)
+        self._goal_iface = None   # the coned sampler sets it per edge
         if self.template == "push":
             x0, goal_xy = self._sample_push_edge()
         else:
             x0, goal_xy = self._sample_recontact_task()
         self._physics.world.write_state(x0)
         self._x = self._physics.world.read_state()
-        self._goal_xy = np.asarray(goal_xy, dtype=np.float32)
+        self._goal_xy = self._goal_with_heading(goal_xy, self._x)
         self._t = 0
         self._close_not_settled_steps = 0
         self._guard_charged = False
@@ -634,14 +1052,37 @@ class ContactEnv(gym.Env):
         x_next, u_phys = self._physics.step(self._x, a, contact_frame=cmd)
 
         leg = SimpleNamespace(direction=self._active_finger)
-        guard_outcome = self._tmpl.guard(x_next, frozenset(), 1.0, leg, params=self.params)
-        arr = self._tmpl.score_arrival(x_next, target=self._goal_xy,
+        guard_kw = {}
+        if self.template == "push" and self.guard_face:
+            guard_kw["face"] = int(self._face_idx)
+        elif self.template == "recontact" and self.guard_object_still:
+            guard_kw = dict(object_still=True, eps_v_cm_s=self.eps_v_cm_s,
+                            eps_omega_deg_s=self.eps_omega_deg_s)
+        guard_outcome = self._tmpl.guard(x_next, frozenset(), 1.0, leg,
+                                         params=self.params, **guard_kw)
+        # MERGE, not reassign: an earlier version rebuilt this dict inside the
+        # pose_goal branch, which silently dropped `iface` in exactly the
+        # configuration that sets both -- the v16 dropped-variable failure again.
+        theta_kw = {}
+        if self._goal_iface is not None:
+            theta_kw["iface"] = self._goal_iface
+        if self.pose_goal:
+            theta_kw.update(
+                theta_target=float(np.arctan2(self._goal_xy[3], self._goal_xy[2])),
+                theta_tol_deg=self.theta_tol_deg)
+        arr = self._tmpl.score_arrival(x_next, target=self._goal_xy[:2],
                                        arrival_eps=self.arrival_eps,
                                        direction=self._active_finger,
                                        eps_v_cm_s=self.eps_v_cm_s,
-                                       eps_omega_deg_s=self.eps_omega_deg_s)
+                                       eps_omega_deg_s=self.eps_omega_deg_s,
+                                       **theta_kw)
         if self.template == "push" and not self.require_settled:
             arr = replace(arr, reached_interface=arr.reached_position)
+
+        obj_settled_now = None
+        if self.template == "push" and (self.her_settled or self.her_valid_filter):
+            obj_settled_now = object_settled(x_next, self.eps_v_cm_s,
+                                             self.eps_omega_deg_s)
 
         if self.template == "recontact":
             if arr.reached_position and not arr.reached_interface:
@@ -682,4 +1123,13 @@ class ContactEnv(gym.Env):
             # relabeled transition's info, like pre_achieved_goal above.
             info["obj_settled"] = obj_settled_now
             info["object_disturbed"] = self._object_disturbed
+        elif obj_settled_now is not None:
+            info["obj_settled"] = obj_settled_now
+        if self.her_valid_filter:
+            # A tick worth relabeling TO: the object is at rest there and it was
+            # reached without breaking the contact mode. Describes x_next, which
+            # is the state a relabeled goal would be taken from.
+            info["her_valid"] = bool(obj_settled_now is not False
+                                     and obj_settled_now is not None
+                                     and guard_outcome is True)
         return self._observation(x_next), float(reward), terminated, truncated, info

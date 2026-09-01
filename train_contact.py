@@ -19,7 +19,20 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               wall_margin_cm, disengaged_reach_mult,
               eps_v_cm_s=None, eps_omega_deg_s=None,
               guard_terminates=True, min_progress_cm=None,
-              min_progress_ticks=None, require_settled=True,
+              min_progress_ticks=None, require_settled=True, her_settled=False,
+              theta_tol_deg=None, theta_goal_window_deg=None,
+              portal_arrival=False, push_range_max_cm=None,
+              curriculum_levels=None, curriculum_start_cm=None,
+              gamma_goal=False, goal_gamma_modes=None,
+              init_gamma_modes=None, rich_obs=False,
+              guard_face=False,
+              guard_object_still=False,
+              portal_goal=False,
+              portal_depth_cm=2.0,
+              portal_clearance_cm=0.5,
+              continuous_gamma=False,
+              gamma_min_sep_cm=2.0,
+              her_valid_filter=False,
               same_room_goal_prob=0.0, push_cone_deg=None,
               push_range_min_cm=None, object_theta_spread_deg=None,
               restrict_contact_actions=False,
@@ -38,6 +51,25 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          min_progress_cm=min_progress_cm,
                          min_progress_ticks=min_progress_ticks,
                          require_settled=require_settled,
+                         her_settled=her_settled,
+                         theta_tol_deg=theta_tol_deg,
+                         theta_goal_window_deg=theta_goal_window_deg,
+                         portal_arrival=portal_arrival,
+                         push_range_max_cm=push_range_max_cm,
+                         curriculum_levels=curriculum_levels,
+                         curriculum_start_cm=curriculum_start_cm,
+                         gamma_goal=gamma_goal,
+                         goal_gamma_modes=goal_gamma_modes,
+                         init_gamma_modes=init_gamma_modes,
+                         rich_obs=rich_obs,
+                         guard_face=guard_face,
+                         guard_object_still=guard_object_still,
+                         portal_goal=portal_goal,
+                         portal_depth_cm=portal_depth_cm,
+                         portal_clearance_cm=portal_clearance_cm,
+                         continuous_gamma=continuous_gamma,
+                         gamma_min_sep_cm=gamma_min_sep_cm,
+                         her_valid_filter=her_valid_filter,
                          same_room_goal_prob=same_room_goal_prob,
                          push_cone_deg=push_cone_deg,
                          push_range_min_cm=push_range_min_cm,
@@ -88,6 +120,25 @@ def build_env_kwargs(d: dict) -> dict:
                 min_progress_cm=d["min_progress_cm"],
                 min_progress_ticks=d["min_progress_ticks"],
                 require_settled=d["require_settled"],
+                her_settled=d["her_settled"],
+                theta_tol_deg=d["theta_tol_deg"],
+                theta_goal_window_deg=d["theta_goal_window_deg"],
+                portal_arrival=d["portal_arrival"],
+                push_range_max_cm=d["push_range_max_cm"],
+                curriculum_levels=d["curriculum_levels"],
+                curriculum_start_cm=d["curriculum_start_cm"],
+                gamma_goal=d["gamma_goal"],
+                goal_gamma_modes=tuple(d["goal_gamma_modes"] or ()) or None,
+                init_gamma_modes=tuple(d["init_gamma_modes"] or ()) or None,
+                rich_obs=d["rich_obs"],
+                guard_face=d["guard_face"],
+                guard_object_still=d["guard_object_still"],
+                portal_goal=d["portal_goal"],
+                portal_depth_cm=d["portal_depth_cm"],
+                portal_clearance_cm=d["portal_clearance_cm"],
+                continuous_gamma=d["continuous_gamma"],
+                gamma_min_sep_cm=d["gamma_min_sep_cm"],
+                her_valid_filter=d["her_valid_filter"],
                 same_room_goal_prob=d["same_room_goal_prob"],
                 push_cone_deg=d["push_cone_deg"],
                 push_range_min_cm=d["push_range_min_cm"],
@@ -134,6 +185,7 @@ def main(cfg: DictConfig) -> None:
     # copy-slowdown cost when one of those actually needs it.
     copy_info_dict = (d["min_progress_cm"] is not None
                       or d["min_progress_ticks"] is not None
+                      or d["her_settled"]
                       or template == "recontact")
     # Both templates need the done-flag patch (v19 push, v20 recontact). Push
     # additionally needs its observation's stale target slice repaired and the
@@ -141,8 +193,17 @@ def main(cfg: DictConfig) -> None:
     # applies there.
     her_buffer_cls = (PushRelabelSafeHerReplayBuffer if template == "push"
                       else DonePatchedHerReplayBuffer)
-    her_buffer_extra = (dict(pos_scale=max(d["board_w_cm"], d["board_h_cm"]))
+    from domains.contact.physics import goal_derived_slice
+    her_buffer_extra = (dict(pos_scale=max(d["board_w_cm"], d["board_h_cm"]),
+                             goal_slice=goal_derived_slice(
+                                 d["theta_tol_deg"] is not None,
+                                 d["rich_obs"], "push", False))
                         if template == "push" else {})
+    # The filter reads info["her_valid"] off stored transitions, so SB3 has to
+    # be keeping infos -- forgetting this would silently disable the filter.
+    her_buffer_extra["valid_filter"] = d["her_valid_filter"]
+    if d["her_valid_filter"]:
+        copy_info_dict = True
     her_kwargs = (dict(replay_buffer_class=her_buffer_cls,
                        replay_buffer_kwargs=dict(n_sampled_goal=d["her_n_sampled_goal"],
                                                  goal_selection_strategy="future",
@@ -180,7 +241,10 @@ def main(cfg: DictConfig) -> None:
     eval_cb = ContactPeriodicEvalCallback(eval_env, eval_freq=d["diag_eval_freq"],
                                           n_eval_episodes=d["diag_eval_episodes"],
                                           seed=d["seed"] + 777,
-                                          best_model_path=os.path.join(out_dir, "model_best"))
+                                          best_model_path=os.path.join(out_dir, "model_best"),
+                                          train_env=train_env,
+                                          curriculum_levels=d["curriculum_levels"],
+                                          curriculum_threshold=d["curriculum_threshold"])
     cbs = [TrainMetricsCallback(n_envs=d["n_envs"]), eval_cb]
     if d["ckpt_freq"]:
         # model_best is the max of a 16-episode eval, so it is a lucky draw as
