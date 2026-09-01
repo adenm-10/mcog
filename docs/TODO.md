@@ -3,82 +3,110 @@
 Next action first for each item. Session history in `docs/PROGRESS.md`; repo map in
 `docs/STRUCTURE.md`; current state and gotchas in `status.md`.
 
-## Immediate — Stage 1, recovering from v31
+## THE PUSH SUCCESS BAR — decided 2026-09-01, do not re-litigate
 
-**v31 RAN AND FAILED.** Jobs `42617855` (push spec, 9 cells, 1.2M) and `42617867`
-(recontact, 9 cells, 1M), both COMPLETED 2026-08-29, ~126 GPU-hours. **All nine push cells
-scored 0.000; `recon_goal`/`recon_full` scored ~0.00-0.05; `recon_base` scored 0.906-0.941
-on 3/3 seeds.** Numbers, per-cell table and tick-traced diagnosis in `status.md` and
-`docs/PROGRESS.md` v31 RESULTS.
+Push has been re-swept six times partly because "good enough" was never written down.
+It is now written down. Two bars, and they unblock different things.
 
-0. **COMMIT.** Three sweeps have now run against an uncommitted tree (~1550 lines from v31
-   alone). Each cell saved `uncommitted.diff` so provenance is recoverable, but this is past
-   the repo's own rule. `git diff --stat` first. Next action: one commit per concern —
-   guards, portal goals, xi, HER filter, continuous interfaces, gate, docs.
+**Bar 1 — LADDER READY.** On the v32 benchmark (`logs/eval/v32_floor/PROTOCOL.md`):
 
-1. **Bisect v31; do NOT re-run it.** The bundle moved ~8 factors and a 3-arm design cannot
-   attribute across them. Cheapest informative cell: **`lean` + `guard_face` alone**, 3
-   seeds. `wrong_face` fired on 72% of episodes and cut the median episode 66 -> 12 ticks,
-   so it is the leading suspect and one arm settles it. If that recovers, add `portal_goal`,
-   then `theta_tol_deg`, one factor per arm.
+- mean success on goals **>=3cm >= 0.40**, on **>=2 of 3 seeds**, under **both** `model` and
+  `model_best`; and
+- **no distance bin at 0.00.**
 
-2. **Decide whether `wrong_face` should TERMINATE at all.** v30 measured that a finger
-   sliding along a face rounds a corner and keeps contact (policies scored 0.507-0.514
-   against a predicted 0.483 ceiling), so this guard kills a real, previously-rewarded
-   behaviour. Options, cheapest first: make it a penalty (`guard_terminates` is already
-   per-env), widen it to "starting face OR an adjacent one", or drop it. **A decision, not
-   a knob.**
+The per-bin floor is the real requirement, not the mean. Stage 0's ladder failed exactly
+where strata were floored at zero: 1,580 legs had zero successes and `p_hat` had nothing to
+fit. 0.40 is ~10x the measured untrained floor of 0.042, so it is a real signal, not noise.
 
-3. **Recontact's Gamma goal needs a smaller step, not more budget.** Measured over 60
-   episodes of `recon_goal_s0`: L within its 0.3cm anchor tol 1/60, R within 2.0cm 2/60,
-   touch flags matching 4/60 — the 4-way conjunction essentially never fires. Terminations
-   are `horizon` 47 / `object_disturbed` 13, so the new guard is NOT the cause. Next
-   actions, cheapest first: (a) raise the recontact horizon above 100 ticks — it was sized
-   when ONE fingertip had to be placed and now two do; (b) relax `ANCHOR_TOL_CM` from 0.3cm;
-   (c) score only the anchor and demote the retracted finger to a guard.
+**Bar 2 — COMPOSITION READY.** Bar 1 **plus** `require_settled=true` holding, because a
+successor option cannot start from a moving object. Expect this to be the expensive half:
+v28 measured 53% of failures already land within 1cm of the goal without stopping.
 
-4. **`recon_base` 0.906-0.941 is bankable — score it properly.** This is the rerun this file
-   has asked for since v23, and it confirms recontact survived every interface change since.
-   It is also the ONLY v31 number comparable to history. Next action: score on the
-   stratified protocol rather than the 16-episode diag eval, so it can be quoted.
+**What each bar buys.**
 
-5. **Regenerate the untrained floor for the new goal spaces.** Push went 2-D point -> 4-D
-   pose and recontact 2-D -> 6-D interface, so `logs/eval/v29_floor` does not apply and no
-   v31 number is anchored. `tools/make_untrained_ckpt.py`, ~34s per eval.
+- Bar 1 unblocks **calibration** — contact rollouts that produce a fittable `p_hat`, which is
+  the whole Stage 1 ladder. Note the ladder BUILD does not wait for it (see below).
+- Bar 2 unblocks **Phase B**, the composed push+recontact board. Nothing else does.
 
-6. **`spec_raw` is UNINTERPRETABLE, not a result about the action interface.** It scored
-   0.000 like every other push arm, so the preregistered verdict rule ("raw works if it
-   clears the floor on >=2 seeds") cannot be applied — the control failed too. Re-ask it off
-   a working config.
+**What does NOT gate on either bar:** the ladder build itself (contact bundle,
+`contact_entry_conditions`, `contact_descriptors`, wiring `contact_hooks`, the `eval_harness`
+adapter). A badly-calibrated `p_hat` exercises every line, and push is already GRADED rather
+than floored (0.86 under 1cm down to 0.01 beyond 12cm). **Build it in parallel; that is 4-8
+days of work that has been waiting on a number it never needed.**
 
-7. **Orientation is NOT push's binding constraint** — 34/60 episodes hit |dtheta| <= 22.5deg
-   while only 1/60 hit position < 0.4cm. Do not spend a sweep on the orientation window
-   until position is recovered.
+## Immediate
 
-8. **v30 `lean` (job 42569985) was cancelled at ~600k of 1.2M.** All six 400k snapshots
-   survived, so the budget-matched v29 comparison is recoverable:
-   `python tools/score_sweep.py logs/sweep_42569985 --out-dir logs/eval/v30_lean_400k
-   --ckpt model_400000_steps.zip`. The 1.2M endpoint is gone; re-run if it is wanted.
+**v32 IS RUNNING.** Job `43572361`, 12 cells, 600k steps, submitted 2026-09-01. 2x2 of
+{curriculum on/off} x {restricted, raw actions} x 3 seeds. All 12 cells recorded one
+`GIT_DIFF_SHA=d93e35ff325287e6`, so every cell ran the same tree. Preregistered verdicts are
+in `slurm/submit_sweep.sh`'s header. Full findings in `docs/PROGRESS.md` v32.
 
-9. **Still open from v29, unchanged:** adopt `angular_drag_arm_cm=3.12` as the config
-   default; settle the gap-assist result (+0.083 paired, but `model_best` inverts it) at
-   800k-1M; report goals >=3cm beside the 5-bin mean and treat seed as the experimental
-   unit; add cross-track/along-track error and speed at closest approach to
-   `eval_contact.py`; record the **fairness commitment** before any composition claim (the
-   list of things the option policy gets and a flat baseline would not is now eight items).
-   `ruff` is still not installed in `tsmc`, so `CLAUDE.md`'s lint gate cannot be run.
+0. **DO NOT EDIT ANY FILE TRAINING IMPORTS WHILE THE SWEEP RUNS.** A requeued cell re-reads
+   the working tree. Off limits until it finishes: `domains/contact/*`,
+   `domains/contact_templates.py`, `config/train_contact.yaml`, `train_contact.py`. Docs,
+   `test_code.py` and `tools/` are safe.
 
-10. **Known-and-unfixed, both measured over 400 resets:** push's active finger spawns at the
-    exact face CENTRE (max along-face offset 0.0000cm) against the memo's "random point
-    along the face, corners excluded"; the retracted finger's surface gap is 0.7-12.9cm
-    (median 7.4) against a spec of 4-8cm. Also deferred: **object-frame observations plus a
-    matching action frame** — fingertip positions are object-relative but world-oriented
-    while wall distances are already object-frame, so the observation is internally
-    inconsistent. It strands every checkpoint and must move obs and actions together.
+1. **Score v32 against `logs/eval/v32_floor/`.** `tools/score_sweep.py --pins` set to the
+   `PROTO` line in `slurm/submit_sweep.sh`, which is byte-identical to the floor's
+   `PROTOCOL.md`. **Use the verified pin string in
+   `logs/eval/v32_floor/PROTOCOL.md`, not the launcher's `PROTO` variable** — `PROTO` is only
+   part of the protocol. The sweep uses the POSE goal, so the anchor is
+   `pose_contact_frame` / `pose_finger_velocity` at digest **`249434216cd2`**. A digest that
+   does not match means STOP. Report >=3cm beside the 5-bin mean.
 
-11. **Curriculum stays off** until it has its own sweep. The ramp caps goal RADIUS and
-    cross-room goals are geometrically >=~15cm, so its low levels are unsatisfiable
-    cross-room (measured: a 10.1cm cap drew a 24.6cm median).
+2. **FIX THE RECONTACT GAMMA SCORING BUG before any recontact number is quoted.**
+   `ContactEnv.step` scores `score_arrival(target=self._goal_xy[:2])`, which under
+   `gamma_goal` is always finger **L**'s target while `recontact_arrival` measures the
+   **active** finger. Measured: a state that perfectly achieves the intended 6-D goal is
+   scored arrived on only **254/500 (50.8%)** of resets; on the rest the required distance has
+   a 12.5cm median against a 0.4cm tolerance. The correct test, `_gamma_arrived`, is reached
+   only from `compute_reward`, so rollout and relabeled rewards use two different definitions.
+   Next action: dispatch `step`'s arrival through `_gamma_arrived` when `gamma_goal`, and add
+   the gate check that does not exist — **`gamma_goal` is instantiated ZERO times in
+   `test_code.py`**, which is how 63 GPU-hours ran broken.
+   Also fix, same change: recontact's `two_finger` observation tail is goal-derived but
+   recontact uses `DonePatchedHerReplayBuffer`, whose `_patch_observations` is a no-op, so it
+   is stale on ~80% of every relabeled batch; and `_gamma_tol` is read from whichever episode
+   env 0 happens to be in.
+
+3. **`recon_base` 0.906-0.941 is bankable — score it on the stratified protocol.** 3/3 seeds
+   on today's code. It is the only v31 number comparable to history, and the only recontact
+   number the bug above does not touch (its goal is 2-D, so `_goal_xy[:2]` is correct).
+
+4. **Delete the nested curriculum path once v32 lands.** `curriculum_mode=nested`,
+   `_range_cap`, `_start_window`, `curriculum_start_cm` and `_sample_room_xy`'s `x_window`
+   are all measured INERT (same-room median 2.02/1.94/2.15/1.78 against 2.00 with no
+   curriculum). **No run has ever used them**, so nothing needs them replayable. Deleting
+   removes a path that looks like a curriculum and is not. Blocked only on the sweep finishing.
+
+5. **`portal_arrival` has never been enabled by any run**, so `docs/TODO.md` Deferred #4 is
+   still open: push training does not test portal crossing. Measured why it stays off for now
+   — the crossing predicate puts the untrained floor at **0.271** on goals >=3cm (0.42 in the
+   crossing bins) because a random policy shoves the object through a 33%-open doorway. The
+   doorway POSE is the proxy. Swapping the real crossing test in at EVAL only, once a policy
+   exists, is the cheap way to get the faithful number.
+
+6. **The board is the binding constraint on both open axes, and it is now quantified.**
+   Cross-room start-to-portal distance spans only 6-16cm, so a distance curriculum has almost
+   no range; and the wall blocks the straight path in 0 of 400 resets, so crossing is not a
+   test. The fix is an OFFSET door, which `status.md` already names as the first real
+   composition test. It changes the digest and strands nothing. **This is the highest-value
+   task-design change available and it needs no training.**
+
+7. **Still open from v29, unchanged:** adopt `angular_drag_arm_cm=3.12` as the config default
+   (v32 passes it explicitly in every cell, but the default is still the unphysical 6.00);
+   settle the gap-assist result (+0.083 paired, `model_best` inverts it) at 800k-1M; add
+   cross-track/along-track error and speed at closest approach to `eval_contact.py`; record
+   the **fairness commitment** before any composition claim. `ruff` is still not installed in
+   `tsmc`, so `CLAUDE.md`'s lint gate cannot be run.
+
+8. **Known-and-unfixed, measured over 400 resets:** push's active finger spawns at the exact
+   face CENTRE (max along-face offset 0.0000cm) against the memo's "random point along the
+   face"; the retracted finger's surface gap is 0.7-12.9cm (median 7.4) against a spec of
+   4-8cm. Also deferred: **object-frame observations plus a matching action frame** —
+   fingertip positions are object-relative but world-oriented while wall distances are already
+   object-frame, so the observation is internally inconsistent. It strands every checkpoint
+   and must move obs and actions together.
 
 ## Historical — v28/v29/v30, all superseded by the entries above
 
@@ -127,16 +155,20 @@ Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bear
 
 ## Stage 1 — deferred, in the order to reach for them
 
-1. **The curriculum ramp** (memo Eq 15, `I^(1) ⊂ I^(2) ⊂ ... ⊂ I_e`, expanding backward
-   from the target). Still not implemented; `gym_env.py`'s docstring says so. Leading
-   suspect for recontact's flat learning curve specifically.
+1. **The curriculum ramp — IMPLEMENTED, and Eq 15's literal form is measured INERT.**
+   `curriculum_mode=band` is a reverse curriculum (Florensa 2017 / Backplay 2018): goal
+   first, then the object at a distance from a sliding window. In v32. The nested Eq 15 form
+   is a documented deviation-in-reverse and is on the delete list (Immediate #4). It is still
+   untested for RECONTACT, where it remains a plausible fix for the flat learning curve.
 2. **Push's tangential-slip fix.** `_restrict_push_action` clamps only the outward-normal
    component, and 62% of first contact breaks are tangential slides off a face corner
    (median 94% of the way to the geometric edge). Options: bound the tangential component
    too (cheapest), recompute the clamp sub-tick rather than once per tick, or redesign the
    action interface so the policy outputs a push force/direction and physics handles
    staying in contact. **A design decision, not a one-line patch — make it explicitly.**
-3. **Recontact's peak-then-decline pattern — diagnosed in v20, fix is Immediate #2.**
+3. **Recontact's peak-then-decline pattern — diagnosed in v20.** NOTE: any Gamma-goal
+   recontact number predates the scoring bug in Immediate #2 and cannot be read until it is
+   fixed. This entry describes the 2-D single-finger task, which the bug does not touch.
    It was the reward/done mismatch, as suspected here: recontact uses the plain SB3
    `HerReplayBuffer`, so v19's done-patch never reached it. Measured Q(s0)-minus-realized
    gap +44.8/+40.3 at 1M on the two s0 cells. What remains open is the *behavioral* half —
@@ -331,8 +363,6 @@ robustness check, and F2.5 costs no rollouts.
   is skipped from the ladder. Correct — the ladder is about the hierarchy — but say so.
 - **Do not consume the probe's `predictions` block.** Built from 30-trial probe edge rates,
   not from `edge_model.p_bar`. `metrics.py` supersedes it.
-- **The `[legacy-ref]` escape hatch in `test_code.py` is now dead** (zero uses). Harmless;
-  deliberately left in place.
 - **Parked:** `synthesize_interfaces` has three latent bugs (no `break` in the
   cell-extension loop, diagonal normals at corners, `_throats` groups by key proximity with
   no connectivity test) — all H4-only, and H4 is first on the cut list.

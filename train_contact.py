@@ -23,6 +23,7 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
               theta_tol_deg=None, theta_goal_window_deg=None,
               portal_arrival=False, push_range_max_cm=None,
               curriculum_levels=None, curriculum_start_cm=None,
+              curriculum_mode="nested",
               gamma_goal=False, goal_gamma_modes=None,
               init_gamma_modes=None, rich_obs=False,
               guard_face=False,
@@ -58,6 +59,7 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
                          push_range_max_cm=push_range_max_cm,
                          curriculum_levels=curriculum_levels,
                          curriculum_start_cm=curriculum_start_cm,
+                         curriculum_mode=curriculum_mode,
                          gamma_goal=gamma_goal,
                          goal_gamma_modes=goal_gamma_modes,
                          init_gamma_modes=init_gamma_modes,
@@ -127,6 +129,7 @@ def build_env_kwargs(d: dict) -> dict:
                 push_range_max_cm=d["push_range_max_cm"],
                 curriculum_levels=d["curriculum_levels"],
                 curriculum_start_cm=d["curriculum_start_cm"],
+                curriculum_mode=d["curriculum_mode"],
                 gamma_goal=d["gamma_goal"],
                 goal_gamma_modes=tuple(d["goal_gamma_modes"] or ()) or None,
                 init_gamma_modes=tuple(d["init_gamma_modes"] or ()) or None,
@@ -174,7 +177,17 @@ def main(cfg: DictConfig) -> None:
     env_kwargs = build_env_kwargs(d)
     train_env = DummyVecEnv([_make_env(template, d["seed"] + i, **env_kwargs)
                              for i in range(d["n_envs"])])
-    eval_env = _make_env(template, d["seed"] + 10_000, **env_kwargs)()
+    # The REPORTING eval env must be pinned to the FULL task: built with
+    # curriculum_levels set it would sit at level 0 forever (nothing advances
+    # it), so eval/success_rate would be measured on the easiest distribution
+    # and would not be comparable to a non-curriculum cell. A second env tracks
+    # the ramp and is what gates advancement (Alg 1 line 13's "local" success).
+    eval_kwargs = dict(env_kwargs)
+    local_env = None
+    if d["curriculum_levels"] is not None:
+        eval_kwargs["curriculum_levels"] = None
+        local_env = _make_env(template, d["seed"] + 20_000, **env_kwargs)()
+    eval_env = _make_env(template, d["seed"] + 10_000, **eval_kwargs)()
 
     learning_starts = (d["learning_starts"] if d["learning_starts"] is not None
                        else d["horizon"] + 50)
@@ -243,6 +256,7 @@ def main(cfg: DictConfig) -> None:
                                           seed=d["seed"] + 777,
                                           best_model_path=os.path.join(out_dir, "model_best"),
                                           train_env=train_env,
+                                          local_env=local_env,
                                           curriculum_levels=d["curriculum_levels"],
                                           curriculum_threshold=d["curriculum_threshold"])
     cbs = [TrainMetricsCallback(n_envs=d["n_envs"]), eval_cb]

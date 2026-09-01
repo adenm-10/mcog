@@ -85,6 +85,7 @@ class ContactEnv(gym.Env):
                 push_range_max_cm: Optional[float] = None,
                 curriculum_levels: Optional[int] = None,
                 curriculum_start_cm: Optional[float] = None,
+                curriculum_mode: str = "nested",
                 gamma_goal: bool = False,
                 goal_gamma_modes: Optional[tuple] = None,
                 init_gamma_modes: Optional[tuple] = None,
@@ -209,6 +210,12 @@ class ContactEnv(gym.Env):
         # info rather than silently making the curriculum a no-op.
         self.curriculum_leaks = 0
         self.curriculum_draws = 0
+        # "nested" is Eq 15 literally and the historical path. "band" is the
+        # reverse curriculum: goal first, then the object at a drawn distance.
+        self.curriculum_mode = str(curriculum_mode)
+        if self.curriculum_mode not in ("nested", "band"):
+            raise ValueError("curriculum_mode must be 'nested' or 'band', "
+                             f"got {curriculum_mode!r}")
         # RECONTACT ONLY. False (default) keeps the single-finger 2-D goal and is
         # bit-identical, which also keeps the v23 checkpoints loadable. True
         # makes the goal Eq 13's canonical interface: BOTH fingertip targets in
@@ -263,6 +270,19 @@ class ContactEnv(gym.Env):
         # sampler, bug included, so it stays a faithful control -- see
         # _sample_push_edge.
         self.push_cone_deg = push_cone_deg
+        if self.curriculum_mode == "band":
+            if template != "push":
+                raise ValueError("curriculum_mode='band' is push-only")
+            if self.push_cone_deg is None:
+                raise ValueError("curriculum_mode='band' needs push_cone_deg: the "
+                                 "reverse sampler walks BACK along the face's push "
+                                 "direction, which the cone defines")
+            if (self.curriculum_levels is not None
+                    and self.curriculum_levels != len(self._LEVEL_WINDOWS)):
+                raise ValueError("curriculum_mode='band' has "
+                                 f"{len(self._LEVEL_WINDOWS)} windows, so "
+                                 f"curriculum_levels must be that, not "
+                                 f"{self.curriculum_levels}")
         # Floor on the coned goal's radius, so training is not dominated by
         # goals the object is already almost on (5 of the 60 benchmark
         # episodes sit under 1cm against arrival_eps=0.4). None -> the
@@ -380,9 +400,15 @@ class ContactEnv(gym.Env):
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
 
     def _sample_room_xy(self, room: int, *,
-                        extra_offsets: Tuple[Tuple[float, float], ...] = ()) -> Tuple[float, float]:
+                        extra_offsets: Tuple[Tuple[float, float], ...] = (),
+                        x_window: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
         """Sample the object center in `room`, keeping it and every
-        `center + offset` clear of the room/board edge by wall_margin_cm."""
+        `center + offset` clear of the room/board edge by wall_margin_cm.
+
+        `x_window` further restricts x -- Eq 15's initiation ramp for a crossing
+        edge. One uniform draw either way, in the same order, so None is
+        bit-identical to before this argument existed.
+        """
         x_lo, x_hi = self._board.room_edges_x[room], self._board.room_edges_x[room + 1]
         dxs = [0.0, *(dx for dx, _ in extra_offsets)]
         dys = [0.0, *(dy for _, dy in extra_offsets)]
@@ -390,7 +416,18 @@ class ContactEnv(gym.Env):
         x_hi_pad = self.wall_margin_cm + max(0.0, max(dxs))
         y_lo_pad = self.wall_margin_cm - min(0.0, min(dys))
         y_hi_pad = self.wall_margin_cm + max(0.0, max(dys))
-        x = self._rng.uniform(x_lo + x_lo_pad, max(x_lo + x_lo_pad, x_hi - x_hi_pad))
+        xa = x_lo + x_lo_pad
+        xb = max(xa, x_hi - x_hi_pad)
+        if x_window is not None:
+            wa, wb = max(xa, float(x_window[0])), min(xb, float(x_window[1]))
+            if wa <= wb:
+                xa, xb = wa, wb
+            else:
+                # The level's cap is below this edge's geometric minimum, so the
+                # window is empty. Recorded rather than silently clamped: a
+                # nonzero rate means curriculum_start_cm is set too low.
+                self.curriculum_leaks += 1
+        x = self._rng.uniform(xa, xb)
         y = self._rng.uniform(y_lo_pad, max(y_lo_pad, self.params.board_h_cm - y_hi_pad))
         return float(x), float(y)
 
@@ -449,17 +486,27 @@ class ContactEnv(gym.Env):
     # contact_templates.nearest_face's indexing: 0=+x 1=-x 2=+y 3=-y.
     _FACE_IDX = {"east": 0, "west": 1, "north": 2, "south": 3}
 
-    def _place_object_for_push(self, src, face, active, inactive, theta_half=None):
+    def _face_geometry(self, face, theta):
+        """The active finger's offset from the object centre, and that face's
+        OUTWARD normal, both rotated into the object's orientation. Shared by the
+        forward and reverse samplers so the two cannot drift apart."""
+        ow, oh = self.params.object_w_cm, self.params.object_h_cm
+        clearance = self.params.finger_radius_cm - 0.02  # deliberate slight overlap
+        local = {"west": (-(ow / 2.0 + clearance), 0.0),
+                 "east": (ow / 2.0 + clearance, 0.0),
+                 "north": (0.0, oh / 2.0 + clearance),
+                 "south": (0.0, -(oh / 2.0 + clearance))}[face]
+        n = self._FACE_NORMALS[face]
+        c, sn = math.cos(theta), math.sin(theta)
+        return ((c * local[0] - sn * local[1], sn * local[0] + c * local[1]),
+                (c * n[0] - sn * n[1], sn * n[0] + c * n[1]))
+
+    def _place_object_for_push(self, src, face, active, inactive, theta_half=None,
+                               x_window=None):
         """Given a contact face, sample the object's position (keeping the
         finger's offset clear of the wall) and place both fingers. Shared by
         _sample_push_edge's two branches, which pick `face` in different
         orders and so cannot share anything earlier than this."""
-        ow, oh = self.params.object_w_cm, self.params.object_h_cm
-        clearance = self.params.finger_radius_cm - 0.02  # deliberate slight overlap
-        local_offset = {
-            "west": (-(ow / 2.0 + clearance), 0.0), "east": (ow / 2.0 + clearance, 0.0),
-            "north": (0.0, oh / 2.0 + clearance), "south": (0.0, -(oh / 2.0 + clearance)),
-        }[face]
         # One draw either way, in the same order, so the None path stays
         # bit-identical -- the discipline used for disengaged_away_deg.
         # theta_half (rad) overrides the configured spread: a CROSSING edge can
@@ -478,13 +525,10 @@ class ContactEnv(gym.Env):
         # face normal live in the object's frame and rotate with it. The object's
         # rotated bounding box reaches at most its half-diagonal, which is inside
         # wall_margin_cm, so no rotation can push it into a wall.
-        c, sn = math.cos(theta), math.sin(theta)
-        face_offset = (c * local_offset[0] - sn * local_offset[1],
-                       sn * local_offset[0] + c * local_offset[1])
-        n_local = self._FACE_NORMALS[face]
-        face_normal = np.array([c * n_local[0] - sn * n_local[1],
-                                sn * n_local[0] + c * n_local[1]], dtype=float)
-        x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,))
+        face_offset, fn = self._face_geometry(face, theta)
+        face_normal = np.array(fn, dtype=float)
+        x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,),
+                                      x_window=x_window)
         obj_state = self._place_object(x0, y0, theta=None if theta == 0.0 else theta)
         obj_state = self._place_finger(obj_state, active,
                                        (x0 + face_offset[0], y0 + face_offset[1]))
@@ -546,7 +590,7 @@ class ContactEnv(gym.Env):
             lo, hi = max(lo, min(t0, t1)), min(hi, max(t0, t1))
         return (lo, hi) if hi > lo else None
 
-    def _sample_goal_in_push_cone(self, room, obj_xy, push_dir, portal=None):
+    def _sample_goal_in_push_cone(self, room, obj_xy, push_dir, portal=None, cap=None):
         """Goal inside the cone the contacted face can actually push into, and
         (cross-room) reachable by a straight path through `portal`. None if the
         cone cannot reach `room`, so the caller can fall back."""
@@ -559,7 +603,6 @@ class ContactEnv(gym.Env):
             if iv is None:
                 continue
             lo, hi = iv
-            cap = self._range_cap()
             if cap is not None:
                 hi = min(hi, float(cap))
                 if hi <= 0.0:
@@ -605,13 +648,28 @@ class ContactEnv(gym.Env):
             portal = None
         self._goal_iface = portal if self.portal_arrival else None
 
+        # Eq 15's ramp bounds START-to-TARGET distance, and only the FREE end
+        # can move -- the same rule the face/goal sampler already follows.
+        # Same-room the goal is free, so the cap bounds the goal RADIUS.
+        # Crossing, the target is pinned to the portal, so the cap bounds where
+        # the object may START: "expanding backward into the source region".
+        # Capping the goal radius on a crossing edge is unsatisfiable -- a goal
+        # past the portal is never near -- which is the leak measured
+        # 2026-08-28, where a 10.1cm cap still drew a 24.6cm median.
+        crossing = portal is not None and dst != src
+        start_window, goal_cap = None, self._range_cap()
+        if crossing and self.curriculum_levels is not None:
+            start_window = self._start_window(src, dst, portal)
+            goal_cap = self.push_range_max_cm
+
         if portal is not None and self.portal_goal:
             # A CROSSING edge's goal is a pose drawn from the portal region, and
             # the start is drawn from the same admissible band -- otherwise the
             # object physically cannot pass and no amount of training helps.
             half = self._portal_theta_half(portal)
             obj_state = self._place_object_for_push(src, face, active, inactive,
-                                                    theta_half=half)
+                                                    theta_half=half,
+                                                    x_window=start_window)
             th0 = float(np.arctan2(obj_state[IDX_OBJ_HEADING][1],
                                    obj_state[IDX_OBJ_HEADING][0]))
             w = math.radians(self.theta_goal_window_deg
@@ -621,13 +679,15 @@ class ContactEnv(gym.Env):
                                             min(half, th0 + w))
             return obj_state, goal
 
-        obj_state = self._place_object_for_push(src, face, active, inactive)
+        obj_state = self._place_object_for_push(src, face, active, inactive,
+                                               x_window=start_window)
         # _place_object_for_push may have rotated the object, so take the face's
         # normal from there rather than from the axis-aligned table.
         nx, ny = self._last_face_normal
         obj_xy = (float(obj_state[IDX_OBJ_XY][0]), float(obj_state[IDX_OBJ_XY][1]))
         # The finger sits on `face`, so it can only push along the inward normal.
-        goal_xy = self._sample_goal_in_push_cone(dst, obj_xy, (-nx, -ny), portal)
+        goal_xy = self._sample_goal_in_push_cone(dst, obj_xy, (-nx, -ny), portal,
+                                                cap=goal_cap)
         if goal_xy is None:  # cone can't reach dst from here
             # push_range_min_cm is a hard floor, so the fallback has to clear it
             # too -- otherwise it leaks back exactly the near-zero goals the
@@ -640,7 +700,7 @@ class ContactEnv(gym.Env):
             # failure fell through to an uncapped uniform draw. Same shape as
             # push_range_min_cm's original 3.7% leak, but total rather than
             # marginal, because cross-room fallback is the common path.
-            cap = self._range_cap()
+            cap = goal_cap
             self.curriculum_draws += 1
             ok = False
             for _ in range(64):
@@ -684,6 +744,11 @@ class ContactEnv(gym.Env):
         self._active_finger = active
 
         if self.push_cone_deg is not None:
+            if self.curriculum_mode == "band":
+                # curriculum_levels=None -> reverse sampler at the FULL range,
+                # no ramp. That is the control arm: it differs from the ramped
+                # arm by the schedule alone, not by the reset distribution.
+                return self._sample_push_edge_reverse(src, dst, active, inactive)
             return self._sample_push_edge_coned(src, dst, active, inactive)
 
         if dst != src:
@@ -821,11 +886,13 @@ class ContactEnv(gym.Env):
             self._curr_level = int(np.clip(level, 0, self.curriculum_levels - 1))
 
     def _range_cap(self):
-        """Upper bound on the coned goal's radius at the current level.
+        """Upper bound on the object's START-to-TARGET distance at this level.
 
-        Level 0 starts near the target end of the range and the cap expands to
-        push_range_max_cm (or unbounded) at the last level -- Eq 15's "starting
-        near the portal and expanding backward into the source region".
+        Level 0 starts near the target and the cap expands to push_range_max_cm
+        (or unbounded) at the last level -- Eq 15's "starting near the portal and
+        expanding backward into the source region". WHICH END the cap moves is
+        the caller's decision, because only the free end can move: see
+        _sample_push_edge_coned.
         """
         if self.curriculum_levels is None:
             return self.push_range_max_cm
@@ -837,6 +904,142 @@ class ContactEnv(gym.Env):
             # unbounded top end: ramp a multiple of the near end instead
             return lo * (1.0 + frac * 24.0)
         return lo + frac * (hi - lo)
+
+    # Eq 15 asks for NESTED initiation sets, which measured inert on this board:
+    # a nested level can only delete far starts, never make near ones commoner,
+    # and the forward sampler already puts the median same-room goal at 2.0cm
+    # regardless of the cap. The reverse-curriculum literature does not nest.
+    # Florensa et al. (2017) grow starts outward from a fixed goal but KEEP ONLY
+    # those at intermediate difficulty, dropping mastered ones; Backplay
+    # (Resnick et al., 2018) slides a window backward along a demonstration.
+    # Both are moving windows. These are fractions of the distance the edge can
+    # actually reach, so they adapt to same-room (~0.4-22cm) and crossing
+    # (~6-13cm) without per-edge constants.
+    #
+    # Width ~0.35-0.5 of the range, so a level is a real restriction rather than
+    # rounding. Consecutive windows OVERLAP by ~0.2, so advancing is not a cliff.
+    # The LAST level is the whole range on purpose: the benchmark scores every
+    # distance including the near bins, so the final training distribution has
+    # to be the benchmark's or the last level introduces a train/test mismatch.
+    _LEVEL_WINDOWS = ((0.00, 0.35), (0.15, 0.60), (0.35, 0.85), (0.00, 1.00))
+
+    def _level_window(self):
+        """(near, far) as fractions of the edge's reachable distance range."""
+        if self.curriculum_mode != "band" or self.curriculum_levels is None:
+            return (0.0, 1.0)
+        return self._LEVEL_WINDOWS[self._curr_level]
+
+    def _sample_push_edge_reverse(self, src, dst, active, inactive):
+        """Reverse curriculum: draw the GOAL first, then place the object at a
+        distance drawn from the current level's window.
+
+        The forward sampler draws the object uniformly and lets geometry decide
+        how far the goal lands, which measured a 2.0cm median at EVERY level --
+        so a cap on the far end could not bind. Drawing the distance directly is
+        what makes a level control difficulty. Needs reset-to-arbitrary-state,
+        free in simulation (Florensa 2017; Backplay 2018).
+
+        The RNG order differs from the forward sampler by construction, so seeds
+        do not map to the same episodes and the env digest moves. Nothing is
+        stranded: observation and goal widths are unchanged.
+        """
+        if dst != src:
+            face = "west" if dst > src else "east"
+            portal = self._board.portal_between(src, dst)
+        else:
+            face = str(self._rng.choice(self._FACES))
+            portal = None
+        self._goal_iface = portal if self.portal_arrival else None
+        # A crossing edge can only start at an orientation the portal admits.
+        th_half = (self._portal_theta_half(portal)
+                   if portal is not None and self.portal_goal else None)
+        lo_f, hi_f = self._level_window()
+        half = math.radians(float(self.push_cone_deg))
+        margin = self.wall_margin_cm
+
+        # Rejection sampling, and the feasible set is tight at the far windows
+        # (58% of resets needed a retry at level 2). Cheap -- pure arithmetic, no
+        # physics -- and unbiased, since every draw is redrawn together. 64 left
+        # 1 reset in 600 unresolved, which fell through to the forward sampler at
+        # the WRONG level distribution; 256 leaves none.
+        for attempt in range(256):
+            if th_half is not None:
+                theta = float(self._rng.uniform(-th_half, th_half))
+            elif self.object_theta_spread_deg is None:
+                theta = 0.0
+            else:
+                s = float(self.object_theta_spread_deg)
+                theta = math.radians(float(self._rng.uniform(-s, s)))
+            face_offset, face_normal = self._face_geometry(face, theta)
+            # The finger sits on `face`, so the object can only travel along that
+            # face's INWARD normal, jittered by the cone -- same rule as forward.
+            base = math.atan2(-face_normal[1], -face_normal[0])
+            ang = base + float(self._rng.uniform(-half, half))
+            u = (math.cos(ang), math.sin(ang))
+
+            if th_half is not None:
+                w = math.radians(self.theta_goal_window_deg
+                                 if self.theta_goal_window_deg is not None
+                                 else (self.theta_tol_deg or 0.0))
+                goal = self._sample_portal_pose(portal, max(-th_half, theta - w),
+                                                min(th_half, theta + w))
+                goal_xy = (float(goal[0]), float(goal[1]))
+            else:
+                goal_xy = self._sample_room_xy(dst)
+                goal = goal_xy
+
+            # How far back along -u the object may sit and still be a legal start
+            # in the SOURCE room. Reuses the forward sampler's ray helper, so the
+            # two agree about what "inside the room" means.
+            iv = self._ray_interval_in_room(src, goal_xy, (-u[0], -u[1]))
+            if iv is None:
+                continue
+            d_lo, d_hi = max(float(iv[0]), self.arrival_eps), float(iv[1])
+            if self.push_range_min_cm is not None:
+                d_lo = max(d_lo, float(self.push_range_min_cm))
+            if self.push_range_max_cm is not None:
+                d_hi = min(d_hi, float(self.push_range_max_cm))
+            if d_hi <= d_lo:
+                continue
+            span = d_hi - d_lo
+            d = float(self._rng.uniform(d_lo + lo_f * span, d_lo + hi_f * span))
+            ox, oy = goal_xy[0] - d * u[0], goal_xy[1] - d * u[1]
+            # The ray interval keeps the OBJECT legal; the finger hangs outside it
+            # and has to clear the board on its own.
+            fx, fy = ox + face_offset[0], oy + face_offset[1]
+            if not (margin <= fx <= self.params.board_w_cm - margin
+                    and margin <= fy <= self.params.board_h_cm - margin):
+                continue
+            if attempt:
+                self.curriculum_draws += 1
+            obj_state = self._place_object(ox, oy,
+                                          theta=None if theta == 0.0 else theta)
+            obj_state = self._place_finger(obj_state, active, (fx, fy))
+            obj_state = self._place_finger(
+                obj_state, inactive,
+                self._sample_disengaged_point((ox, oy),
+                                              away_from=np.array(face_normal, dtype=float)))
+            self._last_face_normal = np.array(face_normal, dtype=float)
+            self._face_idx = self._FACE_IDX[face]
+            return obj_state, goal
+
+        # Never leave reset without a legal state. A nonzero rate here means the
+        # near window is below what the board can produce -- probe_curriculum
+        # asserts it is zero before any sweep is submitted.
+        self.curriculum_leaks += 1
+        return self._sample_push_edge_coned(src, dst, active, inactive)
+
+    def _start_window(self, src, dst, portal):
+        """Eq 15's initiation ramp for a CROSSING edge: an x-interval in `src`
+        within _range_cap() of the portal plane, widening backward into the
+        source region as the level rises. The open side is +/-inf so
+        _sample_room_xy's own wall padding stays the only other constraint."""
+        cap = self._range_cap()
+        if cap is None:
+            return None
+        if dst > src:                      # pushing east; portal at src's high edge
+            return (float(portal.x) - float(cap), float("inf"))
+        return (float("-inf"), float(portal.x) + float(cap))
 
     _GAMMA_IDX = {"free": 0, "push": 1, "pivot": 2, "pinch": 3}
 
@@ -887,7 +1090,12 @@ class ContactEnv(gym.Env):
         """
         g = np.asarray(goal_xy, dtype=np.float32).reshape(-1)
         if not self.pose_goal:
-            return g   # recontact's goal is 2-D or 6-D and never carries heading
+            # portal_goal's sampler ALWAYS draws a full pose, so truncate here:
+            # with theta_tol_deg unset the declared goal Box is 2-D, and emitting
+            # 4-D on crossing episodes only gives a ragged goal space that
+            # gymnasium does not validate and the replay buffer would corrupt
+            # silently. recontact's 2-D/6-D goals must pass through untouched.
+            return g[:2] if self.template == "push" and g.shape[0] > 2 else g
         if g.shape[0] >= 4:
             return g[:4]   # the portal sampler already drew a full pose
         g = g[:2]

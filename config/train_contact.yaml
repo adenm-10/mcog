@@ -53,7 +53,7 @@ eval_out: null                           # json path; null -> beside the checkpo
 eval_summary_png: false                  # success-by-bin + termination + progress figure
 eval_video: false                        # mp4 per selected episode (~8KB each)
 eval_video_n: 4                          # how many episodes to render
-eval_video_pick: auto                    # auto | arrived | failed. auto mixes
+eval_video_pick: auto                    # auto | arrived | failed | informative.
                                          # successes and failures; arrived shows
                                          # the hardest successes first.
 eval_video_fps: 12
@@ -249,6 +249,17 @@ curriculum_start_cm: null    # Low end of the Eq 15 ramp, in cm. MUST be >= the
                              # the object must reach the other room, and a level-0
                              # cap below that leaks 100%. null -> derive from
                              # push_range_min_cm (fine same-room, WRONG cross-room).
+curriculum_mode: nested     # PUSH ONLY. nested -> Eq 15 literally: levels are
+                             # nested caps on start-to-target distance. MEASURED
+                             # INERT on this board (same-room median 2.0cm at
+                             # every level) because a nested level can only
+                             # delete far starts. band -> the reverse curriculum
+                             # of Florensa 2017 / Backplay 2018: draw the GOAL
+                             # first, then place the object at a distance from a
+                             # sliding window. Not nested, so it is a recorded
+                             # DEVIATION from Eq 15; the citations are the
+                             # justification. Requires push_cone_deg and
+                             # curriculum_levels=4.
 curriculum_threshold: 0.6    # Alg 1 line 13: advance when HELD-OUT local success
                              # clears this. The eval env is the held-out one and is
                              # NOT advanced, so the yardstick stays fixed.

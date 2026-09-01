@@ -2158,3 +2158,208 @@ budget. Regenerate the untrained floor for both new goal spaces — nothing here
 **Also this round:** v30 `lean` (job 42569985) was cancelled at ~600k of 1.2M on all 6
 cells. The 400k snapshots survived, so the budget-matched comparison against v29 that the
 sweep was designed for is still recoverable; the 1.2M endpoint is not.
+
+## v32 — v31's arms audited, four bugs, and a reverse curriculum (2026-09-01)
+
+**Question.** v31 put all nine push cells at 0.000 and six of nine recontact cells at ~0.00.
+Before re-running anything, check what v31 actually trained, and run the two zero-cost
+Phase 0 checks the round skipped.
+
+### Four bugs. Two invalidate v31 arms; two were latent.
+
+**1. `recon_goal`/`recon_full` were scored against a goal they could not reach.**
+`ContactEnv.step` calls `score_arrival(target=self._goal_xy[:2])`, and under `gamma_goal`
+`_goal_xy` is the 6-vector `[Lx, Ly, Rx, Ry, touchL, touchR]`. So `[:2]` is always finger
+**L**'s target, while `recontact_arrival` measures the **active** finger, redrawn every
+reset. The intended 6-D test, `_gamma_arrived`, is reached only from `compute_reward`, i.e.
+only on HER-relabeled samples.
+
+Measured over 500 resets on the exact `recon_goal` config: a state that **perfectly**
+achieves the intended interface goal is scored arrived in **254/500 (50.8%)**. Distance the
+env measures at the intended optimum: median 0.00cm, mean 5.03, p90 12.48, max 15.22cm,
+against `arrival_eps=0.4`. By mode: push 94/175, pivot 74/154, pinch 86/171.
+
+So on ~49% of episodes the reward, `terminated`, and `is_success` were unsatisfiable by an
+optimal policy; on the rest they scored a 2-D subproblem ignoring the second fingertip, both
+touch flags, and the per-side tolerance table. Rollout and relabeled rewards used **two
+different definitions of success in one buffer**. **~63 GPU-hours of v31 recontact are
+uninterpretable, and `docs/TODO.md`'s "raise the horizon / relax ANCHOR_TOL_CM" plan was
+tuning a task the env never scored.**
+
+**2. The Gamma observation goes stale on relabel.** `physics.obs` bakes
+`(finger_targets - current)/pos_scale` into `"observation"` when `two_finger=True`. Only
+`PushRelabelSafeHerReplayBuffer` implements `_patch_observations`; recontact gets
+`DonePatchedHerReplayBuffer`, whose version is a documented no-op. The v18 bug, reintroduced
+in the one new path. Survivable (SB3's `CombinedExtractor` also feeds the correct
+`desired_goal`, which is why `recon_base` still scores 0.94 with the same staleness), but it
+is a contradictory input on ~80% of every batch.
+
+**3. `_gamma_tol` is read from whichever episode env 0 is in.** `her_buffer` calls
+`compute_reward` via `env_method(..., indices=[0])`; the per-side tolerance is set at reset,
+so a whole relabeled batch is scored with one live episode's tolerances, and the 0.3cm anchor
+tolerance lands on the wrong finger about half the time.
+
+**4. `portal_goal` without a pose goal emitted a ragged goal space.** With
+`theta_tol_deg=null` the env declares a 2-D goal Box and emitted **4-D** on 141/300 crossing
+episodes while `achieved_goal` stayed 2-D — so `compute_reward` would have compared a
+2-vector against a 4-vector. Never hit, because v31 always set `theta_tol_deg` alongside.
+FIXED and gated; the check was verified to fail against the old body.
+
+### Two things v31 believed it was testing and was not
+
+**`portal_arrival` was never enabled.** It defaults false and no v31 launcher set it, so
+`_goal_iface` was always None. The round's headline audit fix (the "MERGE, not reassign"
+repair that stopped `iface` being dropped) is correct code that **the sweep never executed**,
+and `docs/TODO.md` Deferred #4 — "training never tests portal crossing" — is still true.
+Cross-room push was therefore "park the object dead-centre in the doorway within 0.4cm",
+which is *harder* than the memo's crossing test, not closer to it.
+
+**`her_valid_filter` was false in 6 of 9 push cells.** `submit_spec.sh` sets it false by
+default and only `spec_settled` overrides. The change the launcher described as having the
+best measured payoff was off in `spec` and `spec_raw`.
+
+### `guard_face`: the exploration cost, measured at zero training cost
+
+The v31 diagnosis ("the guard starved training") was inferred. Direct measurement on the
+`spec` config, 300 episodes of a **uniform-random** policy:
+
+```
+guard_face=TRUE    wrong_face 233 (78%)   median episode  87 ticks   median max displ 5.21cm
+guard_face=FALSE   horizon    271 (90%)   median episode 200 ticks   median max displ 7.24cm
+```
+
+So the guard costs 2.3x episode length and 28% of explored object motion. Under a **scripted
+straight push** it fires on only 14/200 (7%), and `nearest_face(spawn) == _face_idx` on
+400/400 resets — the guard is not misfiring on geometry, it fires on sliding, which v30 had
+already measured policies using. Confirms the direction but not the magnitude: a trained
+`spec` checkpoint ends at 12 ticks, 7x faster than random, so the final policy was degenerate
+rather than merely under-explored.
+
+### Eq 15's curriculum, as written, is INERT on this board
+
+Two problems, found by building it and measuring it.
+
+**The ramp moved the wrong end.** For a crossing edge the goal is pinned at the portal, so
+capping the GOAL radius is unsatisfiable — a goal past the portal is never near — and the
+constraint silently fell away. Fixed: the cap now bounds where the object may START, which is
+Eq 15 literally.
+
+**Even fixed, it barely moves the distribution.** 600 resets/level against a
+no-curriculum control (2400 resets):
+
+```
+                     no curric   L0(9.25)  L1(13.5)  L2(17.75) L3(22.0)
+same-room  median      2.00        2.02      1.94      2.15      1.78
+same-room  p90         6.70        6.39      6.42      7.05      6.03
+crossing   median      9.68        7.51      9.23      9.25      9.58
+crossing   max        13.27        9.25     13.27     13.01     13.10
+```
+
+Same-room is flat at every level; crossing binds only at level 0. Two causes. Eq 15 requires
+**nested** sets, so a level can only DELETE far starts — it can never make near ones
+commoner. And the cone sampler's distance is already bunched near zero (median 2.00cm, p75
+4.16), so trimming the tail changes nothing. This is structural, not a coding error.
+
+**The advance gate was also reading the wrong env.** `eval_env` was built with
+`curriculum_levels` set and nothing advanced it, so it sat at level 0 forever: the 0.6
+threshold was reading the EASIEST distribution, which clears at once and clears again at
+every level. Fixed with two envs — one pinned to the full task for reporting, one that tracks
+the level and gates advancement (Alg 1 line 13's "held-out LOCAL success").
+
+### `portal_arrival=true` puts the untrained floor at 0.271
+
+Single factor, same seeds, untrained `contact_frame`, 60 stratified episodes:
+
+```
+config                            ALL    >=3cm    0-3   3-6   6-9  9-12   12+
+srg=0.5  portal_arrival=TRUE     0.333   0.271   0.58  0.17  0.42  0.42  0.08
+srg=0.5  portal_arrival=false    0.133   0.021   0.58  0.08  0.00  0.00  0.00
+srg=1.0  (no crossings)          0.150   0.000   0.75  0.00  0.00  0.00  0.00
+```
+
+The crossing predicate alone moves the >=3cm floor 0.021 -> **0.271**, 13x, and the 6-9 and
+9-12 bins (where crossing goals live) go 0.00 -> 0.42. **A random policy crosses the doorway
+42% of the time**: `portal_goal` draws both the start heading and the goal from the +/-28.1deg
+admissible band so the object begins aligned, and the wall blocks the straight path in 0 of
+400 resets. `status.md` said the board was "too open for crossing to mean anything"; this is
+the number. **REJECTED for the benchmark** — cells kept as `logs/eval/v32_floor/xing_*.json`.
+
+### The reverse curriculum, and why it deviates from Eq 15 deliberately
+
+`curriculum_mode=band`: draw the GOAL first, then place the object at a distance drawn from
+the level's window. Distance becomes something we set rather than a geometric byproduct.
+Needs reset-to-arbitrary-state, free in simulation.
+
+**Not nested, and that is the point.** Florensa et al. (2017) grow starts outward from a
+fixed goal but keep only those at intermediate difficulty, dropping mastered ones; Backplay
+(Resnick et al., 2018) slides a window backward along a demonstration. Both are moving
+windows. **The deviation from Eq 15's wording is deliberate and those two papers are the
+justification.** ADR (OpenAI 2019) is the counterexample that clarifies it: expansion works
+when the sampler follows the boundary, and ours does not.
+
+Windows are fractions of the distance each edge can reach, so no per-edge constants:
+`(0.00,0.35) (0.15,0.60) (0.35,0.85) (0.00,1.00)`. Width ~0.35-0.5 so a level restricts
+something; consecutive windows overlap by ~0.2 so advancing is not a cliff; **the last level
+is the full range** because the benchmark scores every bin and a band final level would be a
+train/test mismatch. Measured, 600 resets/level, **0 leaks, every level restricts**:
+
+```
+level   window        same-room median   crossing median
+  0     0.00-0.35          1.58cm             8.55cm
+  1     0.15-0.60          3.28              10.73
+  2     0.35-0.85          4.80              11.76
+  3     0.00-1.00          2.66               9.53
+```
+
+A real ramp on both edge types, ~3x on same-room. Side effect: at full range the reverse
+sampler gives a 2.66cm same-room median against the forward sampler's 2.00, which partly
+closes the training-vs-benchmark distance gap (benchmark median 7.2cm).
+
+**The control shares the sampler.** `curriculum_mode=band curriculum_levels=null` is the
+reverse sampler pinned at the full range with no schedule, so the no-curriculum arm differs
+from the ramped arm by the SCHEDULE ALONE. Comparing a band arm against the old forward
+sampler would have confounded the two.
+
+### v32 floor, on the exact sweep protocol
+
+`logs/eval/v32_floor/`, with `PROTOCOL.md` beside the numbers. 60 stratified episodes,
+reverse sampler at full range, `portal_arrival=false`:
+
+```
+cell                     digest         ALL   >=3cm    0-3   3-6   6-9  9-12   12+
+pos_contact_frame      3366def8826d   0.117   0.042   0.42  0.17  0.00  0.00  0.00
+pos_finger_velocity    3366def8826d   0.000   0.000   0.00  0.00  0.00  0.00  0.00
+pose_contact_frame     249434216cd2   0.067   0.042   0.17  0.17  0.00  0.00  0.00
+pose_finger_velocity   249434216cd2   0.000   0.000   0.00  0.00  0.00  0.00  0.00
+```
+
+**The first version of this floor was WRONG and the digest caught it.** It omitted
+`disengaged_away_deg=60`, a TASK key inside the digest, so it scored a different reset
+distribution than the sweep trains on (`1a72f6438f34` vs the sweep's `249434216cd2`). The
+success numbers were unchanged, which is why only the digest could have found it. The
+protocol is now DERIVED from a launched cell's `meta.txt` rather than retyped, and the
+verified scoring command lives in `logs/eval/v32_floor/PROTOCOL.md`.
+
+### Gate
+
+`contact` 132 -> **138**. Five new checks: no level exhausts the retry budget; the window
+ramp actually moves the distance (with the inert nested medians in the failure message); the
+reverse sampler keeps the goal inside the contacted face's cone (worst 29.96deg vs 30); band
+with no levels is the full range; band rejects a wrong level count and a missing cone. Plus
+the ragged-goal check. All five gates green: 26 / 27 / 138 / 172 / 18.
+
+### Two breaks a code review would not have caught
+
+Found by smoke-testing the real launcher end to end, per the repo's own rule:
+`local_env.set_curriculum_level` failed on the `Monitor` wrapper (would have crashed 6 of 12
+cells at the first eval), and a 64-draw retry budget left 1 reset in 600 falling back to the
+forward sampler at the wrong level (raised to 256, now zero).
+
+### Submitted
+
+Job **43572361**, 12 cells, 600k steps, 2x2 of {curriculum on/off} x {restricted, raw
+actions} x 3 seeds. All 12 recorded one `GIT_DIFF_SHA=d93e35ff325287e6` and one launcher
+md5, so every cell ran the same tree. Preregistered verdicts are in the launcher header.
+
+**Next.** Score against `logs/eval/v32_floor/`. Then fix the recontact Gamma scoring bug
+before any recontact number is quoted, and delete the now-dead nested curriculum path.

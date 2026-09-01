@@ -983,6 +983,91 @@ def cmd_contact() -> None:
               type(port)(x=port.x, y_lo=0.0, y_hi=99.0))) - 90.0) < 1e-6,
           "a gap wider than the object's diagonal admits every orientation")
 
+    # portal_goal WITHOUT a pose goal was never exercised before 2026-09-01 and
+    # emitted a 4-D goal on crossing episodes against a declared 2-D Box, on 44%
+    # of resets. gymnasium validates neither, so it was silent.
+    pg = ContactEnv(template="push", seed=0, require_settled=False,
+                    push_cone_deg=30.0, same_room_goal_prob=0.5,
+                    params=_PP(board_w_cm=50.0, board_h_cm=30.0,
+                               portals=(_Pt(x=25.0, y_lo=10.0, y_hi=20.0),)),
+                    portal_goal=True, portal_arrival=True)
+    want_g = pg.observation_space["desired_goal"].shape[0]
+    want_o = pg.observation_space["observation"].shape[0]
+    seen, n_cross = set(), 0
+    for k in range(300):
+        o, _ = pg.reset(seed=600_000 + k)
+        seen.add((o["desired_goal"].shape[0], o["observation"].shape[0],
+                  o["achieved_goal"].shape[0]))
+        n_cross += int(pg._goal_iface is not None)
+    check(seen == {(want_g, want_o, want_g)},
+          "portal_goal without a pose goal still emits the DECLARED goal width",
+          f"declared ({want_g}, {want_o}), emitted {sorted(seen)}, "
+          f"{n_cross}/300 crossing episodes")
+
+    section("reverse curriculum: the window ramps, and the cone survives it")
+    import math as _m
+    import numpy as _np
+    _rc = dict(template="push", require_settled=False, push_cone_deg=30.0,
+               same_room_goal_prob=0.5, portal_goal=True, rich_obs=True,
+               curriculum_mode="band",
+               params=_PP(board_w_cm=50.0, board_h_cm=30.0,
+                          angular_drag_arm_cm=3.12,
+                          portals=(_Pt(x=25.0, y_lo=10.0, y_hi=20.0),)))
+    rc = ContactEnv(seed=0, curriculum_levels=4, **_rc)
+    meds, leaks, worst_cone = [], 0, 0.0
+    for lvl in range(4):
+        rc.set_curriculum_level(lvl)
+        rc.curriculum_leaks = 0
+        ds = []
+        for k in range(200):
+            rc.reset(seed=400_000 + 1000 * lvl + k)
+            ox, oy = float(rc._x[0]), float(rc._x[1])
+            g = rc._goal_xy
+            ds.append(float(_np.hypot(float(g[0]) - ox, float(g[1]) - oy)))
+            # The reverse sampler walks BACK along the jittered push direction,
+            # so the contacted face must still point at the goal within the cone.
+            n = rc._last_face_normal
+            v = _np.array([float(g[0]) - ox, float(g[1]) - oy], dtype=float)
+            nv = float(_np.linalg.norm(v))
+            if nv > 1e-9:
+                cosang = float(_np.dot(-n / float(_np.linalg.norm(n)), v / nv))
+                worst_cone = max(worst_cone, _m.degrees(_m.acos(min(1.0, max(-1.0, cosang)))))
+        leaks += rc.curriculum_leaks
+        meds.append(float(_np.median(ds)))
+    check(leaks == 0,
+          "no level exhausts the reverse sampler's retry budget",
+          f"{leaks} fallbacks over 800 resets; a fallback trains the FULL task "
+          f"while claiming a level")
+    check(meds[0] < meds[1] < meds[2],
+          "the window ramp actually moves the goal distance",
+          f"medians by level {[round(m, 2) for m in meds]} -- the NESTED form "
+          f"measured 2.02/1.94/2.15/1.78, i.e. flat, which is why band exists")
+    check(worst_cone <= 30.0 + 1e-6,
+          "the reverse sampler keeps the goal inside the contacted face's cone",
+          f"worst face-to-goal angle {worst_cone:.2f}deg vs push_cone_deg=30")
+    # curriculum_levels=None means the reverse sampler at the FULL range: the
+    # control arm shares the sampler and differs only by the schedule.
+    rc_full = ContactEnv(seed=0, curriculum_levels=None, **_rc)
+    dsf = []
+    for k in range(200):
+        rc_full.reset(seed=700_000 + k)
+        dsf.append(float(_np.hypot(float(rc_full._goal_xy[0]) - float(rc_full._x[0]),
+                                   float(rc_full._goal_xy[1]) - float(rc_full._x[1]))))
+    check(rc_full._level_window() == (0.0, 1.0) and _np.median(dsf) > meds[0],
+          "band with no levels is the full range (the no-curriculum control)",
+          f"window {rc_full._level_window()}, median {_np.median(dsf):.2f}cm vs "
+          f"level-0 median {meds[0]:.2f}cm -- shares the sampler with the ramped "
+          f"arm, so the two differ by the SCHEDULE alone")
+    _raised = 0
+    for bad_kw in (dict(curriculum_levels=3), dict(curriculum_levels=4, push_cone_deg=None)):
+        try:
+            ContactEnv(seed=0, **{**_rc, **bad_kw})
+        except ValueError:
+            _raised += 1
+    check(_raised == 2,
+          "band rejects a wrong level count and a missing goal cone",
+          "silent acceptance would run a ramp with windows that do not exist")
+
     section("HER relabels only to settled, guard-valid ticks")
     import numpy as _np
     from domains.contact.her_buffer import DonePatchedHerReplayBuffer as _B

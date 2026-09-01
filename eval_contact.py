@@ -12,6 +12,8 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 import hydra
+from collections import Counter
+
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
@@ -178,6 +180,19 @@ def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]
     if prefer == "failed":
         fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
         return sorted(fail, key=lambda i: -rows[i]["d0"])[:n]
+    if prefer == "informative":
+        # Half TYPICAL arrivals (nearest the median success distance, not the
+        # easiest), half the DOMINANT failure mode. `arrived` shows the ceiling
+        # and `auto` leads with the shortest goals; this shows the middle.
+        k = max(1, n // 2)
+        med = float(np.median([rows[i]["d0"] for i in arrived])) if arrived else 0.0
+        pick = sorted(arrived, key=lambda i: abs(rows[i]["d0"] - med))[:k]
+        fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
+        if fail:
+            common = Counter(rows[i]["why"] for i in fail).most_common(1)[0][0]
+            same = [i for i in fail if rows[i]["why"] == common]
+            pick += sorted(same, key=lambda i: -rows[i]["d0"])[:n - len(pick)]
+        return pick
     picked: List[int] = []
     for a, b in zip(arrived + [None] * len(lost), lost + [None] * len(arrived)):
         for x in (a, b):
