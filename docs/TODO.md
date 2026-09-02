@@ -34,27 +34,145 @@ adapter). A badly-calibrated `p_hat` exercises every line, and push is already G
 than floored (0.86 under 1cm down to 0.01 beyond 12cm). **Build it in parallel; that is 4-8
 days of work that has been waiting on a number it never needed.**
 
+## ORDER OF WORK — the plan, shortest path to a defensible result
+
+Written 2026-09-02. Numbers below point at the detailed entries further down.
+
+**Now**
+
+1. **Finish v33's loosened-distribution scoring for `widecone` and `spread`** (Immediate 1).
+   The common-benchmark half is DONE and priced every scaffold: `widecone` -0.069,
+   `freefinger` -0.090, `spread` -0.111, `faceguard` -0.111, `midaction` -0.535. None is
+   free; only the action space is load-bearing. `faceguard`'s own-distribution half is also
+   done and showed that training under the guard BACKFIRES — **the honest face-respecting
+   push number is 0.604, from `ctl` scored under the guard.**
+2. **Randomise the face-centre spawn** (Immediate 9). One line, spec-correct, and the
+   face-guard finding makes it load-bearing rather than cosmetic.
+
+**Then, and this is the real blocker**
+
+3. **Build the flat (non-hierarchical) baseline.** Push at 0.674 is already good enough for
+   the ladder. What does not exist is the thing it gets compared against, and *no hierarchy
+   claim is possible without it*. v33 priced the scaffolds it must inherit: the contact
+   frame (worth 0.535), `push_cone_deg=30` (0.069), `mask_inactive_finger` (0.090),
+   axis-aligned spawns (0.111) —
+   memo sec 5.2/7 requires the identical reset distribution and action space. This is higher
+   value than any further push tuning.
+4. **Build the Stage 1 contact ladder, in parallel.** 4-8 days (see THE STAGE 1 LADDER IS A
+   BUILD at the bottom). It does NOT need push to be good, only graded — which it is. This
+   work has been waiting on a number it never needed.
+
+**Before anything recontact**
+
+5. **Fix the recontact Gamma scoring bug** (Immediate 3). ~63 GPU-hours are already
+   uninterpretable because of it. No recontact number may be quoted until it lands, and it
+   needs the gate check that does not exist.
+
+**Toward Phase B**
+
+6. **The offset door** (Immediate 7). The current board makes crossing untestable — the wall
+   blocks the straight path in 0 of 400 resets — and gives a distance curriculum only 6-16cm
+   of range. Highest-value task-design change available, needs no training.
+7. **`require_settled=true` as its own arm.** This is Bar 2, and Bar 2 is the only thing that
+   unblocks Phase B. Expect it to be the expensive half.
+
+**Housekeeping, whenever**
+
+8. Delete the dead nested curriculum path (Immediate 5); adopt `angular_drag_arm_cm=3.12` as
+   the config default (Immediate 8); move the 621 orphaned staging files (Immediate 2, needs
+   approval).
+
 ## Immediate
 
-**v32 IS RUNNING.** Job `43572361`, 12 cells, 600k steps, submitted 2026-09-01. 2x2 of
-{curriculum on/off} x {restricted, raw actions} x 3 seeds. All 12 cells recorded one
-`GIT_DIFF_SHA=d93e35ff325287e6`, so every cell ran the same tree. Preregistered verdicts are
-in `slurm/submit_sweep.sh`'s header. Full findings in `docs/PROGRESS.md` v32.
+**Read in this order:** the ORDER OF WORK block above, then the v33 result table below.
 
-0. **DO NOT EDIT ANY FILE TRAINING IMPORTS WHILE THE SWEEP RUNS.** A requeued cell re-reads
-   the working tree. Off limits until it finishes: `domains/contact/*`,
-   `domains/contact_templates.py`, `config/train_contact.yaml`, `train_contact.py`. Docs,
-   `test_code.py` and `tools/` are safe.
+**v32 IS COMPLETE.** Job `43572361`, 11 of 12 cells (task 11 `curric_raw_s2` died on a wandb
+init timeout, never trained; not resubmitted). Scored in `logs/eval/v32_final/` at digest
+`249434216cd2`, matching `logs/eval/v32_floor/`. Goals >=3cm: **curric 0.674** (s0 0.604,
+s1 0.750, s2 0.667) > **base 0.583** > raw 0.139 > curric_raw 0.083, floor 0.042. The
+curriculum helps on 3/3 seeds; it does NOT replace the action restriction.
 
-1. **Score v32 against `logs/eval/v32_floor/`.** `tools/score_sweep.py --pins` set to the
-   `PROTO` line in `slurm/submit_sweep.sh`, which is byte-identical to the floor's
-   `PROTOCOL.md`. **Use the verified pin string in
-   `logs/eval/v32_floor/PROTOCOL.md`, not the launcher's `PROTO` variable** — `PROTO` is only
-   part of the protocol. The sweep uses the POSE goal, so the anchor is
-   `pose_contact_frame` / `pose_finger_velocity` at digest **`249434216cd2`**. A digest that
-   does not match means STOP. Report >=3cm beside the 5-bin mean.
+**v33 IS TRAINED AND SCORED.** Job `43679344`, 18/18 COMPLETED, one
+`GIT_DIFF_SHA=989475b0a6b12832`. Scores in `logs/eval/v33/` at digest `249434216cd2`
+(matches the floor), media in `media/v33/<arm>/`. Goals >=3cm, `model`:
 
-2. **FIX THE RECONTACT GAMMA SCORING BUG before any recontact number is quoted.**
+| arm | `model` | vs `ctl` | verdict |
+|---|---|---|---|
+| `ctl` | **0.674** | — | reproduces v32 `curric` EXACTLY |
+| `widecone` | 0.604 | -0.069 | no verdict (0.05-0.15 band) |
+| `freefinger` | 0.583 | -0.090 | no verdict |
+| `spread` | 0.562 | -0.111 | no verdict |
+| `faceguard` | 0.562 | -0.111 | but see below — training with the guard BACKFIRES |
+| `midaction` | 0.139 | -0.535 | **LOAD-BEARING: the action space** |
+
+**No scaffold is CHEAP** — nothing came within 0.05 of `ctl`, so all four task-side scaffolds
+enter the fidelity-deviation list WITH their prices. **`midaction` scored 0.139, identical to
+v32's `raw` arm**, so `restrict_contact_actions` on top of `finger_velocity` bought exactly
+0.000: the contact FRAME does the work, not the no-retreat clamp. **The face constraint IS
+learnable, but NOT by training with the guard on** — see the next paragraph.
+
+**TRAINING UNDER THE FACE GUARD IS COUNTERPRODUCTIVE** (`logs/eval/v33_faceguard_own/`,
+digest `96762fdf1de4`). Scored on the guarded distribution, `faceguard` gets 0.542 with 9.4%
+violations while **`ctl`, which never saw the constraint, gets 0.604 with 12.2%**. The guard
+cuts violations but deletes episodes that were on their way to arriving. So:
+
+- **The faithful face-respecting push number is 0.604** (`ctl` under `guard_face=adjacent`),
+  costing **0.070** against the unguarded 0.674.
+- **Enforce the face at EVAL, never in training.** `ctl` already honours it on ~88% of
+  episodes unprompted. This closes the v32 qualification: the curriculum's advantage is not
+  mostly a loophole, and the honest push number is 0.604.
+
+**THE FIRST SCORING RUN WAS WRONG AND IS QUARANTINED.** `tools/score_sweep.py` appended a
+hardcoded v29 portal AFTER `--pins`, so v33 was first scored on a 20cm doorway instead of its
+own 10cm one — 36 of 60 benchmark episodes differed, digest `c10067af8f09`. Caught by the
+preregistered digest check. Bad output at `logs/eval/v33_WRONG_PORTAL_do_not_use/`; fixed by
+folding the portal into `TASK_PINS`, with two new `static` gates. **Confirm digest
+`249434216cd2` before reading any push number, every time.**
+
+0. **THE FACE-GUARD FINDING — read before quoting the v32 headline again.**
+   Measured on v32's two best policies, one key flipped, nothing else
+   (`logs/eval/v32_faceprobe/`):
+
+   | policy | unguarded | `guard_face=adjacent` | `guard_face=true` (strict) |
+   |---|---|---|---|
+   | `push_curric_s1` | 0.683 | **0.483** (wrong_face 21.7%) | 0.083 (wrong_face 81.7%) |
+   | `push_base_s1`   | 0.600 | **0.583** (wrong_face 15.0%) | 0.083 (wrong_face 86.7%) |
+
+   Two things follow. (a) Face switching is not a rare artifact: these policies leave the
+   contacted face on ~82-87% of episodes at a median of 12 ticks. An earlier claim that the
+   4.0cm contact-loss budget bounds it was WRONG — that budget only covers time spent NOT
+   touching, and a finger keeping contact can slide indefinitely. The finger starts at the
+   face centre of a 10x6 object and the corner is 3.3cm away, ~4 ticks at 20cm/s.
+   (b) **The v32 arm ordering INVERTS under the face guard** (curric 0.483 < base 0.583;
+   base loses 0.017, curric loses 0.200). So part of the curriculum's advantage is bought
+   with behaviour that violates the edge label being executed. **"The curriculum helps on the
+   task as scored" stands. "The curriculum learns a better push option" does not.** v33's
+   `faceguard` arm is the test. Both guarded numbers are ZERO-SHOT, so they are that arm's
+   FLOOR, not a prediction.
+
+1. **FINISH v33's LOOSENED-DISTRIBUTION SCORING for `widecone` and `spread`.**
+   `faceguard`'s is DONE and produced the session's most useful negative result (see above).
+   Each of these arms changed a TASK key, so each carries its own digest.
+   `logs/eval/v33/` already scores everything on the COMMON tight protocol — "does loosened
+   training still do the standard task?". The other half — "is the loosened task learnable at
+   all?" — needs each arm scored on its own distribution, and which override belongs to which
+   arm is a judgement call, so it stays manual. Copy the pattern from
+   `logs/eval/v33_faceguard_own/`: score the loosened arm AND `ctl` on the loosened setting,
+   because the interesting quantity is the DELTA, not the arm's own number.
+   **Prediction on record:** given `faceguard`, expect `ctl` to match or beat the
+   loosened-training arm on the loosened task in both cases.
+
+2. **TWO PIECES OF AUTOMATION WERE FIXED THIS SESSION AND NEITHER IS PROVEN.**
+   (a) `tools/score_sweep.py`'s `--pins` now actually determines the task (the portal moved
+   into `TASK_PINS`); two `static` gates guard it. (b) `slurm/finalize.sh`'s auto-trigger:
+   The last-task-standing block used `squeue -o "%A_%a"`, and on this Slurm `%a` renders as
+   the ACCOUNT name (`43892866_hankyang_lab`), so `still` never reached 0 and the block was
+   dead. It had never run on any sweep: `logs/sweep_{42300917,43572361,43679344}` all lack
+   `slurm_logs/`, and **621 files / 20MB are orphaned in `logs/slurm_staging/`**. Now `-o
+   "%i"` plus an atomic `mkdir .finalized` guard. Until a sweep proves it, run finalize by
+   hand. Moving those 621 orphans into their sweep dirs is a bulk move and NEEDS APPROVAL.
+
+3. **FIX THE RECONTACT GAMMA SCORING BUG before any recontact number is quoted.**
    `ContactEnv.step` scores `score_arrival(target=self._goal_xy[:2])`, which under
    `gamma_goal` is always finger **L**'s target while `recontact_arrival` measures the
    **active** finger. Measured: a state that perfectly achieves the intended 6-D goal is
@@ -69,40 +187,45 @@ in `slurm/submit_sweep.sh`'s header. Full findings in `docs/PROGRESS.md` v32.
    is stale on ~80% of every relabeled batch; and `_gamma_tol` is read from whichever episode
    env 0 happens to be in.
 
-3. **`recon_base` 0.906-0.941 is bankable — score it on the stratified protocol.** 3/3 seeds
+4. **`recon_base` 0.906-0.941 is bankable — score it on the stratified protocol.** 3/3 seeds
    on today's code. It is the only v31 number comparable to history, and the only recontact
    number the bug above does not touch (its goal is 2-D, so `_goal_xy[:2]` is correct).
 
-4. **Delete the nested curriculum path once v32 lands.** `curriculum_mode=nested`,
+5. **Delete the nested curriculum path.** `curriculum_mode=nested`,
    `_range_cap`, `_start_window`, `curriculum_start_cm` and `_sample_room_xy`'s `x_window`
    are all measured INERT (same-room median 2.02/1.94/2.15/1.78 against 2.00 with no
    curriculum). **No run has ever used them**, so nothing needs them replayable. Deleting
-   removes a path that looks like a curriculum and is not. Blocked only on the sweep finishing.
+   removes a path that looks like a curriculum and is not. Unblocked now that v33 has
+   finished training; it is behaviourally a no-op but it moves `GIT_DIFF_SHA`, so do it
+   between sweeps, never during one.
 
-5. **`portal_arrival` has never been enabled by any run**, so `docs/TODO.md` Deferred #4 is
+6. **`portal_arrival` has never been enabled by any run**, so `docs/TODO.md` Deferred #4 is
    still open: push training does not test portal crossing. Measured why it stays off for now
    — the crossing predicate puts the untrained floor at **0.271** on goals >=3cm (0.42 in the
    crossing bins) because a random policy shoves the object through a 33%-open doorway. The
    doorway POSE is the proxy. Swapping the real crossing test in at EVAL only, once a policy
    exists, is the cheap way to get the faithful number.
 
-6. **The board is the binding constraint on both open axes, and it is now quantified.**
+7. **The board is the binding constraint on both open axes, and it is now quantified.**
    Cross-room start-to-portal distance spans only 6-16cm, so a distance curriculum has almost
    no range; and the wall blocks the straight path in 0 of 400 resets, so crossing is not a
    test. The fix is an OFFSET door, which `status.md` already names as the first real
    composition test. It changes the digest and strands nothing. **This is the highest-value
    task-design change available and it needs no training.**
 
-7. **Still open from v29, unchanged:** adopt `angular_drag_arm_cm=3.12` as the config default
+8. **Still open from v29, unchanged:** adopt `angular_drag_arm_cm=3.12` as the config default
    (v32 passes it explicitly in every cell, but the default is still the unphysical 6.00);
    settle the gap-assist result (+0.083 paired, `model_best` inverts it) at 800k-1M; add
    cross-track/along-track error and speed at closest approach to `eval_contact.py`; record
    the **fairness commitment** before any composition claim. `ruff` is still not installed in
    `tsmc`, so `CLAUDE.md`'s lint gate cannot be run.
 
-8. **Known-and-unfixed, measured over 400 resets:** push's active finger spawns at the exact
+9. **Known-and-unfixed, measured over 400 resets:** push's active finger spawns at the exact
    face CENTRE (max along-face offset 0.0000cm) against the memo's "random point along the
-   face"; the retracted finger's surface gap is 0.7-12.9cm (median 7.4) against a spec of
+   face" — and item 0 makes this load-bearing, not cosmetic: the centre of a 10x6 face is
+   3.3cm from the corner, so the spawn puts every episode the same ~4 ticks from a face
+   change. Randomising it is a one-line spec fix that should precede any further face work.
+   Also: the retracted finger's surface gap is 0.7-12.9cm (median 7.4) against a spec of
    4-8cm. Also deferred: **object-frame observations plus a matching action frame** —
    fingertip positions are object-relative but world-oriented while wall distances are already
    object-frame, so the observation is internally inconsistent. It strands every checkpoint
@@ -127,7 +250,8 @@ Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bear
   30 -> 90 -> 180 takes `nogapassist` 0.822 -> 0.767 -> 0.561. **A derivation of mine was
   WRONG here** — I predicted a 0.483 ceiling from "behind the face is unreachable" and
   policies scored 0.507-0.514, because a finger sliding ALONG a face can round a corner
-  without tripping the 4cm guard. That fact is now load-bearing for Immediate #2.
+  without tripping the 4cm guard. **That correction is now measured and load-bearing** --
+  see THE FACE-GUARD FINDING in Immediate.
 
 ## Housekeeping — storage and visualization (v24, tooling built)
 
@@ -158,7 +282,8 @@ Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bear
 1. **The curriculum ramp — IMPLEMENTED, and Eq 15's literal form is measured INERT.**
    `curriculum_mode=band` is a reverse curriculum (Florensa 2017 / Backplay 2018): goal
    first, then the object at a distance from a sliding window. In v32. The nested Eq 15 form
-   is a documented deviation-in-reverse and is on the delete list (Immediate #4). It is still
+   is a documented deviation-in-reverse and is on the delete list (DELETE THE NESTED
+   CURRICULUM in Immediate). It is still
    untested for RECONTACT, where it remains a plausible fix for the flat learning curve.
 2. **Push's tangential-slip fix.** `_restrict_push_action` clamps only the outward-normal
    component, and 62% of first contact breaks are tangential slides off a face corner
@@ -167,7 +292,8 @@ Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bear
    action interface so the policy outputs a push force/direction and physics handles
    staying in contact. **A design decision, not a one-line patch — make it explicitly.**
 3. **Recontact's peak-then-decline pattern — diagnosed in v20.** NOTE: any Gamma-goal
-   recontact number predates the scoring bug in Immediate #2 and cannot be read until it is
+   recontact number predates the RECONTACT GAMMA SCORING BUG in Immediate and cannot be read
+   until it is
    fixed. This entry describes the 2-D single-finger task, which the bug does not touch.
    It was the reward/done mismatch, as suspected here: recontact uses the plain SB3
    `HerReplayBuffer`, so v19's done-patch never reached it. Measured Q(s0)-minus-realized
@@ -185,7 +311,8 @@ Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bear
    (`rollout/success_rate` 0.01 in 25 of 3,000 windows, both seeds, pre- and post-fix;
    exactly 0 in both `require_settled=true` cells). Still 0/60 under deterministic rollout,
    so unconfirmed. It also triples episode length (mean 29 vs 12.4 ticks), so it does
-   change behavior. Keep it as a cell; decide once Immediate #1 restores real HER signal.
+   change behavior. Keep it as a cell. (The HER-signal blocker this used to wait on closed
+   at v18.)
 6. **Phase B** (composed push+recontact board) is explicitly deferred and reserved for the
    user's own call. Once push and recontact each reach a usable standalone rate, the
    offset-door case is the first real test of learning succeeding where scripted

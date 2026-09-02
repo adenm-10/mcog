@@ -133,6 +133,48 @@ def cmd_static() -> None:
           "json_safe is defined in records.py and nowhere else",
           f"found {sorted(defs)}")
 
+    section("--pins fully determines the scored task")
+    # tools/score_sweep.py appended a hardcoded v29 PORTALS constant AFTER the
+    # pins, and Hydra takes the LAST override -- so `--pins` could not express
+    # the portal and v33 was scored on a 20cm doorway instead of its own 10cm
+    # one (36 of 60 benchmark episodes differed, digest c10067af8f09 vs the
+    # preregistered 249434216cd2). The portal now lives inside TASK_PINS.
+    ss = open("./tools/score_sweep.py", encoding="utf-8").read()
+    task_pins = re.search(r"TASK_PINS = \((.*?)\)\.split\(\)", ss, re.S)
+    check(task_pins is not None and "portals=" in task_pins.group(1),
+          "score_sweep's TASK_PINS carries the portal itself",
+          "a portal supplied outside the pins silently overrides --pins")
+    check("PORTALS" not in ss,
+          "score_sweep appends no task key outside the pins",
+          "PORTALS is back as a separate constant; that IS the v33 scoring bug")
+
+    section("the interface-key list agrees everywhere it is copied")
+    # These six keys are EXCLUDED from the env digest, so they decide what two
+    # checkpoints are allowed to be compared as. Four modules carry their own
+    # copy: eval_contact computes the digest, and three tools re-derive per-cell
+    # overrides from it. Deduping them would force tools/score_sweep.py, which is
+    # stdlib-only orchestration, to import hydra and numpy for one tuple -- so
+    # they stay copies and this check makes a silent divergence impossible.
+    # Scoring a contact_frame policy as finger_velocity inverted a whole v25
+    # result once; a key in one copy and not another is that bug's next form.
+    IFACE_RX = re.compile(r"(?:iface_keys|IFACE_KEYS)\s*=\s*\((.*?)\)", re.S)
+    iface_copies = {}
+    for path in ("./eval_contact.py", "./tools/score_sweep.py",
+                 "./tools/probe_goal_diversity.py", "./tools/probe_p0_readiness.py"):
+        m = IFACE_RX.search(open(path, encoding="utf-8").read())
+        # [^"]+ not [a-z_]+: a narrow class SKIPS a key it cannot parse, which
+        # made an added "slip_model2" invisible to this very check in testing.
+        iface_copies[path] = tuple(re.findall(r'"([^"]+)"', m.group(1))) if m else None
+    check(len(set(iface_copies.values())) == 1 and None not in iface_copies.values(),
+          "all four copies of the interface-key list are identical",
+          "; ".join(f"{k}={v}" for k, v in iface_copies.items()))
+    check(iface_copies["./eval_contact.py"] == (
+              "action_interface", "slip_model", "slip_limit",
+              "restrict_contact_actions", "mask_inactive_finger", "gap_assist"),
+          "the interface-key list is the expected six keys",
+          f"got {iface_copies['./eval_contact.py']} -- adding a key here silently "
+          f"REMOVES it from the env digest and orphans every stored score")
+
     section("import graph")
     for mod in ["config.loader", "domains.geometry", "domains.nav.partitions",
                 "domains.nav.sdf", "domains.nav.maze",
@@ -1067,6 +1109,66 @@ def cmd_contact() -> None:
     check(_raised == 2,
           "band rejects a wrong level count and a missing goal cone",
           "silent acceptance would run a ramp with windows that do not exist")
+
+    section("guard_face: adjacent bans the opposite face and nothing else")
+    from types import SimpleNamespace as _SNS
+
+    from domains.contact.planar_fingertips import IDX_CONTACT as _IC
+    from domains.contact.planar_fingertips import IDX_FINGER_XY as _IF
+    from domains.contact.planar_fingertips import IDX_NO_CONTACT_STEPS as _INC
+    from domains.contact.planar_fingertips import IDX_OBJ_HEADING as _IH
+    from domains.contact.planar_fingertips import IDX_OBJ_XY as _IO
+    from domains.contact_templates import nearest_face as _nf
+
+    def _guard_at(env, face_name):
+        """Teleport the active finger onto `face_name` and re-run the guard.
+        Placement goes through the env's own _face_geometry, so the test cannot
+        drift from the sampler the way a retyped offset would."""
+        env.reset(seed=99)
+        x = env._x.copy()
+        th = _m.atan2(float(x[_IH][1]), float(x[_IH][0]))
+        off, _n = env._face_geometry(face_name, th)
+        x[_IF[env._active_finger]] = (float(x[_IO][0]) + off[0],
+                                      float(x[_IO][1]) + off[1])
+        # The face check is gated on "touching", which physics stamps into the
+        # state on step, not on reset. Assert it so this tests the FACE
+        # predicate; the touching precondition is contact_lost's own gate.
+        x[_IC[env._active_finger]] = 1.0
+        x[_INC[env._active_finger]] = 0.0
+        got = _nf(x, env._active_finger, env.params.object_w_cm, env.params.object_h_cm)
+        leg = _SNS(direction=env._active_finger)
+        return got, env._tmpl.guard(x, frozenset(), 1.0, leg, params=env.params,
+                                    face=int(env._face_idx),
+                                    allow_adjacent=env.guard_face_adjacent)
+
+    _strict = ContactEnv(seed=0, curriculum_levels=None, guard_face=True, **_rc)
+    _adj = ContactEnv(seed=0, curriculum_levels=None, guard_face="adjacent", **_rc)
+    _bad = []
+    for _name in ("east", "west", "north", "south"):
+        for _env, _mode in ((_strict, "strict"), (_adj, "adjacent")):
+            _idx, _out = _guard_at(_env, _name)
+            _same = _idx == int(_env._face_idx)
+            _opp = _idx == int(_env._face_idx) ^ 1
+            _want = True if (_same or (_mode == "adjacent" and not _opp)) \
+                else "wrong_face"
+            if _out != _want:
+                _bad.append((_mode, _name, _out, _want))
+    check(not _bad,
+          "strict bans every face change, adjacent bans only the opposite one",
+          f"{_bad} -- the 4.0cm contact-loss budget already lets a finger round "
+          f"ONE corner, so adjacent bans exactly what physics does not")
+    check(_strict.guard_face and not _strict.guard_face_adjacent
+          and _adj.guard_face and _adj.guard_face_adjacent
+          and not ContactEnv(seed=0, curriculum_levels=None, **_rc).guard_face,
+          "guard_face reads false / true-as-strict / adjacent",
+          "one key, not two: a second key would enter every config's env digest")
+    _raised = 0
+    try:
+        ContactEnv(seed=0, curriculum_levels=None, guard_face="opposite", **_rc)
+    except ValueError:
+        _raised = 1
+    check(_raised == 1, "guard_face rejects an unknown mode",
+          "a typo would silently fall through to bool() and mean 'strict'")
 
     section("HER relabels only to settled, guard-valid ticks")
     import numpy as _np

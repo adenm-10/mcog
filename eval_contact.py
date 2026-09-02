@@ -171,7 +171,8 @@ def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]
     failures then adds the worst final-distance episode, because failures carry
     the information. `arrived` shows successes only, hardest (longest initial
     goal distance) first -- for showing what the policy can actually do.
-    `failed` is the mirror image, for diagnosis."""
+    `failed` is the mirror image, for diagnosis. `informative` is half of each:
+    hardest arrivals plus the dominant failure mode."""
     arrived = [i for i, r in enumerate(rows) if r["why"] == "arrived"]
     lost = [i for i, r in enumerate(rows) if r["why"] == "contact_lost"]
     other = [i for i, r in enumerate(rows) if r["why"] not in ("arrived", "contact_lost")]
@@ -181,12 +182,11 @@ def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]
         fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
         return sorted(fail, key=lambda i: -rows[i]["d0"])[:n]
     if prefer == "informative":
-        # Half TYPICAL arrivals (nearest the median success distance, not the
-        # easiest), half the DOMINANT failure mode. `arrived` shows the ceiling
-        # and `auto` leads with the shortest goals; this shows the middle.
+        # Half HARDEST arrivals, half the DOMINANT failure mode. `auto` leads
+        # with the shortest goals, which makes a good policy look trivial;
+        # this pairs the ceiling with the way it most often misses.
         k = max(1, n // 2)
-        med = float(np.median([rows[i]["d0"] for i in arrived])) if arrived else 0.0
-        pick = sorted(arrived, key=lambda i: abs(rows[i]["d0"] - med))[:k]
+        pick = sorted(arrived, key=lambda i: -rows[i]["d0"])[:k]
         fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
         if fail:
             common = Counter(rows[i]["why"] for i in fail).most_common(1)[0][0]

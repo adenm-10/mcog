@@ -316,7 +316,7 @@ def nearest_face(x: State, finger: Finger, ow: float, oh: float) -> int:
 
 
 def push_guard(x: State, allowed, cell_size, leg=None, *, params,
-               face: Optional[int] = None):
+               face: Optional[int] = None, allow_adjacent: bool = False):
     """`allowed`/`cell_size` are signature-compat only -- push has no cell grid.
     `leg.direction` names the active (pushing) finger.
 
@@ -325,6 +325,13 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params,
     walks around a corner onto a DIFFERENT face still satisfies "is touching",
     so without this check the option can violate the edge it was told to execute
     and be scored a success. None keeps the historical three-check guard.
+
+    `allow_adjacent` forbids only the OPPOSITE face. Rounding one corner is
+    inside what contact_lost already permits (CONTACT_N_GRACE_STEPS=5 ticks =
+    4.0cm of finger travel), while reaching the opposite face of a 10x6 object
+    needs ~7.5cm, so this bans exactly the transitions physics does not already
+    ban. v31 measured the strict form terminating 72% of episodes at 12 ticks
+    and taking all nine push cells to 0.000.
     """
     if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
@@ -340,10 +347,11 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params,
         return "contact_lost"
     # Only while actually touching: off-contact the "nearest face" is whatever
     # the grace window happens to drift past, which is not a mode violation.
-    if face is not None and _touching(x, active_finger) and \
-            nearest_face(x, active_finger, params.object_w_cm,
-                         params.object_h_cm) != int(face):
-        return "wrong_face"
+    if face is not None and _touching(x, active_finger):
+        near = nearest_face(x, active_finger, params.object_w_cm, params.object_h_cm)
+        bad = near == _opposite(int(face)) if allow_adjacent else near != int(face)
+        if bad:
+            return "wrong_face"
     return True
 
 

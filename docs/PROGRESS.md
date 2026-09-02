@@ -2363,3 +2363,276 @@ md5, so every cell ran the same tree. Preregistered verdicts are in the launcher
 
 **Next.** Score against `logs/eval/v32_floor/`. Then fix the recontact Gamma scoring bug
 before any recontact number is quoted, and delete the now-dead nested curriculum path.
+
+---
+
+## v33: pricing the scaffolds, and a face-guard measurement that qualifies v32 (2026-09-01)
+
+**Question.** v32 showed push is learnable with a reverse curriculum. But it is learnable on
+a task made easier than the memo's push option in several ways. Which of those scaffolds is
+load-bearing, and which is free to remove?
+
+### v32 result, final
+
+Scored with `tools/score_sweep.py --pins` from `logs/sweep_43572361/PINS.txt` into
+`logs/eval/v32_final/`, digest **`249434216cd2`**, matching `logs/eval/v32_floor/`.
+Goals >=3cm, `model.zip`:
+
+| arm | s0 | s1 | s2 | mean |
+|---|---|---|---|---|
+| `curric` | 0.604 | **0.750** | 0.667 | **0.674** |
+| `base` | 0.562 | 0.604 | 0.583 | 0.583 |
+| `raw` | 0.146 | 0.125 | 0.146 | 0.139 |
+| `curric_raw` | 0.083 | 0.083 | — | 0.083 |
+
+Untrained floor 0.042 (restricted) / 0.000 (raw). Task 11 (`curric_raw_s2`) died on a wandb
+init timeout and never trained; not resubmitted. **The curriculum helps** (3/3 seeds) and
+**does not replace the action restriction** (`curric_raw` 0.083 vs `base` 0.583).
+
+### The face-guard measurement, and what it costs the v32 headline
+
+Same two policies, one key flipped, nothing else changed (`logs/eval/v32_faceprobe/`):
+
+| policy | unguarded | `guard_face=adjacent` | `guard_face=true` (strict) |
+|---|---|---|---|
+| `push_curric_s1` | 0.683 | **0.483**  (wrong_face 13/60, 21.7%) | 0.083  (49/60, 81.7%) |
+| `push_base_s1`   | 0.600 | **0.583**  (wrong_face  9/60, 15.0%) | 0.083  (52/60, 86.7%) |
+
+**Face switching is how these policies push.** They leave the contacted face on 82-87% of
+episodes, at a median of 12 ticks. A claim made earlier in this session — that the 4.0cm
+contact-loss budget bounds face switching — was **wrong**, and is corrected here: that budget
+covers only time spent NOT touching, and a finger that keeps contact can slide along the
+surface without limit. The governing number is geometric. The finger spawns at the face
+CENTRE of a 10x6 object, so the corner is |ly| = 3*5.5/5 = **3.3cm** away, which is ~4 ticks
+at 20cm/s. Every episode starts four ticks from a face change.
+
+**The arm ordering inverts under the guard.** Unguarded, `curric` 0.683 > `base` 0.600.
+Under `adjacent`, `curric` 0.483 < `base` 0.583 — `base` loses 0.017 and `curric` loses
+0.200. Part of the curriculum's v32 advantage is therefore bought with behaviour that
+violates the edge label it was executing (Eq 7 makes the face an edge parameter; Eq 40's
+chi_push enforces it). **"The curriculum helps on the task as scored" stands. "The curriculum
+learns a better push option" does not.** Recorded as a negative result against v32's own
+headline, and it is what the v33 `faceguard` arm exists to settle.
+
+Both guarded numbers are ZERO-SHOT — policies that never saw the constraint, evaluated under
+it. They are the arm's floor, not a prediction.
+
+### `guard_face` gained an `adjacent` mode, folded into the existing key
+
+`false | true/"strict" | "adjacent"`; `adjacent` forbids only the OPPOSITE face
+(`face ^ 1`, `_opposite`). Chosen over `strict` because strict is unlearnable-shaped: v31
+took 9/9 push cells to 0.000 on it, and it scores 0.083 here with no training at all.
+
+Implemented as ONE key rather than a `guard_face_mode` companion, deliberately. The env
+digest is `sha1` over every env kwarg except the six interface keys, so a NEW kwarg would
+have moved the digest of every config in the repo and invalidated `logs/eval/v32_floor` and
+all of `logs/eval/v32_final`. Widening the existing key leaves `repr(False)` untouched.
+Verified: the v32 protocol still hashes to `249434216cd2` after the change.
+
+### The v33 sweep
+
+18 cells, 6 arms x 3 seeds, 600k steps. Every arm is v32's `curric` with exactly ONE key
+changed: `ctl`, `freefinger` (`mask_inactive_finger=false`), `widecone` (`push_cone_deg=90`),
+`spread` (`object_theta_spread_deg=90`), `faceguard` (`guard_face=adjacent`), `midaction`
+(`finger_velocity` + `restrict_contact_actions=true`). `ctl` is rerun rather than reused
+because this tree changed `contact_templates.py` and `gym_env.py`.
+
+Two key classes get two scoring treatments, and this is what makes the sweep readable.
+`freefinger` and `midaction` change INTERFACE keys, which sit outside the digest and are read
+per cell — same benchmark as `ctl`, directly comparable. `widecone`, `spread` and `faceguard`
+change TASK keys and carry their own digests; they are scored on the common tight protocol
+automatically, and on their own distribution only as a deliberate follow-up. Verified by
+smoke test: `ctl`/`freefinger`/`midaction` all hash to `a2520b17d6e7`, the other three to
+three distinct digests.
+
+### Automatic post-sweep media
+
+`slurm/finalize.sh` + `tools/render_best.py`. The last array task to finish auto-submits
+finalize, which scores every cell (both checkpoints) then renders the best checkpoint of the
+best seed of every arm — 3 hardest arrivals plus 3 of the dominant failure mode — into
+`media/<tag>/<arm>/`. `eval_contact.py`'s `informative` pick changed from median arrivals to
+HARDEST arrivals: `auto` was leading with 1-2cm goals, which makes a good policy look
+trivial.
+
+The benchmark protocol is no longer retyped in the scorer. The launcher writes it to
+`logs/sweep_<jobid>/PINS.txt` (atomically, via `mv`, since 18 tasks race) and finalize reads
+it. `render_best.py` then asserts the rendered eval reproduces the source eval's digest, so a
+video cannot silently be of different episodes than the number it illustrates.
+
+### Gate
+
+`contact` 138 -> **141**. Strict bans every face change and adjacent bans only the opposite
+one (all 4 faces x 2 modes, with the finger placed through the env's own `_face_geometry` so
+the test cannot drift from the sampler); `guard_face` reads false / true-as-strict /
+adjacent; an unknown mode raises. All five green: 26 / 27 / 141 / 172 / 18.
+
+### Launched and verified (2026-09-01 16:00, job 43679344)
+
+18/18 COMPLETED, 4:24-5:09 per cell. Verified at launch rather than assumed, because a
+one-factor sweep is worthless if any cell is off by two: all 18 cells present with the right
+arm/seed mapping, ONE `GIT_DIFF_SHA=989475b0a6b12832` across all 18, `PINS.txt` byte-identical
+to v32's, and every arm diffed against `ctl` **from the recorded `meta.txt`** (not from the
+launcher) to confirm exactly one factor moved.
+
+`midaction` shows five token differences and is still one factor: `slip_model` and `slip_limit`
+are contact-frame-only parameters with no meaning under `finger_velocity`, and
+`restrict_contact_actions` is the defining half of the middle rung.
+
+One false alarm worth recording, because the same trap will recur: `faceguard` and `midaction`
+appeared stalled at zero log blocks while the other arms were 14-22 in. They were fine.
+Python's stdout to a file is BLOCK-buffered, so `run.out` stays empty until ~4KB accumulates.
+**Progress is `progress.csv` and `model_best.zip`, never `run.out` size.**
+
+### The auto-finalize hook was broken, and had never worked on any sweep
+
+All 18 cells finished and `slurm/finalize.sh` never ran. Root cause, measured with a 3-task
+probe job rather than reasoned about: the last-task-standing test used
+`squeue -o "%A_%a"`, and on this Slurm **`%a` renders as the ACCOUNT name**, not the array
+index:
+
+```
+raw squeue output:   [43892866_hankyang_lab]
+task=2 still=[1]      # can never reach 0
+```
+
+So `grep -v "^<jobid>_<taskid>$"` matched nothing, `still` never reached 0, and the block was
+dead. It has been dead since it was written: `logs/sweep_{42300917,43572361,43679344}` all
+lack `slurm_logs/`, and 621 files / 20MB sit orphaned in `logs/slurm_staging/`.
+
+**This was inherited code that new automation got hung off without checking it worked** — the
+repo's own rule (a launcher is the only proof a flag is live) applied to a launcher and was
+not followed. Fixed to `-o "%i"`, which does render `<jobid>_<index>`, plus an atomic
+`mkdir "${SWEEP_DIR}/.finalized"` guard so two cells finishing in the same instant cannot both
+submit finalize. **Untested end to end — the next sweep is the test.** Until then, run
+finalize by hand: `sbatch slurm/finalize.sh logs/sweep_<jobid>`.
+
+### A SCORING BUG IN SHARED TOOLING, caught by the preregistered digest check
+
+The first scoring run came out at env digest **`c10067af8f09`**, not the preregistered
+`249434216cd2`. That is the declared STOP condition, and it fired correctly.
+
+Cause: `tools/score_sweep.py` built its command as `[*pins, PORTALS, *iface, *group]` with
+`PORTALS` a **hardcoded v29-era constant** (`portals=[{x:25.0,y_lo:5.0,y_hi:25.0}]`, a 20cm
+doorway). Hydra takes the LAST override, so the constant silently replaced v33's own 10cm
+doorway from `PINS.txt`. **`--pins` could not express the portal at all**, despite its help
+text promising it "replaces TASK_PINS wholesale". Confirmed by comparing benchmark episodes
+directly rather than trusting the digest string: **36 of the 60 initial states differed** from
+v32's set, so this was a real change of task, not a cosmetic rehash.
+
+Scope, checked rather than assumed:
+
+- **v33's first scoring: affected.** Cancelled mid-run (job 43892831) and quarantined at
+  `logs/eval/v33_WRONG_PORTAL_do_not_use/` with a README, because `score_sweep` skips cells
+  whose output already exists and would otherwise have silently reused them.
+- **v32 `logs/eval/v32_final/`: NOT affected.** It was scored by a hand-rolled loop, not
+  `score_sweep`, and its digest is the correct `249434216cd2`.
+- **v25/v26/v28/v29 eval dirs: not affected in the same way** — every one of those sweeps
+  trained on the 5-25 portal that the constant happened to hardcode. The one loose end is
+  v29's `bigroom` arm, which trained on `x:45,y 10-50` and was scored through `score_sweep`;
+  v29's portal arms had a dedicated scorer (`tools/score_v29_bc.py`) with explicit
+  WIDE/NARROW/BIGPORT constants, and `bigroom` is already recorded as unscoreable on a shared
+  benchmark, so nothing rests on it. Flagged, not silently blessed.
+
+Fixed by folding the portal INTO `TASK_PINS` and deleting the separate append, so `--pins`
+is authoritative as documented. Two gates added (`static` 28 -> 30): `TASK_PINS` must contain
+a `portals=` token, and the identifier `PORTALS` must not exist in the file — the second one
+fails the moment this exact bug regrows.
+
+**The lesson, and it is the same one twice in one session.** The auto-finalize hook was dead
+because a `squeue` format was never verified; this was dead because a tool's own help text
+was believed instead of its command. Both were found by checking output against a
+preregistered expectation. **The digest check is the only reason this sweep is not now a
+misleading result** — keep it as a hard stop.
+
+### Rescoring
+
+`sbatch slurm/finalize.sh logs/sweep_43679344 v33` (job 43894601) -> `logs/eval/v33/` and
+`media/v33/<arm>/`. `finalize.sh` gained an optional tag argument so the output is `v33`
+rather than `v43679344`.
+
+**One reassuring cross-check already in hand.** Rescored by hand under the correct pins,
+v33 `ctl_s1` reproduces v32 `curric_s1` to every reported digit — 0.683 all-bins, 0.917
+retention, 7.42cm displacement, 0.40cm final, 67 ticks. Same seed, same config, and the
+`guard_face` widening was behaviourally inert, exactly as the digest verification predicted.
+
+### v33 RESULT — all 36 evals at digest `249434216cd2`, goals >=3cm
+
+| arm | `model` | `model_best` | vs `ctl` | per-seed (`model`) |
+|---|---|---|---|---|
+| `ctl` | **0.674** | 0.688 | — | 0.750 / 0.667 / 0.604 |
+| `widecone` | 0.604 | 0.562 | **-0.069** | 0.750 / 0.562 / 0.500 |
+| `freefinger` | 0.583 | 0.542 | **-0.090** | 0.667 / 0.562 / 0.521 |
+| `spread` | 0.562 | 0.597 | **-0.111** | 0.625 / 0.562 / 0.500 |
+| `faceguard` | 0.562 | 0.472 | **-0.111** | 0.625 / 0.604 / 0.458 |
+| `midaction` | 0.139 | 0.146 | **-0.535** | 0.188 / 0.125 / 0.104 |
+
+**`ctl` reproduced v32 `curric` exactly: 0.674 vs 0.674.** Same seeds, same config, different
+job, on a tree that had changed `gym_env.py` and `contact_templates.py`. That is the
+replication check the arm was included for, and it passed.
+
+**Verdicts, against the rules written before the sweep.**
+
+- **No scaffold is CHEAP.** Nothing landed within 0.05 of `ctl`. `widecone` came closest at
+  -0.069 and still missed the bar. Every one of these four costs something real, so all four
+  go in the recorded fidelity-deviation list **with their prices** rather than being quietly
+  removed.
+- **One scaffold is LOAD-BEARING: the action space.** `midaction` -0.535. And the number is
+  exact: **0.139, identical to v32's `raw` arm at 0.139.** So adding
+  `restrict_contact_actions=true` on top of `finger_velocity` bought **precisely 0.000**,
+  with the curriculum on. v18 measured why and it still holds — 62% of contact breaks are
+  TANGENTIAL slides off a corner, which an outward-normal clamp never restricts. The contact
+  FRAME is doing the work, not the no-retreat constraint. `midaction_s0` and `_s2` are also
+  the only cells in the sweep with an empty distance bin, so they fail Bar 1 outright.
+- **Three arms land in the no-verdict band** (0.05-0.15 below `ctl`): `freefinger` -0.090,
+  `spread` -0.111, `faceguard` -0.111. Report the numbers, do not re-run hoping they move.
+- **`faceguard` clears its own bar decisively.** It was judged against 0.083 (untrained under
+  the guard), not against `ctl`. It reached **0.562** — and 0.562 also beats the 0.483
+  zero-shot number v32's best policy scored under `adjacent`. **The face constraint is
+  learnable, and it costs about 0.111.** That is the single most useful result here: it means
+  a push option can respect Eq 7's contact-face parameter at a priced, modest cost, instead
+  of the 0.000 that v31's strict form produced.
+
+**What this does to the v32 qualification.** v32's headline was qualified because the arm
+ordering inverted under the face guard, so part of the curriculum's advantage looked like it
+was bought with edge-label violations. `faceguard` at 0.562 does not erase that, but it
+changes the conclusion from "the curriculum may be exploiting a loophole" to "the loophole is
+worth ~0.111 and can be closed by training with it closed." The honest statement is now: the
+curriculum helps, and a face-respecting push option is available at a known price.
+
+### `faceguard` scored on its OWN distribution — training with the guard is COUNTERPRODUCTIVE
+
+Job 43895909, `logs/eval/v33_faceguard_own/`, digest `96762fdf1de4` (guarded distribution,
+deliberately not the tight benchmark). Goals >=3cm:
+
+| arm | trained with the guard? | `>=3cm` | per-seed | `wrong_face` rate |
+|---|---|---|---|---|
+| `faceguard` | yes | 0.542 | 0.438 / 0.625 / 0.562 | 9.4% |
+| `ctl` | **no** | **0.604** | 0.583 / 0.625 / 0.604 | 12.2% |
+
+**The policy that never saw the constraint scores HIGHER under it (+0.062).** Training with
+the guard did cut violations (9.4% vs 12.2%), but not nearly enough to pay for the success it
+cost. A terminating guard during training removes episodes that were on their way to a
+success, and at this strength it still costs more than it teaches — the same mechanism that
+took v31's strict form to 0.000, just milder.
+
+**This supersedes the reading written above from the tight-benchmark numbers alone.** The
+correct conclusion is not "the face constraint is learnable at ~0.111 by training with it."
+It is:
+
+- **The faithful, face-respecting push number is 0.604** — `ctl` scored under
+  `guard_face=adjacent`. That is the number to quote for a push option that honours Eq 7's
+  contact-face parameter, and it costs **0.070** against the unguarded 0.674, not 0.111.
+- **Do not spend cells training under the guard.** `ctl` already satisfies the constraint on
+  ~88% of episodes without ever being told about it. Enforce the face at EVAL and report the
+  guarded score; that is both cheaper and better.
+- v32's best policy scored 0.483 zero-shot under `adjacent` and v33's `ctl` scores 0.604, so
+  the guarded number improved between sweeps without anyone optimising for it.
+
+**Still outstanding:** the same own-distribution scoring for `widecone` (`push_cone_deg=90`)
+and `spread` (`object_theta_spread_deg=90`). Given how this one turned out, expect the
+loosened-training arms to underperform `ctl` on the loosened task too, and budget accordingly.
+
+**Next.** Read `logs/eval/v33_faceguard_own/`. Randomise the face-centre spawn — the centre
+puts every episode the same 4 ticks from a face change, and it is now clear the face
+constraint is worth respecting. Build the flat baseline; it must inherit all four priced
+scaffolds. Then the recontact Gamma scoring bug, and delete the dead nested curriculum path.

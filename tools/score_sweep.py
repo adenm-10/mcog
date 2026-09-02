@@ -25,8 +25,13 @@ TASK_PINS = ("use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true "
              "board_w_cm=50.0 board_h_cm=30.0 min_progress_ticks=1 "
              "learning_starts=10000 require_settled=false push_cone_deg=30 "
              "same_room_goal_prob=1.0 push_range_min_cm=null "
-             "object_theta_spread_deg=null angular_drag_arm_cm=6.0").split()
-PORTALS = "portals=[{x:25.0,y_lo:5.0,y_hi:25.0}]"
+             "object_theta_spread_deg=null angular_drag_arm_cm=6.0 "
+             # The portal belongs IN the pins. It used to be appended AFTER them
+             # as a separate hardcoded v29 constant, and Hydra takes the last
+             # override -- so it silently replaced any --pins portal and scored
+             # v33 on a 20cm doorway instead of its own 10cm one. 36 of 60
+             # benchmark episodes differed and the digest came out wrong.
+             "portals=[{x:25.0,y_lo:5.0,y_hi:25.0}]").split()
 
 
 def cell_dirs(sweep: str) -> list[str]:
@@ -46,7 +51,7 @@ def run(cell: str, ckpt: str, group_override: list[str], out: str,
         template: str, dry: bool, pins: list[str] = None) -> bool:
     cmd = [sys.executable, "eval_contact.py", f"contact={template}", "seed=0",
            *(pins if pins is not None else TASK_PINS),
-           PORTALS, *iface_of(cell), *group_override,
+           *iface_of(cell), *group_override,
            f"eval_ckpt={os.path.join(cell, ckpt)}", f"eval_out={out}"]
     if dry:
         print(" ".join(cmd))

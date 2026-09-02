@@ -90,7 +90,7 @@ class ContactEnv(gym.Env):
                 goal_gamma_modes: Optional[tuple] = None,
                 init_gamma_modes: Optional[tuple] = None,
                 rich_obs: bool = False,
-                guard_face: bool = False,
+                guard_face=False,
                 guard_object_still: bool = False,
                 portal_goal: bool = False,
                 portal_depth_cm: float = 2.0,
@@ -245,7 +245,17 @@ class ContactEnv(gym.Env):
         #   guard_object_still: recontact's standing invariant. Promoting it out
         #     of the arrival test also makes it visible to the HER validity
         #     filter, which is the point.
+        #     false | true/"strict" | "adjacent". "adjacent" forbids only the
+        #     OPPOSITE face, the set the 4.0cm contact-loss budget cannot reach
+        #     anyway; strict forbids any change and v31 measured that at 0.000
+        #     across nine cells. ONE key rather than a second mode key on
+        #     purpose: a new key would enter every config's env digest and
+        #     invalidate the v32 floor, while repr(False) here is unchanged.
+        if guard_face not in (True, False, "strict", "adjacent"):
+            raise ValueError("guard_face must be false, true/'strict', or "
+                             f"'adjacent', got {guard_face!r}")
         self.guard_face = bool(guard_face)
+        self.guard_face_adjacent = guard_face == "adjacent"
         self.guard_object_still = bool(guard_object_still)
         if self.guard_object_still and template != "recontact":
             raise ValueError("guard_object_still is recontact-only: push exists "
@@ -1263,6 +1273,7 @@ class ContactEnv(gym.Env):
         guard_kw = {}
         if self.template == "push" and self.guard_face:
             guard_kw["face"] = int(self._face_idx)
+            guard_kw["allow_adjacent"] = self.guard_face_adjacent
         elif self.template == "recontact" and self.guard_object_still:
             guard_kw = dict(object_still=True, eps_v_cm_s=self.eps_v_cm_s,
                             eps_omega_deg_s=self.eps_omega_deg_s)

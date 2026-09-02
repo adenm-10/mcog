@@ -281,6 +281,11 @@ guard_face: false         # push only -- also enforce the edge's contact FACE.
                           # another face still passes "is touching", so the
                           # option can violate the edge it was told to execute
                           # and still be scored a success.
+                          # false | true/strict | adjacent. `adjacent` forbids
+                          # only the OPPOSITE face: rounding one corner costs
+                          # <=4.0cm of finger travel, which contact_lost already
+                          # allows, while the opposite face of a 10x6 object
+                          # needs ~7.5cm. v31 measured strict at 0.000 on 9/9.
 guard_object_still: false # recontact only -- the object must not move. That is
                           # recontact's standing invariant (the target interface
                           # cannot be, since acquiring it is the point). As a
