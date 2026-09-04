@@ -2636,3 +2636,816 @@ loosened-training arms to underperform `ctl` on the loosened task too, and budge
 puts every episode the same 4 ticks from a face change, and it is now clear the face
 constraint is worth respecting. Build the flat baseline; it must inherit all four priced
 scaffolds. Then the recontact Gamma scoring bug, and delete the dead nested curriculum path.
+
+## obs v2: one normalizer, one head layout, and two live bugs closed (2026-09-02)
+
+**Question.** The observation vector grew feature-by-feature across v25-v33 and
+nobody had ever measured it. Which of its 41 dimensions carry signal, which are
+mis-scaled, and is anything simply wrong?
+
+### Measurement first (3 `ctl` seeds x 60 benchmark episodes = 17,506 ticks)
+
+Per-dimension mean / std / min / max / correlation-with-success, plus the full
+pairwise correlation matrix, over the concatenated 49-D network input
+(`observation` 41 + `achieved_goal` 4 + `desired_goal` 4 — SB3's
+`CombinedExtractor` uses `Flatten` for all three keys, so nothing is normalized
+anywhere).
+
+**Five findings, all measured:**
+
+1. **Three scale bugs.** Angular velocity had **no divisor at all** (range
+   +/-3.27, the only over-range feature) while every neighbouring velocity was
+   divided by `v_max`. Peak force was divided by **1000.0** — a fallback reached
+   because `force_abort_kgcms2` is `null` in every config — against a measured
+   p99 of 284/323, so it only ever occupied [0, 0.5] with typical values
+   0.03-0.06. Goal-relative position was divided by the board extent (50) though
+   a goal never sits more than one same-room diagonal (22.2cm) away: measured std
+   **0.039 / 0.071**, the two weakest signals in the entire vector.
+2. **Six dimensions are exactly constant** — the template one-hot (2) and the
+   source-interface one-hot (4). **Kept deliberately**, see below.
+3. **`xi_act_L` and `xi_act_R` correlate at exactly `-1.000`** — a 2-dim one-hot
+   for a binary fact.
+4. **The largest scale problem is OUTSIDE `observation`.** The four
+   highest-variance dimensions of the whole network input are the goal keys'
+   positions — `achieved_goal.x` std **7.79**, `desired_goal.x` 7.55,
+   `achieved_goal.y` 4.64, `desired_goal.y` 3.93 — against a median of 0.227 and
+   a next-largest of 0.53. That is a **34x** ratio, in raw centimetres. And those
+   four dims are absolute board position, which `obs()`'s own docstring says it
+   deliberately drops ("so one shared policy sees near-identical inputs for the
+   door at x=30 and the door at x=60"). The object-centric design is defeated at
+   the goal keys, not inside the observation. **Left for the VecNormalize step;
+   NOT fixed here.**
+5. **Relative heading is the single strongest predictor of success (0.565)**, far
+   ahead of object heading (0.368), wall distance (0.307) and peak force (0.225).
+   Third independent confirmation that the ORIENTATION gap, not distance, is
+   push's real difficulty axis.
+
+### Two live bugs found in recontact, both confirmed by code trace AND measurement
+
+**A. `obs()` hardcoded `obj_xy` where it meant `achieved_goal`.** The goal tail
+was `(target - object_WORLD_position) / scale`, but recontact's goal is a
+fingertip target in the **OBJECT's** frame. Measured `goal_rel_x` mean
+**-0.492** (= -40/80, the object's board-centre x) over a range of only 0.21 —
+the feature was mostly encoding the object's board position.
+
+The correct formula **already existed in this repo**, in push's HER patcher:
+`(new_goals[:, :2] - ag[:, :2]) / pos_scale`. `obs()` only agreed with it for
+push because push's `achieved_goal[:2]` *is* `obj_xy`. Fixed by passing
+`achieved` in; **bit-identical for push**.
+
+It was invisible because recontact pins the object at the board centre, so the
+offset is a learnable constant. **It would have broken the moment push handed the
+object over anywhere else** — i.e. in composition, in the one template whose
+entire job is being composable. This is memo sec 7's row verbatim: "No
+unseen-topology transfer -> local policies encode global coordinates or board
+identity -> object-centric observations."
+
+**B. The HER goal-tail patch was push-only.** `DonePatchedHerReplayBuffer._patch_observations`
+was an empty method body, and `train_contact.py` hands recontact that class. So
+recontact's goal-derived tail described the OLD goal on ~80% of every relabeled
+batch — **both** the 2-D and the Gamma variant, not just Gamma as the module
+docstring claimed.
+
+**The two bugs masked each other**, which is why neither showed: bug A made
+recontact's tail near-constant, so a stale value looked like a fresh one. Fixing
+A without B would have made recontact **worse** with no visible cause. They land
+in one commit, and gate (f) below asserts it.
+
+### What changed
+
+- **`physics.ObsScales`** — the one place any divisor may live. Six named fields
+  (`pos`, `goal`, `wall`, `vel`, `omega`, `force`). `.v1()` reproduces the
+  historical constants **including both bugs** (`omega=1.0` is the *absence* of a
+  divisor; `force=1000.0` was the fallback), so archived checkpoints replay
+  bit-identically. `.v2()` fixes all three. Before this the scales sat in three
+  scopes and one was a hand-copied duplicate in `her_buffer.py` kept in step by a
+  comment.
+- **`obs_version=1|2`**, an **INTERFACE key**, not a task key: it changes how the
+  policy reads the world, not the reset distribution, reward or horizon.
+  **Verified: the v32/v33 digest `249434216cd2` is unchanged**, so
+  `logs/eval/v32_floor`, `logs/eval/v32_final` and all of `logs/eval/v33` stay
+  valid, no floor re-measurement is needed, and obs v1 vs v2 is an arm scorable
+  on ONE benchmark.
+- **v2 layout: the state+xi head is 36 dims for EVERY template** (push,
+  recontact-2D, recontact-Gamma), asserted by gate (c). `xi` is always emitted at
+  `N_XI_V2 = 11`; the active-finger pair collapses to one scalar (finding 3).
+  **The constant template and interface one-hots are KEPT** — that is the point,
+  not an oversight: a shared head is what lets one template's policy load against
+  another's env (Eq 9, sec 6.2's universal-actor ablation, and composition). The
+  GOAL block stays template-specific at 4/2/6, because different arity is
+  semantically correct. Totals: push **40**, recontact-2D **38**,
+  recontact-Gamma **42**.
+- **One HER patcher for all templates.** `_patch_observations` moved to the base
+  class and is driven by the goal's arity, since that alone identifies the
+  template: 2 -> two position deltas; 4 -> two deltas + relative heading;
+  6 -> four deltas + the two touch flags. `PushRelabelSafeHerReplayBuffer` now
+  carries only the relabel tick lag.
+- `pos_scale` survives as a **load-only alias** for `goal_scale`. SB3 bakes
+  `replay_buffer_kwargs` into the checkpoint zip and reconstructs the buffer with
+  them on `load()`, so dropping the name made every v25-onward push checkpoint
+  unloadable — caught by replaying v33 `ctl_s1`, not reasoned about.
+
+### Gates: `contact` 141 -> 159, `static` 30 -> 30 (one rewritten)
+
+New section "obs v2: one head layout, one normalizer, and the frame fix":
+(a) `obs()` contains **no bare numeric divisor** and `her_buffer.py` no longer
+carries its own position scale; (b) `.v1()` reproduces the historical constants,
+bugs included; (c) the state+xi head is 36 for every template; (d)
+`obs_version=2` without `rich_obs` raises rather than emitting a short head;
+(e) the recontact tail is `(desired - achieved)` with both in the object frame,
+**plus a check that v1's tail really did encode board position** so the bug this
+replaces cannot be called hypothetical (measured v1 `-0.630` vs v2 `+0.371` on
+the same reset); (f) the HER patch reproduces a from-scratch `obs()` for all
+three template/goal combinations — it previously covered push only.
+
+`static`'s interface-key check was rewritten from "the expected six keys" to
+nine, with a comment recording WHY the three new keys belong outside the digest
+and that anything moving the TASK must not join them. It fired correctly on the
+first attempt, which is what it exists for.
+
+### Verification
+
+- **All five gates green: 30 / 27 / 159 / 172 / 18.**
+- **v1 is bit-identical, verified by replay, not by argument.** v33 `ctl_s1`
+  re-scores to 0.683 all-bins / 0.917 retention / 7.42cm displacement / 0.40cm
+  final / 67 ticks — every reported digit — and all 60 episodes match the
+  archived `logs/eval/v33/1_push_ctl_s1__model.json` on `(d0, success, steps,
+  why, q0, final_dist)` with **0 differing episodes**. `recon_base_s1` likewise
+  re-scores to 0.983 with all 60 episodes identical.
+- **v2 conditioning, measured over 40 untrained episodes per version:**
+  observation `|max|` **2.23 -> 1.296** (the angular-velocity over-range is
+  gone), goal-tail std **0.080 -> 0.181** (2.25x better). The 34x
+  goal-key ratio is **unchanged and still open** — that is the VecNormalize step,
+  deliberately not in this commit.
+- **Smoke-trained at v2:** push 2,500 steps, and BOTH recontact variants
+  (2-D and Gamma with `init_gamma_modes=[free,push,pivot,pinch]`) 2,000 steps,
+  which is what exercises the new HER tail patch inside the real training loop.
+
+### Also closed this session: `recon_base` has a benchmark number at last
+
+`docs/TODO.md` Immediate #4 asked for this since v23. Scored on the stratified
+60-episode protocol on current code, digest `a78252c0a0a6`, 3 seeds:
+**0.967 / 0.983 / 0.983, mean 0.978**, no floored bin, 58-59 of 60 `arrived`.
+Better than the 0.906-0.941 diag-eval figure and the v23 protocol's 0.783-0.917.
+NOTE this is recontact's own reset distribution, not the push benchmark.
+
+**Next.** VecNormalize on the goal keys only (`norm_obs_keys=["achieved_goal",
+"desired_goal"]`) — verified safe because `compute_reward` and `_her_arrived`
+run on RAW arrays at `her_buffer.py:130-135`, *before* `_normalize_obs` at
+136-137, so `arrival_eps=0.4` keeps meaning 0.4cm and there is no split unit
+system. Then the Gamma arrival dispatch, the reward-vector extension, PPO, and
+the recontact launcher parity.
+
+## P1-P4: goal-key normalization, the Gamma arrival fix, and a reward vector that can express what a dense push run needs (2026-09-02)
+
+Four items, one commit. **All five gates green: 30 / 27 / 192 / 172 / 18** (`contact`
+159 -> 192). Archived checkpoints re-verified bit-identical at the end, not assumed.
+
+### P1 -- VecNormalize on the GOAL KEYS ONLY (`normalize_goal_keys`)
+
+The 34x conditioning problem measured in the obs-v2 entry: `achieved_goal` /
+`desired_goal` positions are raw centimetres and are the four highest-variance
+dimensions of the whole 49-D network input (std 7.79/7.55/4.64/3.93 against a
+median of 0.227), because SB3's `CombinedExtractor` just `Flatten`s every key.
+
+`VecNormalize(norm_obs_keys=["achieved_goal","desired_goal"], norm_reward=False)`.
+**`observation` is deliberately excluded**: 22 of its dims are unit-vector pairs
+or one-hots, and whitening those destroys `cos^2+sin^2=1` and "exactly one is 1".
+Those got analytic divisor fixes in obs v2 instead.
+
+Three things verified rather than assumed:
+
+- **Safe with HER.** `compute_reward` and `_her_arrived` run on RAW arrays at
+  `her_buffer.py:130-135`, *before* `_normalize_obs` at 136-137. So
+  `arrival_eps=0.4` keeps meaning 0.4cm and there is no split unit system --
+  which is the whole reason this route beat scaling the keys analytically (that
+  would have touched nine call sites, including `eval_contact`'s distance
+  binning).
+- **The declared Box is untouched.** `VecNormalize.__init__` only rewrites
+  `observation_space` for IMAGE spaces, so `check_for_correct_spaces` still
+  passes and archived checkpoints still load.
+- **The stats travel with the checkpoint, and eval REFUSES without them.**
+  `vecnormalize.pkl` beside `model.zip`, `vecnormalize_best.pkl` beside
+  `model_best.zip` (the stats drift, so best needs the stats as of the step it
+  was best at). `eval_contact._load_vecnorm` raises in BOTH directions --
+  flag-on-stats-missing and stats-present-flag-off -- because either way the
+  policy is scored on an input distribution it never trained on, and that looks
+  exactly like a bad checkpoint. All four cases exercised by hand.
+
+The periodic-eval callback needed it too: its envs are BARE gym envs, so it now
+takes an `obs_normalizer` and applies it **at the predict() call only** -- its
+distance binning has to stay in raw cm or the bin edges move silently.
+
+### P2/P3 -- the Gamma arrival dispatch, and a tolerance that travels
+
+**P2.** `step` scored recontact-Gamma arrival with
+`recontact_arrival(target=self._goal_xy[:2], direction=active_finger)`. Under a
+Gamma goal `_goal_xy[:2]` is finger **L's** slot, so with R active it measured R
+against L's target. Active is R about half the time -- matching the measured
+254/500 (50.8%) of resets where a state perfectly achieving the intended 6-D goal
+scored arrived. The correct 6-D conjunction existed but was reachable only from
+`_her_arrived`, so **the rollout reward and the relabeled reward optimized two
+different objectives**, and ~63 GPU-hours of Gamma arms are uninterpretable.
+
+Now `step` routes through a new `_gamma_arrival`, which wraps `_gamma_arrived`
+into an `Arrival`. `dist_to_target` is the WORST per-finger distance, matching a
+new `_gamma_dist` -- `goal_dist` would have read finger L's slots only, i.e. the
+same slicing mistake one level down. `_goal_dist_vec` does the batched version
+for `compute_reward`.
+
+**P3.** `_gamma_arrived` fell back to `self._gamma_tol`, and SB3 calls
+`compute_reward` through `env_method(..., indices=[0])` -- so a whole relabeled
+batch was graded against whatever interface **env 0** happened to be in at sample
+time, not the one its own episode drew. The tolerance now rides per transition in
+`info["gamma_tol"]`, the same pattern as `pre_achieved_goal` / `obj_settled`
+(recontact already sets `copy_info_dict=True`).
+
+**And the gate that should have existed.** `gamma_goal` was instantiated **ZERO
+times** in a 159-check harness -- that is how this ran broken. Eight new checks,
+the load-bearing one being: a state placed exactly on both fingertip targets with
+both touch flags satisfied must score arrived **for both L-active and R-active**.
+Measured 12/12 and 12/12; under the old code the R-active column was the bug.
+
+### P4 -- a reward vector that can express contact, face, and stability
+
+None of the three things you asked to encourage was expressible. `w_m` was ONE
+scalar charged for ANY guard outcome (so contact-loss and wrong-face could not be
+weighted apart), there was no per-tick contact term at all, and settling lived
+inside a binary arrival flag. Added, all defaulting to inert:
+
+- **`w_guard`** -- per-outcome penalties, keys from the new `GUARD_OUTCOMES`,
+  falling back to `w_m` so an outcome added to a template's guard cannot silently
+  become free.
+- **`w_hold`** -- per tick, paid only on the conjunction "required contact held
+  AND on the commanded face". One term, not two: separately they double-count.
+- **`w_settle`** -- per tick, paid only while settled AND within
+  `settle_radius_cm`. The proximity gate is load-bearing.
+- **`w_prog`** -- POTENTIAL-BASED distance shaping. Gated by a round-trip test:
+  a closed loop back to the start sums to 0.0, which absolute `w_d` does not
+  (same loop costs -9.0). `w_d` charges the absolute distance every tick, so at
+  0.005 a 20cm goal costs -20 over 200 ticks, TWICE the arrival bonus -- that
+  arithmetic is the whole "bailing out was cheaper than attempting" story.
+- **`w_arrive_pos`** -- one-shot bonus for position-only arrival, so the settle
+  requirement is a gradient rather than a cliff (53% of push's failures already
+  land within 1cm).
+
+**`target_clip` and dense shaping are now REFUSED together.** The `[0, clip]`
+bound assumes `Q* <= goal_reward`; with any per-tick penalty the true Q on a
+failing state is negative, so the lower clamp biases the critic upward exactly
+where it must learn "this is bad". `train_contact` raises. Worth stating plainly
+that this is a real trade: `target_clip` is what took recontact 1/6 -> 6/6 seeds.
+
+### TWO SELF-INFLICTED CHEATS, BOTH CAUGHT BY SMOKE RUNS RATHER THAN BY READING
+
+Recorded because the pattern is the point: every dense term needs a metered cap,
+and reasoning about the weights was not enough.
+
+**(a) An uncapped per-tick bonus scales with the horizon.** At `w_hold=0.02` on a
+200-tick horizon, a 2,000-step run reached **ep_rew_mean 4.57 with success_rate
+0.0 and every episode at the full horizon** -- "hold contact and stall" was
+already worth 46% of the arrival bonus. Same shape as v16's wall-parking cheat.
+Fixed with `hold_cap` (default 2.0), mirroring `settle_cap`.
+
+**(b) `w_arrive_pos` was documented one-shot and implemented PER TICK.** Position
+arrival does **not** terminate the episode -- only `reached_interface` does, and
+push has no overshoot guard -- so a policy parking at the goal while jittering
+would have earned 3.0 EVERY tick: **600 against a 10.0 arrival bonus**. Now
+credit-metered to fire once.
+
+Measured effect of metering, same config and seed, 2,000 steps:
+
+```
+                      ep_rew_mean   success   ep_len
+per-tick, uncapped           4.57      0.000    200.0
+capped hold only             3.86      0.125    178.4
+all three metered            1.62      0.125    178.4
+
+max earnings WITHOUT arriving, 200-tick horizon:
+  before   hold 4.00 + settle 0.50 + arrive_pos 3.00x200 = 600   -> 60x the bonus
+  after    hold 2.00 + settle 0.50 + arrive_pos 3.00 once = 5.50, less 2.00 time
+```
+
+**Revised starting weights**, from this: `w_hold=0.005-0.01` (not 0.02),
+`hold_cap=2.0`, `w_settle=0.02`/`settle_cap=0.5`, `w_arrive_pos=3.0`, `w_T=0.01`,
+`w_prog=0` or small, `w_d=0` always, guards
+`{contact_lost: 2, wrong_face: 2, forbidden_contact: 3, off_board: 5}`.
+
+### A DIGEST TRAP, and the discipline that fixes it
+
+Adding fields to `RewardWeights` moved the env digest of **every config in the
+repo** -- `249434216cd2 -> 436dee0952c5` -- because the digest is a sha1 over
+`repr()` of each env kwarg and a stock dataclass repr lists every field. Caught by
+replaying v33 `ctl_s1`: all 60 episodes came back **bit-identical** while the
+digest string had changed. That would have orphaned `logs/eval/v32_floor`,
+`logs/eval/v32_final` and all of `logs/eval/v33`.
+
+A *minimal* repr did not fix it either (`-> af4bf51bbb02`): the archived digests
+were computed from the FULL seven-field string, so that exact string is what has
+to be reproduced. `RewardWeights.__repr__` now emits the seven legacy fields
+always, in their frozen order, then any NEW field only when it is set. Same
+discipline as folding `adjacent` into the existing `guard_face` key in v33.
+
+**Verified restored: `249434216cd2` and `a78252c0a0a6`, both with 0 of 60
+episodes differing.** Gated by an equality check against the archived repr string
+plus a check that a SET weight still moves it -- otherwise the trick would hide
+real reward changes, which is worse than the bug.
+
+`normalize_goal_keys` joined the interface-key list (now ten, cross-checked
+across four files by `static`), so it too is outside the digest and obs-v1-vs-v2
+and normalized-vs-raw are all arms scorable on ONE benchmark.
+
+### Verification summary
+
+- Gates **30 / 27 / 192 / 172 / 18**.
+- v33 `ctl_s1` -> 0.683 / 0.917 / 7.42cm / 0.40cm / 67 ticks, digest
+  `249434216cd2`, **0 of 60 episodes differing**. `recon_base_s1` -> 0.983,
+  digest `a78252c0a0a6`, likewise.
+- `normalize_goal_keys=true` trained, stats saved, scored; the refusal fires in
+  both directions and `model_best` picks up `vecnormalize_best.pkl`.
+- recontact-Gamma smoke-trained through the NEW dispatch with
+  `init_gamma_modes=[free,push,pivot,pinch]`, pure sparse.
+- dense push smoke-trained at the recommended weights with `target_clip=null`,
+  and refused with `target_clip` set.
+
+**Next.** P5 PPO, P6 recontact launcher parity + `finalize.sh --template` + the
+object-frame video overlay, P7 along-face spawn randomization (prerequisite for
+the diversity sweep -- a face-centre contact produces exactly zero torque), P8
+housekeeping, P9 floor re-measurement (needed only for P7 now, since neither obs
+v2 nor these four moved the digest).
+
+## P5: the PPO path (2026-09-02)
+
+Memo sec 4's "PPO as an algorithm-independence replication", Table 4's settings.
+**All five gates green: 30 / 27 / 204 / 172 / 18** (`contact` 192 -> 204). SAC
+re-verified bit-identical: v33 `ctl_s1` and `recon_base_s1` both replay with 0 of
+60 episodes differing and their digests intact.
+
+### The key is `rl_algo`, not `algo`
+
+`algo=ppo` on the CLI dies with **"Could not override 'algo'. No match in the
+defaults list."** `config/algo/{sac,ppo}.yaml` exists for nav, so Hydra parses
+`algo=` as a config-GROUP override, and `config/train_contact.yaml`'s defaults
+list has no `algo` entry. Renamed to `rl_algo`, with a gate asserting both that
+the key is `rl_algo` and that `config/algo/` really exists -- otherwise a later
+tidy-up renames it back and the collision returns.
+
+### What PPO refuses, what it drops, and why the line is there
+
+- **REFUSED: `use_her`, `target_clip`.** Both change what is being trained, so a
+  launcher setting them for PPO means someone believes they are getting HER or a
+  clamped critic. `use_her` has no replay buffer to relabel into (the memo notes
+  HER "is not standard" for PPO and suggests goal-resampled on-policy rollouts,
+  which is a separate build); `target_clip` has no TD target to clamp.
+- **ANNOUNCED AND DROPPED: `learning_starts`.** It is an SAC-only knob that
+  rides along in the SHARED protocol pins -- `logs/sweep_*/PINS.txt` carries
+  `learning_starts=10000` -- so refusing it would force every PPO arm to edit
+  the pin set, breaking the "PINS.txt is authoritative" discipline v33
+  established after the hardcoded-portal bug. Printed, never silent.
+
+  This distinction was found by running it: with the v33 pins, the refusal fired
+  on every PPO invocation and made the flag unusable in a sweep.
+- **WARNED, not refused: pure sparse.** PPO has no HER, so a one-shot arrival
+  bonus gives it almost no gradient (push's untrained floor is 0.042 on goals
+  >=3cm). A sparse PPO arm is a legitimate negative control, but it must be a
+  deliberate one, so `train_contact` says so loudly and continues.
+
+### Two conventions carried over rather than reinvented
+
+**`n_steps` is the TOTAL rollout across envs**, divided by `n_envs`, exactly as
+`train.py` and `config/algo/ppo.yaml` do it. SB3's own `n_steps` is PER env, so
+getting this backwards changes the update size by a factor of `n_envs` with no
+error. `n_envs` must divide it. Default 4096, inside Table 4's 2048-8192.
+
+**`net_arch=null` resolves to `[256, 256]` for BOTH algos.** SB3's PPO default is
+`[64, 64]` against SAC's `[256, 256]` -- about **16x fewer parameters** -- and
+memo sec 9 requires the advantage to survive a control for total network
+capacity, so shipping SB3's asymmetric defaults would have confounded the entire
+comparison before it ran. Table 4's literal 3x256 is available as
+`net_arch=[256,256,256]` and is a recorded deviation. **SAC is passed
+`policy_kwargs` only when `net_arch` is set explicitly**, so its default path
+stays byte-for-byte SB3's rather than depending on `[256, 256]` happening to
+equal SB3's SAC default today.
+
+### eval_contact branches on the value head, and labels the column
+
+PPO has no critic. `hasattr(model.policy, "critic")` selects between SAC's
+min-over-twin-Q(s0, pi(s0)) and PPO's `predict_values(s0)`. They go in the same
+column because the comparison of interest is the same -- predicted value against
+realized return -- but **they are different quantities**: V is the value of the
+policy's own action distribution, not of the greedy action. The printout says
+`V(s0) ... [V, not Q -- not comparable to a SAC gap]` so the two are never read
+as one number.
+
+`rl_algo` also joined the interface-key list (now **eleven**, cross-checked
+across four files by `static`), so it is forwarded per cell by
+`tools/score_sweep.py` from `meta.txt` and stays outside the env digest -- a PPO
+arm and a SAC arm score on ONE benchmark.
+
+**And a wrong `rl_algo` now raises a named error.** Loading a PPO zip through SAC
+surfaced as `AssertionError: N-step returns are not supported for Dict
+observation spaces yet` from deep inside the replay buffer, which reads like a
+corrupt checkpoint. Wrapped: the message now names the checkpoint, the flag, and
+where the flag comes from.
+
+### Verification
+
+- Every refusal exercised by hand: `use_her`, `target_clip`, a bad `rl_algo`
+  value, `n_envs` not dividing `n_steps`, and the two non-fatal notices.
+- **PPO trains.** 8,192 steps, `n_envs=4`, `n_steps=1024`, dense reward,
+  `lr_linear_decay=true`: `explained_variance` climbed **0.009 -> 0.491**, so the
+  value head is learning. `clip_fraction` 0.12 -> 0.08.
+- **`net_arch` verified on the saved policy**, not just in the call:
+  `[(256, 48), (256, 256)]`, and input 48 = obs 40 + achieved 4 + desired 4.
+- **PPO checkpoint scored** at digest `249434216cd2` -- the same benchmark the
+  SAC arms use -- reporting V(s0) with its caveat. 0.100 at 8k steps, which is
+  an untrained number and quoted only to show the path runs.
+- **PPO + `normalize_goal_keys` together**: trains, saves both stats files,
+  scores.
+- SAC bit-identical, both templates, digests intact.
+
+**Next.** P6 (recontact launcher parity, `finalize.sh --template`, the
+object-frame video overlay), P7 (along-face spawn -- a face-centre contact
+produces exactly zero torque, so it gates the diversity sweep), P8 housekeeping,
+P9 floor re-measurement for P7 only.
+
+## P6-P9: recontact automation, the along-face spawn, the nested deletion, and a new floor (2026-09-03)
+
+**All five gates green: 30 / 27 / 225 / 172 / 18** (`contact` 204 -> 225).
+Archived checkpoints re-verified bit-identical at the end: v33 `ctl_s1` replays
+to 0.683 / 0.917 / 7.42cm / 0.40cm / 67 ticks at digest `249434216cd2` with
+**0 of 60 episodes differing on any recorded field**, and `recon_base_s1` to
+0.983 at `a78252c0a0a6`.
+
+### P6 -- recontact can now be swept and rendered like push
+
+**`slurm/submit_sweep_recontact.sh` was a stale 67-line script** with none of
+the v33 apparatus: no `PINS.txt`, no `GIT_DIFF_SHA`, no `uncommitted.diff`, and
+the DEAD `squeue -o "%A_%a"` last-task test (on this Slurm `%a` renders as the
+ACCOUNT name, so the block never ran on any sweep). Rewritten as Sweep D with
+the full apparatus, plus two groups selected by `--export=ALL,GROUP=`:
+
+- `GROUP=base` (3 cells): does obs v2 COST recontact anything? Changes obs and
+  nothing else -- it pins `angular_drag_arm_cm=6.0`, the value `recon_base`
+  actually trained on, and keeps `recontact.yaml`'s shaping. A replication that
+  silently inherited the new 3.12 default would not be a replication.
+- `GROUP=gamma` (9 cells): `gamma_free` / `gamma_init` / `gamma_init_shaped`.
+
+**Two groups, two sbatch calls, two PINS files, deliberately.** The 2-D
+single-finger goal and Eq 13's 6-D interface goal are different GOAL SPACES, so
+`check_for_correct_spaces` refuses to load one against the other's env -- they
+can never share a benchmark, and one PINS.txt would be wrong for three cells.
+
+`init_gamma_modes` is a TASK key, so PINS pins the COMMON protocol at
+`init_gamma_modes=[free]` (the harder, canonical acquisition task) and the
+starting-in-an-interface arms need v33's two-way treatment. One bug caught while
+writing it: `w_guard` makes `RewardWeights.dense()` true, so passing it to the
+pure-sparse arms would have tripped the `target_clip` refusal at startup. It is
+now scoped to the shaped arm through a bash ARRAY, which expands to nothing when
+empty rather than to an empty argument Hydra rejects.
+
+**`finalize.sh` recovers the template from the runs**, not from an argument:
+`sed -n 's/^TEMPLATE=...' <sweep>/*/meta.txt | head -1`. Verified against both
+real sweeps -- `43679344` -> push, `42617867` -> recontact. A hand-typed template
+is one more thing that can disagree with what trained, which is the same reason
+`PINS.txt` is read rather than retyped.
+
+### P6 -- and the recontact video was broken TWO ways, both now fixed
+
+**(a) The goal marker was drawn in the wrong place.** `Snapshot.goal_xy` is
+documented as "the DESIRED OBJECT POSITION, not a finger target", and recontact's
+goal is a FINGERTIP target in the OBJECT's frame. It was being forced into
+`goal_xy` anyway. Added `finger_goals` / `finger_goal_tol_cm` (world frame, one
+marker per fingertip with its own tolerance ring, since Eq 13's tolerances are
+deliberately asymmetric at 0.3cm anchor / 2.0cm retracted).
+`physics.to_snapshot` does the object->world transform PER FRAME -- not once per
+episode -- because the object drifts and recontact's whole premise is that it
+should not; a fixed world position would hide exactly that. `visualize.py` stays
+frame-agnostic, per its own contract.
+
+Two follow-ons the fix exposed: `goal_dist` now returns the WORST fingertip
+distance for a two-finger goal (it was reading nan, so the caption and the
+closest-approach marker were both dead for recontact), and `save_video` trails
+the ACTIVE FINGER when the goal is a fingertip target -- trailing the object
+drew a still dot and hid the only motion in the clip.
+
+**(b) EVERY recontact mp4 was 0 bytes, with ffmpeg silent on stderr.** libx264
+with yuv420p rejects an odd axis, and `save_video` passes
+`macro_block_size=None` so nothing pads frames. The 80x60 recontact board
+renders **509px** tall -- `6.0 * 60/80 + 0.6 = 5.1in`, and `5.1 * 100dpi`
+truncates to 509 -- while push's 50x30 board gives 420. **That is why this only
+ever broke recontact, and why the five archived v23 clips are the only recontact
+media that exists.** Fixed by trimming the frame ARRAY (`_even_frame`), not by
+choosing an even figsize: asking matplotlib for exactly 5.10in still renders 509.
+
+Verified end to end: a `recon_base_s1` clip now writes 25-40KB mp4s, and the
+rendered still puts the X target and its tolerance ring exactly where finger L
+lands, with the closest-approach marker on the finger rather than the object.
+
+### P7 -- the along-face spawn (`push_spawn_along_frac`)
+
+The active finger spawned at the exact face CENTRE (measured max along-face
+offset **0.0000cm** over 400 resets) against the memo's "random point along the
+face". Three reasons that is not cosmetic, and the third is the load-bearing one:
+
+1. it is a spec deviation;
+2. the centre of a 10x6 object's long face is 3.0cm from the corner, ~4 policy
+   ticks at `v_max`, so every episode started the same few ticks from a face
+   change -- and policies leave the contacted face on 82-87% of episodes;
+3. **a contact at the face centre pushing along the inward normal produces
+   EXACTLY ZERO torque**, because the lever arm is parallel to the force. All of
+   push's rotation authority came from the friction-limited tangential
+   component, which is why net rotation measures a median 1.8deg/episode against
+   a +/-45deg goal window. So this GATES the orientation-diversity experiment:
+   widening the window without it only manufactures unwinnable episodes.
+
+`None` draws no extra random number (bit-identical, verified 0/300 nonzero);
+`0.7` gives 300/300 off-centre, max 3.475cm = 0.7 x the 5.0cm half-face. Capped
+at 0.9 because a contact ON the corner makes `nearest_face` flip on rounding --
+the same reason `contact_templates` caps its own interface sampler at
+`ALONG_MAX_FACE=0.7`. The draw sits INSIDE the reverse sampler's 256-try
+rejection loop; outside it, all 256 retries would reuse one offset and bias the
+accepted set.
+
+### P7 -- AND A DIGEST TRAP, the third of this kind
+
+A new env kwarg rehashes every config and orphans every stored score. It fired:
+the v32/v33 protocol moved **`249434216cd2` -> `e35ceab30ae5`** while v33
+`ctl_s1` replayed bit-identically. Fixed with `stamp_omit_if_default` in
+`eval_contact` -- a post-hoc TASK key is omitted from the stamp WHILE AT ITS
+DEFAULT and rehashes only once actually set. Same discipline as folding
+`adjacent` into the existing `guard_face` key, and as `RewardWeights.__repr__`.
+Verified: `249434216cd2` with the key off, `646ba4ae1fd4` with it at 0.7.
+
+**A float32 regression I introduced in P6 was caught by the same check.**
+Routing `d0`/`min_dist` through the new arity-aware `_goal_dist` dropped the
+float64 cast, moving `min_dist` in the 8th decimal on **57 of 60** episodes
+while every other field stayed identical. Restored, and the comment says why the
+`dtype=float` is load-bearing.
+
+### P8 -- housekeeping, in the same digest-moving commit
+
+**`angular_drag_arm_cm` default 6.0 -> 3.12.** `tau = mu*m*g*L` and for a body
+sliding on a plane `L` is the pressure-weighted mean radius of the contact
+patch: uniform pressure over a 10x6cm rectangle gives 3.12cm, and 5.83cm (the
+half-diagonal) is the hard ceiling. **6.0 is above that ceiling -- no pressure
+distribution can produce it.** Costed at zero by v29's `physdamp` arm (0.739 ->
+0.706 on identical episodes, paired mean -0.033, holding under both
+checkpoints), and every v32/v33 cell already passed 3.12 explicitly, so their
+digests are unaffected.
+
+**The nested curriculum is deleted.** Eq 15's literal nested form measured
+INERT on this board -- same-room median 2.02/1.94/2.15/1.78cm across four levels
+against 2.00 with no curriculum, because a nested level can only DELETE far
+starts, never make near ones commoner. Checked before deleting rather than
+after: **30 of 30 archived cells record `curriculum_mode=band` and 0 set
+`curriculum_start_cm`.** Gone: `_range_cap`, `_start_window`, and
+`_sample_room_xy`'s `x_window`.
+
+**But the KEYS survive, because `curriculum_mode=band` appears in 2 archived
+PINS.txt files** and `config/loader.py` rejects unregistered keys by design --
+deleting the key would make those protocols un-replayable. So `nested` now names
+only "the historical coned forward sampler, no ramp", which is what every
+pre-v32 run actually did, and the combination that used to be silently inert
+(`nested` + `curriculum_levels`) is the one that now raises. `curriculum_start_cm`
+likewise raises if set. **The inert path is unreachable; the replayable
+interface is intact.**
+
+### P9 -- the floor, regenerated, and the success bar survives
+
+`tools/make_v34_floor.sh` -> `logs/eval/v34_floor/`, 4 cells, one directory each
+so its `vecnormalize.pkl` is unambiguous. `make_untrained_ckpt.py` now also
+produces matching normalizer statistics when `normalize_goal_keys` is on, by
+running the untrained policy for 2,000 steps and letting VecNormalize observe
+the distribution it actually acts on -- otherwise `eval_contact` refuses the
+checkpoint, correctly, since a policy scored on an input distribution it never
+saw is not a floor for anything.
+
+| cell | digest | all | **>=3cm** |
+|---|---|---|---|
+| `a1_v1_centre` (control) | `249434216cd2` | 0.067 | **0.042** |
+| `a2_v1_along` | `646ba4ae1fd4` | 0.083 | **0.042** |
+| `a3_v2_along` | `646ba4ae1fd4` | 0.067 | **0.042** |
+| `a3_v2_along_raw` | `646ba4ae1fd4` | 0.017 | **0.000** |
+
+**The control reproduces `logs/eval/v32_floor/untrained_pose_contact_frame`
+exactly** -- same digest, same 0.067 / 0.042, same five bins -- so the archived
+anchor survived every change between v33 and Sweep A and an A2-A1 difference is
+attributable to the spawn.
+
+**THE FLOOR DOES NOT MOVE WITH THE SPAWN: 0.042 on all three `contact_frame`
+cells.** So THE PUSH SUCCESS BAR IS UNCHANGED and stays un-relitigated -- Bar 1's
+>=0.40 is still ~10x the floor. **Raw actions floor at 0.000 on goals >=3cm**,
+which is what Sweep C's `ppo_raw` arm is measured against.
+
+One ZERO-SHOT preliminary, not a prediction: v33 `ctl_s1`, trained at the face
+centre, scores **0.583** on the randomized-spawn protocol against 0.683 on its
+own -- the spawn change costs about **0.100** to a policy that never saw it.
+Sweep A's A2 arm turns that into a trained number.
+
+### And the Sweep A launcher, so the claim above is actually true
+
+`status.md` now says "nothing infrastructural blocks Sweep A", which was only
+true with a launcher. `slurm/submit_sweep.sh` rewritten from v33's
+scaffold-removal design to Sweep A: 9 cells = 3 arms x 3 seeds at **1.2M** steps
+with `ckpt_freq=600000`, so the 600k snapshot supplies the budget axis for free
+rather than costing three more arms. Wall time 8h -> 14h, since 600k took
+4.5-5.1h. v33's launcher is preserved per-run at
+`logs/sweep_43679344/*/submit_script.sh`.
+
+**The common PINS protocol is the ALONG-FACE one** (A2/A3's task), not A1's: two
+of three arms train there and it is what Sweeps B/C/D inherit. So A1 gets v33's
+two-way treatment -- scored on the common protocol AND on its own
+`249434216cd2`, which is what keeps it comparable to every archived v32/v33
+number.
+
+**Verified rather than assumed:** the PINS the launcher writes hash to
+**`646ba4ae1fd4`**, matching `logs/eval/v34_floor/a3_v2_along` exactly, and the
+floor cell re-scores identically through them. A new `static` check asserts each
+launcher's PINS carries the TASK keys its own sweep moves -- `static` 30 -> 36.
+
+**Next.** Commit, then Sweep A. Phase 0 is complete: P1-P9 all landed, and both
+sweep launchers are ready.
+
+---
+
+## 2026-09-03 — pre-sweep audit: Bar 2 is already met, and four unfaithful-code fixes
+
+**Question.** Before submitting Sweeps A and D, is the Phase-0 implementation faithful to
+what it claims — and do the two cheap checks change the plan?
+
+### Bar 2 is CLEARED, zero-shot, with no training at all
+
+`tools/bar2_zeroshot.sh`, `logs/eval/v34_bar2/` (+ `PROTOCOL.md`). v33's frozen `ctl`
+checkpoints re-scored under Eq 13's settled arrival. Valid on a frozen checkpoint because
+`require_settled` changes the arrival TEST and nothing the policy reads, and does not touch
+the reset sampler — so both digests draw the SAME 60 initial states and the comparison is
+per-episode.
+
+| seed | position-only >=3cm (`249434216cd2`) | settled >=3cm (`fdc2a41dc665`) | delta |
+|---|---|---|---|
+| s0 | 0.604 | 0.583 | -0.021 |
+| s1 | 0.750 | 0.708 | -0.042 |
+| s2 | 0.667 | 0.583 | -0.084 |
+| **mean** | **0.674** | **0.625** | **-0.049** |
+
+Settled untrained floor **0.000** on >=3cm (`floor_settled`, same digest). `model_best`
+agrees: 0.646 / 0.583 / 0.688, mean 0.639.
+
+**Bar 2 is >=0.40. Measured 0.625 against a 0.000 floor. It is met.** `docs/TODO.md` said
+"expect this to be the expensive half" — **that prediction was wrong, and the price is
+0.049.** Item 7 of ORDER OF WORK is done, and Phase B is unblocked without a training arm.
+
+The position-only column reproduces v33's 0.674 **exactly**, which doubles as the
+regression check on everything this session changed.
+
+### |dtheta| in the eval report, and it says push does not rotate
+
+`eval_contact.orientation_report`. Distance carries no gradient above 3cm on ctl_s1
+(0.833/0.833/0.833 across the 3-6/6-9/9-12 bins); the orientation gap does. Measured on
+ctl_s1:
+
+- **42 of 60 benchmark goals (70%) are already inside the 22.5deg tolerance at reset.**
+  Success on those 0.762, on the 18 that must rotate **0.500**.
+- Mean |dtheta| **increases** by +1.36deg over an episode. On the untrained floor it
+  increases by +14.02deg, and across the three ctl seeds it is +2.40 / +0.97 / -2.09.
+
+So push's pooled success is substantially a feasibility artifact, and the policy has
+close to no rotation authority — which is the face-CENTRE spawn's zero-torque geometry,
+measured rather than derived. This is why `contact_descriptors` must be built on
+orientation, and why Sweep A prices the spawn as its own arm.
+
+### The Gamma floor now exists
+
+`tools/make_v34_recontact_floor.sh`, `logs/eval/v34_recontact_floor/`. Sweep D's header
+promised a floor that was not on disk. Both cells' digests were verified by re-scoring
+them through the launcher's own `PINS_LINE` text.
+
+| group | digest | floor |
+|---|---|---|
+| `base_v2` | `1ecc01e69a3d` | **0.033** all bins (2/60) vs `recon_base`'s 0.978 |
+| `gamma_free` | `5dff6e0afd4a` | **0.000**, 0 of 48 |
+
+Two facts that change how a gamma number reads: the stratified sampler yields **48
+episodes, not 60** (worst-fingertip distance has a 15.8cm median at reset, so the 0-3cm
+bin is unfillable), and `object_disturbed` fires on **22.9% of untrained episodes**.
+
+### Four faithfulness bugs, all found by running rather than reading
+
+1. **`w_arrive_pos` paid PER TICK on the HER path.** `step` meters it once per episode;
+   `compute_reward` had no episode history and paid 3.0 on every position-arrived
+   relabeled row — measured, i.e. 3.0/(1-0.99) = **300 of implied Q against
+   goal_reward=10**, on ~80% of every batch. Exactly the rollout/relabel split the Gamma
+   arrival bug was. Fixed by refusing `w_arrive_pos` with `use_her` and deleting the term
+   from `compute_reward`; Sweep D's shaped arm now uses **`w_prog=0.1`**, which is
+   potential-based and relabels exactly (Ng et al. 1999).
+2. **`base_v2` could not start.** The blanket "target_clip is refused with any dense
+   reward" rejected recontact's OWN archived baseline (`w_T/w_a/w_m` + `target_clip=10`,
+   what `recon_base` scored 0.978 with). WHICH END of `[0, clip]` a term breaks depends on
+   its SIGN: negative-only shaping keeps `Q* <= goal_reward` so the upper clamp is sound,
+   while positive shaping (`w_hold`+`w_settle`+`w_prog`) exceeds 10 and the clamp deletes
+   the value the shaping exists to create. Split into `positive_shaping()` (refused) and
+   negative-only (announced, kept replicable).
+3. **`w_prog` was silently absent from ~80% of every batch** unless `min_progress_*` or
+   recontact happened to force `copy_info_dict`. It reads `info["pre_achieved_goal"]`.
+4. **`tools/make_untrained_ckpt.py` hardcoded `_make_env("push", ...)`**, so
+   `contact=recontact` produced a PUSH floor — wrong template, goal space and horizon.
+   Found while generating the Gamma floor.
+
+Also: a w_guard key outside `GUARD_OUTCOMES` now raises instead of falling back to
+`w_m=0` and being silently free; `reward.RELABEL_DROPPED` records what HER cannot
+reconstruct and each term's per-episode bound (w_T*horizon 2.0, hold_cap 2.0, settle_cap
+0.5 — bounded on purpose, unlike w_arrive_pos); dead field `w_face` deleted.
+
+### Sweep D gained a fourth arm
+
+`gamma_init_shaped` moved shaping AND `target_clip` at once, and the clamp is what took
+recontact from 1/6 to 6/6 seeds — so a failure would have been uninterpretable in exactly
+v33's way. **`gamma_init_noclip`** (gamma_init, `target_clip=null`, nothing else) makes it
+a bisection: `gamma_init - gamma_init_noclip` prices the clamp,
+`gamma_init_shaped - gamma_init_noclip` prices the shaping. 9 -> 12 cells.
+
+### Verified
+
+Gates **36 / 27 / 243 / 172 / 18** (contact 225 -> 243). v33 `ctl_s1` replays with **0 of 60
+episodes differing on any of 11 fields** at digest `249434216cd2`, success 0.6833... exactly.
+All 15 Sweep D cells and all 3 Sweep A arms start and train from the real launcher text;
+the PPO path runs; both new refusals fire when they should.
+
+**Next.** Submit A and D. Sweep B's rotation arm should be read against the 70%/0.500
+split above, not against the pooled number.
+
+---
+
+## 2026-09-03 — v34 SUBMITTED: 24 cells across three jobs, and the first signal
+
+**Question.** With Phase 0 complete and the audit's nine fixes landed, run the two sweeps
+that Phase 0 existed to enable.
+
+### What is running
+
+| job | sweep | cells | budget |
+|---|---|---|---|
+| `44180162` | A, push | 9 (`a1_v1_centre`/`a2_v1_along`/`a3_v2_along` x 3 seeds) | 1.2M, `ckpt_freq=600000` |
+| `44180252` | D-base, recontact | 3 (`base_v2` x 3) | 1M, horizon 100 |
+| `44180185` | D-gamma, recontact | 12 (`gamma_free`/`gamma_init`/`gamma_init_noclip`/`gamma_init_shaped` x 3) | 1M, horizon 200, array `%4` |
+
+All 24 cells: `GIT_COMMIT=f0bb3bd`, `GIT_DIRTY=yes`,
+**`GIT_DIFF_SHA=509bcc5e0fbe23b2`** — identical across all three jobs, so every cell ran the
+same code. The working tree was verified byte-identical to the archived `uncommitted.diff`
+(zero diff-of-diffs lines), so the code is fully recoverable. **Still not committed.**
+
+Outputs will land in `logs/eval/{sweepA,reconD_base,reconD_gamma}/`. Expected digests and
+their floors are tabulated in `status.md` under HOW TO SCORE V34.
+
+### The early signal — diag eval only, NOT cross-cell
+
+Each cell's own training-time eval, 32 episodes, its own reset distribution. **A1 and A2/A3
+sit on different digests, so these columns cannot be subtracted.** Recorded because the
+direction is already informative, at ~600-670k of 1.2M for A:
+
+| arm | last | best | slope /100k |
+|---|---|---|---|
+| `a1_v1_centre` | 0.531 / 0.594 / 0.625 | 0.625 / 0.625 / 0.688 | +0.032 / +0.011 / +0.076 |
+| `a2_v1_along` | 0.688 / 0.750 / 0.719 | 0.781 / 0.875 / 0.812 | +0.047 / +0.065 / +0.038 |
+| `a3_v2_along` | 0.500 / 0.688 / 0.625 | 0.688 / 0.781 / 0.719 | -0.021 / +0.011 / +0.021 |
+| `base_v2` (at 1M) | 0.969 / 1.000 / 0.969 | 1.000 / — / 1.000 | +0.10 to +0.18 |
+| `gamma_free` s0/s1/s2, `gamma_init_s0` | **0.000** | **0.000** | +0.000 |
+
+**Result 1 — the along-face spawn looks like it HELPS, and that inverts the prediction.**
+The zero-shot measurement had v33 `ctl_s1` at 0.583 on the randomized protocol against 0.683
+on its own, which read as a harder task. Trained on it, A2 is the strongest arm on every
+seed. This is what the zero-torque finding predicts once you train on it: a face-centre
+contact produces exactly zero torque, so off-centre contact is the only thing that gives
+push real torque authority, and the more varied task is also the more learnable one.
+**Provisional — needs the shared benchmark.**
+
+**Result 2 — Gamma is 0.000 at 1M on 4 of 4 finished cells, and this is the headline
+negative.** `gamma_free` on all three seeds and `gamma_init_s0`, each over 200 diag evals:
+zero successes, zero slope, from step 4k to step 999k. The arrival bug is fixed and verified
+(a perfectly-achieving state now scores 500/500 where it used to score 254/500), the
+untrained floor is 0.000, and the trained result is 0.000. **Fixing the bug did not rescue
+Eq 13's canonical interface.** `gamma_init_shaped` is still queued and is the last untried
+variant.
+
+That is consistent with v31's diagnosis rather than a surprise: the 4-way conjunction
+essentially never fires by chance — L inside its 0.3cm anchor tolerance in 1/60 episodes, R
+inside 2.0cm in 2/60, both touch flags matching in 4/60 — and HER can only relabel toward
+goals a trajectory actually achieved. **If `gamma_init_shaped` is also zero, the conclusion
+is that the conjunction is not acquirable as posed, and the next move is task design, not
+budget:** staged or sequential fingertip goals, looser per-finger tolerances, or the `pivot`
+template. Re-running gamma at a larger budget on the strength of a flat zero curve would be
+the v28 mistake in reverse.
+
+**Result 3 — obs v2 is free for recontact.** `base_v2` sits at 0.969-1.000 on diag against
+the archived 0.978 benchmark, with slope still positive at 1M, despite obs going 17 -> 38
+dims. The replication question answers yes.
+
+### Timing, measured from the CSVs
+
+At 14:52 EDT: A all 9 at 49-56%, ~3.3-4.3h left against a 14h wall. D-base s0/s2 done, s1
+at 64% (~2.4h; it runs at 42 steps/s against s0/s2's 93, so it is sharing a GPU). D-gamma
+4 done, 4 running (~2.7h), 4 queued behind `%4` — so gamma lands last at ~6h.
+
+**Next.** Commit; confirm `finalize.sh` fired (it never has); score all three against the
+pinned protocols; read A1 @1.2M first, because if it lands materially above 0.674 every v33
+scaffold price was measured at an unconverged budget.
