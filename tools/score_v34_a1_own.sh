@@ -36,14 +36,33 @@
 # and a scorer is how every v25 cross-version comparison came out wrong.
 set -e
 
+#   sbatch tools/score_v34_a1_own.sh [sweep] [out] [ckpts] [centre|along]
+#
+# The last two arguments exist for the BUDGET axis. Every arm ran 1.2M with
+# ckpt_freq=600000, so the 600k snapshot is v33's own budget and re-scoring it
+# costs nine evals instead of three more arms. Pass
+# "model_600000_steps.zip" to read it, on either protocol -- `along` skips the
+# spawn flip and scores the sweep's PINS.txt verbatim, which is what
+# finalize.sh does.
 SWEEP="${1:-logs/sweep_44180162}"
 OUT="${2:-logs/eval/sweepA_a1_own}"
+CKPTS="${3:-model.zip model_best.zip}"
+PROTOCOL="${4:-centre}"
 
-PINS="$(sed 's/push_spawn_along_frac=0\.7/push_spawn_along_frac=null/' \
-        "${SWEEP}/PINS.txt")"
-case "${PINS}" in
-  *push_spawn_along_frac=null*) ;;
-  *) echo "FATAL: the spawn flip did not apply; ${SWEEP}/PINS.txt changed" >&2
+case "${PROTOCOL}" in
+  centre)
+    PINS="$(sed 's/push_spawn_along_frac=0\.7/push_spawn_along_frac=null/' \
+            "${SWEEP}/PINS.txt")"
+    case "${PINS}" in
+      *push_spawn_along_frac=null*) ;;
+      *) echo "FATAL: the spawn flip did not apply; ${SWEEP}/PINS.txt changed" >&2
+         exit 1 ;;
+    esac
+    EXPECT=249434216cd2 ;;
+  along)
+    PINS="$(cat "${SWEEP}/PINS.txt")"
+    EXPECT=646ba4ae1fd4 ;;
+  *) echo "FATAL: protocol must be centre or along, got ${PROTOCOL}" >&2
      exit 1 ;;
 esac
 
@@ -53,17 +72,17 @@ export JAX_PLATFORMS=cpu
 
 python tools/score_sweep.py "${SWEEP}" \
   --out-dir "${OUT}" --template push --jobs 4 \
-  --ckpt model.zip model_best.zip --pins "${PINS}"
+  --ckpt ${CKPTS} --pins "${PINS}"
 
 # The protocol lives beside the numbers, never in a launcher comment.
 {
-  echo "# Sweep A on the FACE-CENTRE protocol (A1's own task)"
+  echo "# Sweep A, ${PROTOCOL} protocol, checkpoints: ${CKPTS}"
   echo
   echo "Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) by \`tools/score_v34_a1_own.sh\`."
-  echo "Cells: ${SWEEP}. Expected digest 249434216cd2 (v32/v33's own)."
+  echo "Cells: ${SWEEP}. Expected digest ${EXPECT}."
   echo
-  echo "TASK pins, = ${SWEEP}/PINS.txt with push_spawn_along_frac flipped to"
-  echo "null and nothing else touched:"
+  echo "TASK pins, = ${SWEEP}/PINS.txt (spawn flipped to null for \`centre\`,"
+  echo "verbatim for \`along\`), nothing else touched:"
   echo
   echo '```'
   echo "${PINS}"

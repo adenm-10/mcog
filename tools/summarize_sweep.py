@@ -15,7 +15,10 @@ import numpy as np
 
 
 def arm_of(name: str) -> str:
-    m = re.search(r"push_([a-z0-9]+)_s\d", name)
+    # Non-greedy up to _s<seed>, so multi-token arm names survive: v34's
+    # a1_v1_centre and gamma_init_noclip both used to collapse to the whole
+    # filename under the old [a-z0-9]+ class, putting every seed in its own arm.
+    m = re.search(r"(?:push|recon)_(.+?)_s\d", name)
     return m.group(1) if m else name
 
 
@@ -28,7 +31,7 @@ def load(pat: str) -> dict:
         pre = "transfer" if b.startswith("transfer_") else "own"
         arm = arm_of(b)
         if pre == "transfer":
-            arm = re.match(r"transfer_([a-z0-9]+)__", b).group(1) + "<-" + arm_of(b)
+            arm = re.match(r"transfer_(.+?)__", b).group(1) + "<-" + arm_of(b)
         out[(arm, ck)].append((b, d))
     return out
 
@@ -60,6 +63,9 @@ def agg(entries, edges) -> dict:
         succ_sd=np.std([p["succ"] for p in per_seed], ddof=1) if len(per_seed) > 1 else 0.0,
         succ_range=(min(p["succ"] for p in per_seed), max(p["succ"] for p in per_seed)),
         succ3=np.nanmean([p["succ3"] for p in per_seed]),
+        # Per seed, not just the mean: the seed is the experimental unit, and
+        # every bar in docs/TODO.md is written as ">=2 of 3 seeds".
+        succ3_seeds=[p["succ3"] for p in per_seed],
         ret=np.mean([p["ret"] for p in per_seed]),
         qgap=np.mean([p["qgap"] for p in per_seed]),
         whys={k: v / n for k, v in whys.items()},
@@ -102,6 +108,9 @@ def main() -> None:
                           sorted(r["whys"].items(), key=lambda kv: -kv[1]))
             print(f"{arm:22s}{r['n_fail']:>6d}{r['close1']:>7.2f}"
                   f"{r['min_med']:>8.2f}{r['give_up']:>8.2f}   {w}")
+        print(f"\n{'arm':22s}{'>=3cm per seed':>26s}")
+        for arm, r in sorted(res.items()):
+            print(f"{arm:22s}{' / '.join(f'{v:.3f}' for v in r['succ3_seeds']):>26s}")
         print("\ndigests:")
         for arm, r in sorted(res.items()):
             print(f"  {arm:22s} {r['digests']}")
