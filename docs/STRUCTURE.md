@@ -15,6 +15,10 @@ Current state and gotchas live in `status.md`; session history in
 | Score every cell of a sweep, keys handled by class | `tools/score_sweep.py` | works; the portal lives INSIDE `TASK_PINS` (it used to be appended after them and silently overrode `--pins`); INTERFACE keys read from each cell's `meta.txt`, TASK keys pinned, `--transfer-arm` for the cross-digest-group control, `--pins` to swap the whole protocol (e.g. a cross-room benchmark) |
 | Run that scoring on a compute node | `slurm/score_sweep.sh` | works; the login node has `nproc=1`, so 36 evals belong here |
 | Phase 0 for the curriculum: does the ramp ramp? | `tools/probe_curriculum.py` | works; zero gradient steps. Asserts no level exhausts the retry budget and every level restricts the distance range. **Run before submitting, never after** |
+| Aggregate a sweep's eval jsons by arm | `tools/summarize_sweep.py` | works; was `summarize_v29.py` until 2026-09-04. Per-bin, `>=3cm` per seed, retention, Q gap, failure family and terminations. The arm regex is non-greedy up to `_s<seed>`: the old `[a-z0-9]+` class collapsed `a1_v1_centre` and `gamma_init_noclip` to the whole filename, putting every seed in its own arm. Reproduces v33 `ctl`'s archived 0.674 exactly |
+| Sweep A's second protocol, and any off-protocol rung | `tools/score_v34_a1_own.sh` | works; `sbatch <sweep> <out> "<ckpts>" centre\|along`. Flips `push_spawn_along_frac` by sed on the sweep's own `PINS.txt` and ASSERTS the flip applied, then writes `PROTOCOL.md` beside the numbers. This is what produced A1's own-protocol 0.826 and the 600k rung |
+| Untrained floors for SWEEP B's four protocols | `tools/make_v35_floor.sh` | works; 4 cells, ~4 min, bit-identical on a full re-run. `ctl` 0.042 at `249434216cd2` (reproduces `v34_floor/a1_v1_centre`), `obsv2` 0.021 at the SAME digest (interface keys do not move it, but the floor is not the same floor), `widecone` 0.000 at `b21b11ecf4fc`, `spread` 0.000 at `5a24875f15c4` |
+| Sweep B's budget rungs + loosened protocols | `tools/score_v35_rungs.sh` | works; scores the 600k/1.2M/1.8M snapshots on the common protocol and the WHOLE sweep on each of `widecone`/`spread`'s own distribution, because the DELTA against `ctl` on the loosened task is the quantity of interest. Submitted automatically by the sweep's last task alongside `finalize.sh` |
 | Untrained floor for the v32 goal spaces | `tools/make_v32_floor.sh` | works; 4 cells, ~3 min, writes `PROTOCOL.md` beside the numbers |
 | Untrained floor for SWEEP A's protocol | `tools/make_v34_floor.sh` | works; 4 cells in their own dirs (so each `vecnormalize.pkl` is unambiguous), ~3 min. **The floor is 0.042 on goals >=3cm at BOTH spawns**, so the push success bar is unchanged; raw actions floor at 0.000. Its `a1_v1_centre` control reproduces `v32_floor/untrained_pose_contact_frame` exactly |
 | Untrained floors for SWEEP D, both groups | `tools/make_v34_recontact_floor.sh` | works; 2 cells, writes `PROTOCOL.md`. **`base_v2` floors at 0.033, `gamma_free` at 0.000** — the first Gamma floor that exists, since every earlier one came from the broken arrival test. Each cell's digest is verified by re-scoring it through the launcher's own `PINS_LINE`. Fixes the caller-side bug too: `make_untrained_ckpt.py` used to hardcode `push` |
@@ -89,7 +93,7 @@ since `DomainHooks` (executor.py) is already the abstraction boundary.
 ## Gates — run all five before and after every commit
 
 ```bash
-python test_code.py static                                    # 36/36
+python test_code.py static                                    # 38/38
 python test_code.py geometry                                  # 27/27
 python test_code.py contact                                   # 243/243
 python -m tests.test_option_graph all                         # 172/172

@@ -36,176 +36,95 @@ adapter). A badly-calibrated `p_hat` exercises every line, and push is already G
 than floored (0.86 under 1cm down to 0.01 beyond 12cm). **Build it in parallel; that is 4-8
 days of work that has been waiting on a number it never needed.**
 
-## ORDER OF WORK — updated 2026-09-03, v34 IN FLIGHT
+## ORDER OF WORK — updated 2026-09-04, v34 SCORED, SWEEP B IN FLIGHT
 
-**Now, and 1-3 are gated on v34 landing (~6h from 14:52 EDT 2026-09-03)**
+**Nothing below is gated on Sweep B (job 44379812, lands ~2026-09-05 18:00 EDT) except
+its own reading. But do NOT edit env, reward or eval code until it is scored** —
+`finalize.sh` scores those runs with whatever is on disk then, and any `gym_env`/`physics`/
+`reward` change can move the digest and orphan every floor.
 
-1. **COMMIT.** All 24 v34 cells ran dirty on `f0bb3bd` at
-   **`GIT_DIFF_SHA=509bcc5e0fbe23b2`**, and the tree still matches that diff byte-for-byte,
-   so committing now freezes exactly what ran. Seven sweeps have been submitted against a
-   dirty tree; provenance is recoverable via each cell's `uncommitted.diff`, but this is past
-   the repo's own rule. **Do it before any further code edit.**
-2. **SCORE v34.** See V34 IS RUNNING below for the commands, expected digests and floors.
-   **Check `finalize.sh` actually fired — it never has on any sweep.**
-3. **READ v34 against the preregistered decision tree** (also below). Read A1 @1.2M first:
-   it is the one cell that can invalidate prior work.
-4. **BUILD THE FLAT (non-hierarchical) BASELINE — the actual blocker.** No hierarchy claim is
-   possible without it and it does not exist. Push is already good enough for the ladder;
-   the thing it gets compared against is missing. It must inherit whatever scaffolds survive
-   v34 — v33 priced the contact frame at 0.535, `push_cone_deg=30` at 0.069,
-   `mask_inactive_finger` at 0.090, axis-aligned spawns at 0.111 — because memo sec 5.2/7
-   requires the identical reset distribution and action space. Higher value than any further
-   push tuning.
-5. **BUILD THE STAGE 1 CONTACT LADDER, IN PARALLEL.** 4-8 days (see THE STAGE 1 LADDER IS A
-   BUILD at the bottom). It does NOT need push to be good, only graded — which it is. **Build
-   `contact_descriptors` on ORIENTATION, not distance:** measured on `ctl_s1`, success is flat
-   at 0.833 across the 3-6/6-9/9-12cm bins while the orientation split carries 0.762 vs
-   0.500. This work has been waiting on a number it never needed.
+1. **BUILD THE STAGE 1 CONTACT LADDER. It is the long pole AND now the critical path.**
+   4-8 days (see THE STAGE 1 LADDER IS A BUILD at the bottom): a contact bundle,
+   `contact_entry_conditions`, `contact_descriptors`, wiring `contact_hooks` into
+   `calibrate`/`run_eval`, and an `eval_harness` adapter. It needs push **graded**, not
+   converged, and push is graded (0.826 at 1.2M, no floored bin, 0.86 under 1cm down to
+   0.01 beyond 12cm). **Build `contact_descriptors` on ORIENTATION, not distance:** success
+   is flat at 0.833 across the 3-6/6-9/9-12cm bins while the orientation split carries
+   0.762 vs 0.500. This is 4-8 days of work that has been waiting on a number it never
+   needed, and it now also unblocks item 3.
+2. **THE OFFSET DOOR.** The wall blocks the straight object->goal path in **0 of 400**
+   cross-room resets, so "crosses a room" means "a long straight push that passes a
+   doorway", and a distance curriculum has only 6-16cm of range. Needs no training,
+   strands nothing, changes the digest — and it is what makes a composed task, hence
+   item 3, possible at all. Highest-value task-design change available.
+3. **THE FLAT BASELINE IS NOT DEFINABLE YET — that is a finding, not a delay.** Memo
+   sec 5.2's decisive flat arm is "identical reset distribution and action space, no
+   temporal hierarchy" (and sec 5.2 #3, "same resets and training-state coverage as the
+   option policies"). On a SINGLE-EDGE task that IS the push option, so the comparison is
+   empty until a composed task exists. It therefore comes after items 1-2, not before.
+   The partial flat baselines already on disk price the ACTION SPACE, not the hierarchy:
+   v29 `rawact` 0.217, v32 `raw` 0.139, v33 `midaction` 0.139 (CI [-0.632,-0.438]).
+   When it is built it must inherit whatever scaffolds survive Sweep B, per memo sec 5.2/7.
+4. **READ SWEEP B against its preregistered verdicts** (`slurm/submit_sweep.sh` header).
+   Check `finalize.sh` fired — it has now fired exactly once — and that BOTH follow-on jobs
+   ran: `slurm/finalize.sh <dir> sweepB` and `tools/score_v35_rungs.sh <dir>`. Read `ctl`
+   first: it must reproduce 0.618 @600k and 0.826 @1.2M, and if it misses either, stop and
+   find out why before reading an arm.
+5. **GAMMA / Eq 13 IS CLOSED AS POSED.** 12 of 12 cells at 0.000, both checkpoints, against
+   a 0.000 floor, with zero of 576 failures inside 1cm. **Do not re-run gamma at a larger
+   budget.** The next move is task design: staged or sequential fingertip goals, looser
+   per-finger tolerances, or implementing the `pivot` template. Real rotation diversity
+   probably needs `pivot` regardless.
+6. **DECIDE `rich_obs`.** Measured 2026-09-04: it sits INSIDE the env digest while changing
+   only what the policy reads, so `a78252c0a0a6` and `1ecc01e69a3d` are the same task —
+   verified by 60 identical per-episode `d0` values and an identical 0.033 floor. It is the
+   **twelfth interface key**. Moving it collapses those two digests, which is correct, and
+   relabels every stored score, which makes it a decision rather than a drive-by fix.
+7. **Housekeeping, whenever.** Move the 621 orphaned staging files into their sweep dirs
+   (a bulk move, **needs approval**). Add the PPO branch to `tools/make_untrained_ckpt.py`
+   — a PPO sweep still cannot be scored without a PPO floor. `ruff` is still not installed
+   in `tsmc`.
 
-**Toward Phase B**
+**DONE 2026-09-04, recorded so they are not reopened:** the tree is COMMITTED (four commits,
+`main` at `4a1bfd9`, verified byte-identical to the sha all 24 v34 cells recorded);
+`score_sweep.cell_dirs` fixed and gated (`static` 36 -> 38); all of v34 scored on its pinned
+protocols plus the 600k rung and A1's own protocol; `tools/summarize_v29.py` renamed to
+`summarize_sweep.py` with an arm regex that survives multi-token arm names.
 
-6. **The offset door** (Immediate 7). The board makes crossing untestable — the wall blocks
-   the straight path in 0 of 400 resets — and gives a distance curriculum only 6-16cm of
-   range. Highest-value task-design change available, needs no training, strands nothing.
-7. **Phase B is UNBLOCKED.** Bar 2 was met zero-shot (below). Remaining prerequisite: push's
-   success criterion still never tests portal crossing (`iface=None`); swap the real
-   crossing predicate in at EVAL only.
+**SUPERSEDED 2026-09-04:** "finish v33's loosened-distribution scoring for `widecone` and
+`spread`" — both arms are re-running at 2.4M in Sweep B and `tools/score_v35_rungs.sh`
+scores each on its own distribution as part of the sweep, so the v33 debt is retired rather
+than paid.
 
-**If v34 confirms Gamma is zero — likely, see V34 below**
+## V34 RESULT — 24 cells, scored 2026-09-04
 
-8. **Do not re-run Gamma at a bigger budget.** Four finished cells sit at 0.000 across 200
-   diag evals each with zero slope, against a 0.000 floor. The next move is task design:
-   staged/sequential fingertip goals, looser per-finger tolerances, or implementing the
-   `pivot` template. Real rotation diversity probably needs `pivot` regardless.
+Full numbers, CIs and failure modes in `docs/PROGRESS.md` (entry dated 2026-09-04) and
+`status.md`. The four things that change what to do next:
 
-**Housekeeping, whenever**
+1. **THE BUDGET IS THE EFFECT.** Within-arm, same seeds, same protocol (`249434216cd2`),
+   1.2M - 600k: `a1` **+0.208** [+0.132,+0.285], `a2` +0.132 [+0.042,+0.222], `a3` +0.125
+   [+0.035,+0.222]. Neither treatment survives: the spawn is -0.035/+0.021 (along) and
+   -0.042/-0.090 (centre), obs v2 is -0.021/-0.132 (along) and -0.062/+0.021 (centre), with
+   the sign flipping between checkpoints. **A1's config stays the push default.**
+2. **THE ARM ORDERING MOVES WITH BUDGET.** A2 leads at 600k (0.653 vs A1's 0.618), A1 leads
+   at 1.2M (0.826 vs 0.785). **A sweep read at one budget cannot rank arms here**, which is
+   why every Sweep B arm carries four rungs.
+3. **CONTINUITY HELD**, so the v33 table survives as a **600k** table: A1 @600k = 0.618
+   (0.604/0.667/0.583) against v33 `ctl`'s 0.674 (0.604/0.750/0.667), same digest,
+   indistinguishable at n=3. Reading those numbers as CONVERGED prices is what does not
+   survive.
+4. **THE 2026-09-03 DIAG READING WAS WRONG.** "The along-face spawn looks like it HELPS" was
+   recorded off diag evals sitting on two different digests. **Never quote a diag eval across
+   digests.**
 
-9. Move the 621 orphaned staging files into their sweep dirs (Immediate 2) — a bulk move,
-   **needs approval**. Add the PPO branch to `tools/make_untrained_ckpt.py`; Sweep C cannot be
-   scored without a PPO floor. `ruff` is still not installed in `tsmc`.
-
-**DONE 2026-09-03, recorded so they are not reopened:** Bar 2 (met zero-shot at 0.625, item
-below); the recontact Gamma scoring bug (fixed, verified 500/500, and job 44180185 is the
-re-run); the face-centre spawn (`push_spawn_along_frac`); the nested curriculum deletion and
-`angular_drag_arm_cm=3.12` default; all six untrained floors.
-
-## Immediate
-
-**Read in this order:** ORDER OF WORK above, then V34 IS RUNNING, then the v33 result table.
-
-## V34 IS RUNNING — 24 cells, 3 jobs, submitted 2026-09-03 ~10:40 EDT
-
-| job | sweep | cells | arms |
-|---|---|---|---|
-| `44180162` | A, push | 9 | `a1_v1_centre` / `a2_v1_along` / `a3_v2_along` x s0,s1,s2 @ 1.2M, `ckpt_freq=600000` |
-| `44180252` | D-base, recontact | 3 | `base_v2` x 3 @ 1M, horizon 100 |
-| `44180185` | D-gamma, recontact | 12 | `gamma_free` / `gamma_init` / `gamma_init_noclip` / `gamma_init_shaped` x 3 @ 1M, horizon 200, array `%4` |
-
-**HOW TO SCORE IT.** `finalize.sh` auto-submits per sweep into
-`logs/eval/{sweepA,reconD_base,reconD_gamma}/`. **That trigger has never fired on any
-sweep** (the `%A_%a` bug is fixed but unproven), so check for
-`logs/sweep_<job>/slurm_logs/` and if absent run:
-
-```bash
-sbatch slurm/finalize.sh logs/sweep_44180162 sweepA
-sbatch slurm/finalize.sh logs/sweep_44180252 reconD_base
-sbatch slurm/finalize.sh logs/sweep_44180185 reconD_gamma
-```
-
-**CONFIRM THE DIGEST BEFORE READING ANY NUMBER.** Each sweep's `PINS.txt` is authoritative
-and `finalize.sh` reads it rather than retyping it. Expected values and their floors:
-
-| protocol | digest | untrained floor | floor source |
-|---|---|---|---|
-| push along-face — A2/A3, and the COMMON benchmark | `646ba4ae1fd4` | **0.042** >=3cm | `logs/eval/v34_floor/a3_v2_along` |
-| push face-centre — A1's own, = v33's | `249434216cd2` | **0.042** >=3cm | `logs/eval/v34_floor/a1_v1_centre` |
-| push raw actions — for Sweep C | — | **0.000** >=3cm | `logs/eval/v34_floor/a3_v2_along_raw` |
-| push settled arrival — Bar 2 | `fdc2a41dc665` | **0.000** >=3cm | `logs/eval/v34_bar2/floor_settled` |
-| recontact base, 2-D goal | `1ecc01e69a3d` | **0.033** all bins | `logs/eval/v34_recontact_floor/base_v2` |
-| recontact Gamma, 6-D goal | `5dff6e0afd4a` | **0.000**, 0 of 48 | `logs/eval/v34_recontact_floor/gamma_free` |
-
-Each floor dir carries a `PROTOCOL.md` with its task keys beside the numbers.
-
-**SCORING A1 ON ITS OWN PROTOCOL (the second half of the two-way treatment).**
-`finalize.sh` scores every cell on the sweep's shared `PINS.txt`, which is the along-face
-protocol. To get A1's own-distribution number, re-run `score_sweep.py` with the spawn key
-flipped — the ONLY difference, so the delta is attributable:
-
-```bash
-PINS="$(cat logs/sweep_44180162/PINS.txt | sed 's/push_spawn_along_frac=0.7/push_spawn_along_frac=null/')"
-python tools/score_sweep.py logs/sweep_44180162 \
-  --out-dir logs/eval/sweepA_a1_own --template push --jobs 4 \
-  --ckpt model.zip model_best.zip --pins "$PINS"
-```
-
-That must print **`249434216cd2`** — v33's own digest — and the A1 cells' numbers there are
-directly comparable to every archived v32/v33 figure. A2/A3 scored under it are a TRANSFER
-number, not their own task. `score_sweep.py --transfer-arm` exists for the cross-digest-group
-control if a cleaner split is wanted; `--dry-run` prints the commands without running them.
-
-
-**A1 NEEDS THE TWO-WAY TREATMENT**: scored on the common along-face protocol ("does a
-centre-trained policy do the randomized task?") AND on its own `249434216cd2`, which is what
-keeps it comparable to every archived v32/v33 number. **Gamma yields 48 episodes, not 60** —
-worst-fingertip distance has a 15.8cm median at reset, so the 0-3cm bin is unfillable.
-Report ALL BINS for gamma (`>=3cm` is a push convention) and **score each Gamma class
-separately**; pooling push/pivot/pinch hides which one fails.
-
-**PRIMARY METRIC, pinned before the sweep and not to be changed after:** for push, mean
-success on goals **>=3cm** under **BOTH** `model` and `model_best`. The 5-bin mean has a
-0.150 floor from the 0-3cm bin alone and is not the number.
-
-### THE EARLY SIGNAL — diag eval only, NOT cross-cell comparable
-
-Each cell's own training-time eval, 32 episodes, its own reset distribution. **A1 and A2/A3
-sit on different digests, so these columns cannot be subtracted.** At ~600-670k of 1.2M:
-
-| arm | last | best | slope /100k |
-|---|---|---|---|
-| `a1_v1_centre` | 0.531 / 0.594 / 0.625 | 0.625 / 0.625 / 0.688 | +0.032 / +0.011 / +0.076 |
-| `a2_v1_along` | 0.688 / 0.750 / 0.719 | 0.781 / 0.875 / 0.812 | +0.047 / +0.065 / +0.038 |
-| `a3_v2_along` | 0.500 / 0.688 / 0.625 | 0.688 / 0.781 / 0.719 | -0.021 / +0.011 / +0.021 |
-| `base_v2` (at 1M) | 0.969 / 1.000 / 0.969 | 1.000 / — / 1.000 | +0.10 to +0.18 |
-| `gamma_free` s0/s1/s2 + `gamma_init_s0` (at 1M) | **0.000** | **0.000** | +0.000 |
-
-1. **The along-face spawn looks like it HELPS, inverting the zero-shot prediction** (a v33
-   policy scored 0.583 on the randomized protocol against 0.683 on its own). Consistent with
-   the zero-torque finding: off-centre contact is the only thing that gives push real torque
-   authority, so the more varied task is also the more learnable one.
-2. **Gamma is 0.000 at 1M on 4 of 4 finished cells** — 200 diag evals each, zero slope, from
-   4k to 999k. The arrival bug is fixed and verified 500/500, the floor is 0.000, and the
-   trained result is 0.000. **Fixing the bug did not rescue Eq 13.** `gamma_init_shaped` is
-   still queued and is the last untried variant.
-3. **obs v2 is free for recontact** — `base_v2` at 0.969-1.000 against the archived 0.978,
-   despite obs going 17 -> 38 dims.
-
-### WHAT EACH OUTCOME MEANS — written down before the numbers land
-
-- **A1 @1.2M materially above 0.674** -> every v33 scaffold price was read at an unconverged
-  budget and needs re-reading. All 18 v33 cells were still improving at 600k (slope/100k:
-  `widecone` +0.055, `freefinger` +0.044, `ctl` +0.027) with every argmax at 555k-595k of
-  600k, and **the two steepest are exactly the two whose CIs cross zero.** `midaction`
-  (-0.535) is the only v33 verdict that was safe. This is the most consequential cell.
-- **A1 @600k ~= 0.674** -> continuity holds, the v33 table stays usable. If it does NOT
-  reproduce, stop and find out why before reading anything else.
-- **A2 > A1 on the COMMON benchmark** -> make the along-face spawn the default everywhere and
-  re-baseline. It also unblocks Sweep B's rotation arm, which was gated on having any torque
-  authority at all.
-- **A3 ~= A2** -> obs v2 is free; adopt it and let B/C/D inherit it. **A3 < A2 materially**
-  -> find out which of the four changes (divisors, xi layout, achieved-goal tail, goal-key
-  normalization) did it before carrying it forward.
-- **Gamma all-zero INCLUDING `gamma_init_shaped`** -> the likely outcome, and it is a RESULT
-  to report as prominently as a positive one. It says the 4-way conjunction is not acquirable
-  as posed. Next move is task design, not budget — see ORDER OF WORK item 8. **Do not re-run
-  gamma at a larger budget on the strength of a flat zero curve.**
-- **`gamma_init_shaped` > 0 while `gamma_init_noclip` = 0** -> the shaping did it, and
-  `noclip` is what makes that readable: `gamma_init` - `noclip` prices the `target_clip`
-  clamp, `shaped` - `noclip` prices the shaping. That arm exists so a failure is not
-  confounded the way v33 was.
+**PRIMARY METRIC, unchanged and not to be re-litigated:** mean success on goals **>=3cm**
+under **BOTH** `model` and `model_best`. The 5-bin mean has a 0.150 floor from the 0-3cm bin
+alone and is not the number. **The push success bars are unchanged** and `ctl` already clears
+Bar 1 at 0.826.
 
 ## PHASE 0 (obs v2 + P1-P9) AND THE PRE-LAUNCH AUDIT — landed, detail elsewhere
 
-Gates went 30/27/141 -> **36/27/243**/172/18. Full narrative in `docs/PROGRESS.md`
+Gates went 30/27/141 -> **38/27/243**/172/18. Full narrative in `docs/PROGRESS.md`
 (entries dated 2026-09-02 and 2026-09-03); condensed state in `status.md`. What must not be
 forgotten, in one place:
 
@@ -258,7 +177,11 @@ forgotten, in one place:
    `faceguard` arm is the test. Both guarded numbers are ZERO-SHOT, so they are that arm's
    FLOOR, not a prediction.
 
-1. **FINISH v33's LOOSENED-DISTRIBUTION SCORING for `widecone` and `spread`.**
+1. **SUPERSEDED 2026-09-04 — do not do this as written.** Both arms are re-running at 2.4M
+   in Sweep B, and `tools/score_v35_rungs.sh` scores each on its own distribution as part of
+   the sweep, so the v33 debt is retired rather than paid. The reasoning below is still the
+   reasoning, and the PREDICTION ON RECORD still stands; read it against Sweep B.
+   *(Original entry:)* **FINISH v33's LOOSENED-DISTRIBUTION SCORING for `widecone` and `spread`.**
    `faceguard`'s is DONE and produced the session's most useful negative result (see above).
    Each of these arms changed a TASK key, so each carries its own digest.
    `logs/eval/v33/` already scores everything on the COMMON tight protocol — "does loosened
@@ -270,7 +193,14 @@ forgotten, in one place:
    **Prediction on record:** given `faceguard`, expect `ctl` to match or beat the
    loosened-training arm on the loosened task in both cases.
 
-2. **TWO PIECES OF AUTOMATION WERE FIXED THIS SESSION AND NEITHER IS PROVEN.**
+2. **BOTH PIECES OF AUTOMATION ARE NOW PROVEN — and the trigger broke the scorer on its
+   first firing.** `--pins` determined the task correctly across all of v34's scoring
+   (`249434216cd2`, `646ba4ae1fd4`, `1ecc01e69a3d`, `5dff6e0afd4a` all as expected). The
+   `finalize.sh` auto-trigger fired on all three v34 sweeps — and `score_sweep.cell_dirs`
+   then died on the `slurm_logs/` directory the trigger itself creates inside the sweep.
+   Fixed 2026-09-04 and gated (`static` 36 -> 38). **The 621 orphaned staging files are
+   still orphaned; moving them is a bulk move and NEEDS APPROVAL.**
+   *(Original entry:)* **TWO PIECES OF AUTOMATION WERE FIXED THIS SESSION AND NEITHER IS PROVEN.**
    (a) `tools/score_sweep.py`'s `--pins` now actually determines the task (the portal moved
    into `TASK_PINS`); two `static` gates guard it. (b) `slurm/finalize.sh`'s auto-trigger:
    The last-task-standing block used `squeue -o "%A_%a"`, and on this Slurm `%a` renders as

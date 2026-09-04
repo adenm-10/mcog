@@ -3449,3 +3449,154 @@ at 64% (~2.4h; it runs at 42 steps/s against s0/s2's 93, so it is sharing a GPU)
 **Next.** Commit; confirm `finalize.sh` fired (it never has); score all three against the
 pinned protocols; read A1 @1.2M first, because if it lands materially above 0.674 every v33
 scaffold price was measured at an unconverged budget.
+
+## 2026-09-04 — v34 SCORED: the budget was the effect, Eq 13 is dead as posed, and Sweep B
+
+**Question.** Score all 24 v34 cells against the pinned protocols and read them against the
+decision tree written down before they landed (`status.md`, WHAT EACH OUTCOME MEANS).
+
+### What ran
+
+All 24 cells finished (push 9 x 1.2M, recontact 15 x 1M); every cell has `model.zip` and
+`model_best.zip`. **`finalize.sh`'s auto-trigger fired for the first time in the project's
+history — and killed its own scorer.** It writes `slurm_logs/` INTO the sweep dir it then
+scores, `score_sweep.cell_dirs` globbed `*/`, and the sort key regexes a task index out of
+every entry, so all three finalize jobs died on
+
+```
+AttributeError: 'NoneType' object has no attribute 'group'    score_sweep.py:41
+```
+
+with `logs/eval/{sweepA,reconD_base,reconD_gamma}/` created and empty. Fixed by matching the
+cell pattern, gated in `test_code.py static` with the exact layout plus an index-order check
+(2 must sort before 10, which a lexical fix breaks silently). Scoring then ran clean:
+
+| out dir | what | digest |
+|---|---|---|
+| `logs/eval/sweepA/` | 9 cells x 2 ckpts, common ALONG protocol | `646ba4ae1fd4` |
+| `logs/eval/sweepA_a1_own/` | same 9 cells, FACE-CENTRE protocol = v32/v33's | `249434216cd2` |
+| `logs/eval/sweepA_600k/`, `logs/eval/sweepA_a1_own_600k/` | the 600k rung, both protocols | as above |
+| `logs/eval/reconD_base/` | 3 cells x 2 ckpts | `1ecc01e69a3d` |
+| `logs/eval/reconD_gamma/` | 12 cells x 2 ckpts, 48 episodes each | `5dff6e0afd4a` |
+
+### Result 1 — THE BUDGET IS THE EFFECT, and it is 3-6x either treatment
+
+Goals >=3cm, `model`. Paired per-episode bootstrap CIs over the 48 in-scope episodes: every
+arm sees the same 60 initial states because the env digest fixes them, so the episode is the
+pairing unit.
+
+| contrast | ALONG `646ba4ae1fd4` final / best | CENTRE `249434216cd2` final / best |
+|---|---|---|
+| spawn `a2 - a1` | -0.035 [-0.104,+0.028] / +0.021 [-0.076,+0.118] | -0.042 [-0.118,+0.035] / **-0.090** [-0.167,-0.021] |
+| obs v2 `a3 - a2` | -0.021 [-0.111,+0.069] / **-0.132** [-0.222,-0.042] | -0.062 [-0.132,+0.007] / +0.021 [-0.076,+0.111] |
+| both `a3 - a1` | -0.056 [-0.153,+0.035] / **-0.111** [-0.201,-0.021] | **-0.104** [-0.194,-0.014] / -0.069 [-0.167,+0.028] |
+
+| budget, within arm, same seeds, CENTRE protocol | 1.2M - 600k |
+|---|---|
+| `a1_v1_centre` | **+0.208** [+0.132,+0.285] |
+| `a2_v1_along` | **+0.132** [+0.042,+0.222] |
+| `a3_v2_along` | **+0.125** [+0.035,+0.222] |
+
+**Levels.** A1 on its own protocol: **0.826** final (0.792/0.833/0.854), 0.764 best, against
+0.618 at the 600k rung and v33 ctl's 0.674. On the common along protocol: A1 0.736 > A2
+0.701 > A3 0.681 final.
+
+Three things follow.
+
+1. **A1 @1.2M is materially above 0.674, so the preregistered branch fires: every v33
+   scaffold price was read at an unconverged budget.** The control gains +0.208 between
+   v33's rung and Sweep A's, three seeds of three.
+2. **Continuity HELD, so the v33 table survives as a 600k table.** A1 @600k = 0.618
+   (0.604/0.667/0.583) against v33 ctl's 0.674 (0.604/0.750/0.667) — indistinguishable at
+   n=3, same protocol, same digest. What does not survive is reading those numbers as
+   converged prices.
+3. **THE ARM ORDERING ITSELF MOVES WITH BUDGET.** On the centre protocol A2 leads at 600k
+   (0.653 vs A1's 0.618) and A1 leads at 1.2M (0.826 vs 0.785). A sweep read at one budget
+   cannot rank arms in this task, which is the whole justification for Sweep B.
+
+**Neither treatment is adopted.** The along-face spawn is null-or-negative on all four
+columns; obs v2 likewise, significant only on `model_best`. **The diag-eval reading recorded
+in `status.md` on 2026-09-03 — "the along-face spawn looks like it HELPS" — was WRONG**, and
+wrong in exactly the way CLAUDE.md's opening rule predicts: A1 and A2 sat on different
+digests, so those columns were never subtractable.
+
+**Failure modes split by spawn, mechanistically.** A1 loses contact on 7% of episodes against
+A2/A3's 14-15%, consistent with v18's finding that 62% of first contact breaks are tangential
+slides off a face corner — an along-face contact starts nearer the corner. But A1's failures
+are FAR from the goal (`min_dist` median 4.79cm on the common protocol, 21% within 1cm) while
+A2's are CLOSE (1.06cm, 49% within 1cm). So the spawn buys torque authority and pays for it
+in contact retention, and the two arms fail in different families.
+
+### Result 2 — Eq 13's Gamma goal is 0.000 on 12 of 12 cells, and that is the result
+
+Digest `5dff6e0afd4a`, floor 0.000, 48 episodes per cell (worst-fingertip distance has a
+15.8cm median at reset, so the 0-3cm bin is unfillable). **All four arms, all three seeds,
+both checkpoints: 0.000.** Pooling hides nothing here — zero successes overall is zero in
+every class.
+
+| arm | `>=3cm` | terminations | `min_dist` median | Q gap |
+|---|---|---|---|---|
+| `gamma_free` | 0.000 | horizon 65% / object_disturbed 35% | 7.97cm | +0.42 |
+| `gamma_init` | 0.000 | horizon 56% / object_disturbed 44% | 6.94cm | +0.94 |
+| `gamma_init_noclip` | 0.000 | horizon 53% / object_disturbed 47% | 7.84cm | **+727.76** |
+| `gamma_init_shaped` | 0.000 | object_disturbed 62% / horizon 38% | 7.95cm | **+210.18** |
+
+- **Zero of 576 failures came within 1cm.** This is failure family "never got close", not
+  "arrives, no settle", and `final_dist - min_dist` is 5.2-11.6cm, so the policy wanders away
+  after its closest approach.
+- **`model_best` is byte-equivalent to the untrained snapshot on every gamma cell** —
+  identical `min_dist` median (8.40cm) and identical termination counts across four arms that
+  differ in reward and clipping, which can only happen if no eval ever beat the first one and
+  same-seed cells share their initial weights. Nothing ever improved.
+- **`target_clip=null` blows the critic to +727 above realized return**, against `gamma_init`'s
+  +0.94. So the clamp does exactly what recontact's 1/6 -> 6/6 fix said it does, and the
+  `noclip` control earns its three cells — but the clamp is not what was blocking Eq 13,
+  because the clipped arm is also 0.000. Shaping tames the critic to +210 and rescues nothing.
+
+**Verdict, as written down before the sweep: the 4-way conjunction is not acquirable as
+posed, and the next move is task design, not budget.** Staged or sequential fingertip goals,
+looser per-finger tolerances, or implementing `pivot`. Do not re-run gamma at a larger budget
+on a flat zero curve.
+
+### Result 3 — obs v2 IS free for recontact, and the digest that said otherwise was lying
+
+`base_v2` = **0.967** all bins / 0.958 on `>=3cm` (0.979/0.958/0.938), 97% arrived, no
+floored bin, floor 0.033, digest `1ecc01e69a3d`. The archived `recon_base` is 0.978 at
+`a78252c0a0a6` — a different digest, so the preregistered comparison was not licensed.
+
+**Checked rather than assumed, and it is the cheap check CLAUDE.md asks for.** Rebuilt an
+untrained cell at `rich_obs=false` with everything else identical:
+
+```
+rich_obs=false, obs v1   digest a78252c0a0a6   floor 0.0333
+rich_obs=true,  obs v2   digest 1ecc01e69a3d   floor 0.0333
+60 per-episode d0 values IDENTICAL
+```
+
+So the digest moved on `rich_obs` alone, the reset distribution and the floor are the same
+task, and **0.967 vs 0.978 is a legitimate comparison: obs v2 costs recontact 0.011, inside
+the 0.017 seed sd.**
+
+**This surfaces a real classification error.** `rich_obs` changes what the policy READS, not
+what the task IS, so by the repo's own INTERFACE/TASK rule it belongs in `IFACE_KEYS` — it is
+the twelfth interface key. Moving it would collapse `a78252c0a0a6` and `1ecc01e69a3d` into
+one digest, which is right, but it relabels every stored score, so it is a decision and not a
+drive-by fix. **Recorded, not done.**
+
+**And obs v2's verdict now disagrees between templates** — free for recontact, -0.132 on
+`model_best` for push — which is why it is an arm in Sweep B rather than an adopted default.
+
+### Next — Sweep B, job 44379812, submitted 2026-09-04
+
+12 cells = `ctl`/`obsv2`/`widecone`/`spread` x 3 seeds at **2.4M**, `ckpt_freq=600000`, so
+rungs land at 600k (v33's budget), 1.2M (Sweep A's), 1.8M and 2.4M and every price is a curve
+rather than a point. `ctl` is verified token-identical to A1 apart from `total_steps`, so it
+replicates two archived anchors (0.618 @600k, 0.826 @1.2M) while answering convergence: A1's
+late diag slope is +0.004..+0.043 per 100k, halved from v33's +0.023..+0.055 but positive on
+9 of 9 cells, so 1.2M is closer to converged and is not known to be converged.
+
+`freefinger`, `faceguard`, `midaction` and the along-face spawn are each omitted for a
+measured reason (launcher header). Floors regenerated first and bit-identical on a full
+re-run: `ctl` 0.042 at `249434216cd2` reproducing `logs/eval/v34_floor/a1_v1_centre` exactly,
+`obsv2` 0.021 same digest, `widecone` 0.000 at `b21b11ecf4fc`, `spread` 0.000 at
+`5a24875f15c4`. **First sweep in eight to record `GIT_DIRTY=no`.**
