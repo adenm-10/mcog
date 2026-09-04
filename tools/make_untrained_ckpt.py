@@ -2,8 +2,10 @@
 """Save a zero-gradient-step checkpoint so the benchmark has a floor number.
 
 Built the same way train_contact.py builds the real one, so it loads under the
-same eval path. One invocation per (template, interface, goal space, protocol),
-because a floor is specific to all four and never transfers.
+same eval path. One invocation per (template, interface, goal space, protocol,
+ALGORITHM), because a floor is specific to all five and never transfers --
+rl_algo is an interface key and an untrained PPO reads a different random
+policy than an untrained SAC.
 """
 import os
 import sys
@@ -20,7 +22,6 @@ def main(cfg: DictConfig) -> None:
     from hydra.core.hydra_config import HydraConfig
     from stable_baselines3.common.vec_env import DummyVecEnv
 
-    from domains.contact.sac_clipped import TargetClippedSAC
     from train_contact import _make_env, build_env_kwargs
 
     d = OmegaConf.to_container(cfg, resolve=True)
@@ -45,8 +46,29 @@ def main(cfg: DictConfig) -> None:
         env = VecNormalize(env, training=True, norm_obs=True, norm_reward=False,
                            norm_obs_keys=["achieved_goal", "desired_goal"])
 
-    m = TargetClippedSAC("MultiInputPolicy", env, learning_starts=10_000,
-                         seed=d["seed"], target_clip=d["target_clip"], verbose=0)
+    net_arch = ([int(h) for h in d["net_arch"]] if d["net_arch"] else [256, 256])
+    algo = str(d["rl_algo"]).lower()
+    if algo == "sac":
+        from domains.contact.sac_clipped import TargetClippedSAC
+        # policy_kwargs only when net_arch was set explicitly, exactly as
+        # train_contact.py does it: SB3's SAC default IS [256, 256], so passing
+        # it anyway would be a behavioural no-op that still moves the file and
+        # puts every archived floor on the wrong side of a diff.
+        sac_kw = dict(policy_kwargs=dict(net_arch=net_arch)) if d["net_arch"] else {}
+        m = TargetClippedSAC("MultiInputPolicy", env, learning_starts=10_000,
+                             seed=d["seed"], target_clip=d["target_clip"],
+                             verbose=0, **sac_kw)
+    elif algo == "ppo":
+        from stable_baselines3 import PPO
+        # net_arch ALWAYS passed here, unlike SAC: SB3's PPO default is
+        # [64, 64], a ~16x capacity gap memo sec 9 forbids, so a defaulted PPO
+        # floor would bound a different network than the arm it is a floor for.
+        # n_steps is left at SB3's default -- zero gradient steps means no
+        # rollout is ever collected, so it cannot affect the saved weights.
+        m = PPO("MultiInputPolicy", env, seed=d["seed"],
+                policy_kwargs=dict(net_arch=net_arch), verbose=0)
+    else:
+        raise ValueError(f"rl_algo must be 'sac' or 'ppo', got {d['rl_algo']!r}")
     if d["normalize_goal_keys"]:
         # Enough resets to cover the goal space; the running mean/var is what
         # eval_contact will load, and a handful of episodes leaves it dominated

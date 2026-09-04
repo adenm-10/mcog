@@ -225,6 +225,25 @@ def cmd_static() -> None:
           f"got {iface_copies['./eval_contact.py']} -- adding a key here silently "
           f"REMOVES it from the env digest and orphans every stored score")
 
+    section("the untrained floor is built for the algorithm it bounds")
+    # rl_algo is an interface key, so a PPO arm and a SAC arm share one
+    # benchmark -- but NOT one floor: an untrained PPO reads a different random
+    # policy. make_untrained_ckpt built TargetClippedSAC unconditionally, so a
+    # `rl_algo=ppo` invocation silently produced a SAC floor, the same class of
+    # bug as the hardcoded template="push" that produced a PUSH floor for
+    # recontact.
+    mkc = open("./tools/make_untrained_ckpt.py", encoding="utf-8").read()
+    check('str(d["rl_algo"]).lower()' in mkc,
+          "make_untrained_ckpt branches on rl_algo",
+          "it does not read rl_algo at all, so `rl_algo=ppo` gets a SAC floor")
+    check(mkc.count("policy_kwargs=dict(net_arch=net_arch)") == 2
+          and 'if d["net_arch"] else {}' in mkc,
+          "PPO always gets net_arch, SAC only when set explicitly",
+          "SB3's PPO default is [64, 64] against SAC's [256, 256], so a "
+          "defaulted PPO floor bounds a ~16x smaller network (memo sec 9); "
+          "passing it to SAC anyway is a no-op that still moves every "
+          "archived floor's file")
+
     section("import graph")
     for mod in ["config.loader", "domains.geometry", "domains.nav.partitions",
                 "domains.nav.sdf", "domains.nav.maze",
