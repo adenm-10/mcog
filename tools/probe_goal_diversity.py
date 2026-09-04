@@ -27,7 +27,9 @@ BASE = ("use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true "
         "eval_dist_edges=[3.0,6.0,9.0,12.0] eval_episodes_per_bin=12").split()
 PORT = "portals=[{x:25.0,y_lo:5.0,y_hi:25.0}]"
 IFACE_KEYS = ("action_interface", "slip_model", "slip_limit",
-              "restrict_contact_actions", "mask_inactive_finger", "gap_assist")
+              "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
+              "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
+              "normalize_goal_keys", "rl_algo")
 # each arm's own trained damping -- the one TASK key that differs between them
 DAMP = {"nogapassist": "6.0", "physdamp": "3.12"}
 CONES = ("30", "90", "180")

@@ -26,7 +26,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 IFACE_KEYS = ("action_interface", "slip_model", "slip_limit",
-              "restrict_contact_actions", "mask_inactive_finger", "gap_assist")
+              "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
+              "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
+              "normalize_goal_keys", "rl_algo")
 
 
 def _iface(cell: str) -> list[str]:

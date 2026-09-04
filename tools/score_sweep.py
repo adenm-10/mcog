@@ -19,7 +19,9 @@ import sys
 # NOTE: this list is duplicated as `iface_keys` in eval_contact.py. They must
 # agree -- a key in one and not the other silently changes what the digest covers.
 IFACE_KEYS = ("action_interface", "slip_model", "slip_limit",
-              "restrict_contact_actions", "mask_inactive_finger", "gap_assist")
+              "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
+              "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
+              "normalize_goal_keys", "rl_algo")
 # Change what success IS or which states are visited: pinned, inside the digest.
 TASK_PINS = ("use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true "
              "board_w_cm=50.0 board_h_cm=30.0 min_progress_ticks=1 "
