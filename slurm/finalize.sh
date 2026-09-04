@@ -13,7 +13,12 @@
 # slurm/submit_sweep.sh, so every sweep ends with media on disk and nobody has
 # to remember to render.
 #
-#   sbatch slurm/finalize.sh <sweep_dir> [tag]      # tag defaults to v<jobid>
+#   sbatch slurm/finalize.sh <sweep_dir> [tag] [template]
+#     tag defaults to v<jobid>; template defaults to the TEMPLATE= recorded in
+#     the sweep's own meta.txt, falling back to push. Read from the runs rather
+#     than passed, because a hand-typed template is one more thing that can
+#     disagree with what actually trained -- the same reason PINS.txt is read
+#     rather than retyped.
 #
 # The benchmark protocol is read from <sweep_dir>/PINS.txt, which the launcher
 # wrote. It is not retyped here: a protocol duplicated between a launcher and a
@@ -26,9 +31,16 @@
 # LOCAL DISK ONLY. Never log these videos to wandb.
 set -e
 
-SWEEP="${1:?usage: sbatch slurm/finalize.sh <sweep_dir> [tag]}"
+SWEEP="${1:?usage: sbatch slurm/finalize.sh <sweep_dir> [tag] [template]}"
 TAG="${2:-$(basename "${SWEEP}" | sed 's/^sweep_/v/')}"
 PINS=$(cat "${SWEEP}/PINS.txt")
+# Recover the template from a cell's recorded provenance. `head -1` because
+# every cell of a sweep runs one template; if that ever stops being true the
+# scorer needs a per-cell loop, not a better default.
+TEMPLATE="${3:-$(sed -n 's/^TEMPLATE=\([a-z]*\).*/\1/p' \
+                 "${SWEEP}"/*/meta.txt 2>/dev/null | head -1)}"
+TEMPLATE="${TEMPLATE:-push}"
+echo "finalize: sweep=${SWEEP} tag=${TAG} template=${TEMPLATE}"
 
 source ~/.bashrc; module load python; mamba activate tsmc
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
@@ -37,7 +49,7 @@ export JAX_PLATFORMS=cpu
 # Both checkpoints: model_best inverted the arm ordering on v29's gap-assist
 # result, so scoring only the final one is not enough to call a verdict.
 python tools/score_sweep.py "${SWEEP}" \
-  --out-dir "logs/eval/${TAG}" --template push --jobs 4 \
+  --out-dir "logs/eval/${TAG}" --template "${TEMPLATE}" --jobs 4 \
   --ckpt model.zip model_best.zip --pins "${PINS}"
 
 python tools/render_best.py "logs/eval/${TAG}" \

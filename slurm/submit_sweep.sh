@@ -1,148 +1,100 @@
 #!/bin/bash
 #SBATCH --partition=shared
-#SBATCH --job-name=push_abl
+#SBATCH --job-name=sweepA
 #SBATCH --output=logs/slurm_staging/%A_%a.out
 #SBATCH --error=logs/slurm_staging/%A_%a.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=0-08:00:00
-#SBATCH --array=0-17
+#SBATCH --time=0-14:00:00
+#SBATCH --array=0-8
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=aden_mckinney@seas.harvard.edu
 
 # ===========================================================================
-# v33 SCAFFOLD-REMOVAL SWEEP -- 18 cells = 6 arms x seed{0,1,2} at 600k steps.
+# SWEEP A -- THE NEW BASELINE. 9 cells = 3 arms x seed{0,1,2} at 1.2M steps.
 #
-# (Previous contents were job 43572361's v32 launcher, preserved per-run at
-# logs/sweep_43572361/*/submit_script.sh -- all 11 copies verified identical to
-# the file overwritten here.)
+# (Previous contents were job 43679344's v33 scaffold-removal launcher,
+# preserved per-run at logs/sweep_43679344/*/submit_script.sh. v32's is at
+# logs/sweep_43572361/*/submit_script.sh.)
 #
-# THE QUESTION. v32 established that push is learnable with a reverse
-# curriculum: curric 0.674 mean on goals >=3cm against a 0.042 untrained floor,
-# beating the no-curriculum control 0.583 on 3/3 seeds. But it is learnable on a
-# task made easier than the memo's push option in several identifiable ways.
-# This sweep removes them ONE AT A TIME and prices each one.
+# THE QUESTION, and it is three questions read off nine cells. Every arm runs
+# 1.2M steps with ckpt_freq=600000, so the 600k snapshot gives the budget axis
+# for free rather than costing three more arms:
 #
-# Every arm is v32's `curric` with exactly ONE key changed. The curriculum stays
-# ON in all six -- it is now the working configuration, not a variable.
+#   A1  obs v1, raw goal keys, face-CENTRE spawn      the continuity anchor
+#   A2  obs v1, raw goal keys, along-face spawn       prices the SPAWN alone
+#   A3  obs v2 + normalized goal keys, along-face     the protocol B/C/D inherit
 #
-#   ctl         nothing changed. v32 `curric` rerun on THIS code tree.
-#   freefinger  mask_inactive_finger=false. The memo has two independent
-#               fingertips; v32 froze the idle one. v29 measured unmasking a
-#               wash on success and 4x worse on forbidden_contact, but that was
-#               without a curriculum.
-#   widecone    push_cone_deg 30 -> 90. The goal stops being nearly straight
-#               ahead of the contacted face. v30 measured 30->90 costing
-#               0.822->0.767 and 30->180 costing ->0.561, without a curriculum.
-#   spread      object_theta_spread_deg null -> 90. The object stops spawning
-#               axis-aligned. v29 measured -0.044.
-#   faceguard   guard_face=adjacent. See below -- this is the big one.
-#   midaction   finger_velocity + restrict_contact_actions=true. The middle rung
-#               between the contact frame (v32 base 0.583) and raw velocity
-#               (v32 raw 0.139), separating "the frame helps" from "forbidding
-#               retreat helps". v18 measured the clamp alone as no help: 62% of
-#               contact breaks are TANGENTIAL slides off a corner the clamp
-#               never restricts. New here only because the curriculum is on.
+#   budget    600k checkpoint vs 1.2M final, WITHIN each arm
+#   spawn     A2 - A1
+#   obs v2    A3 - A2
+#   continuity A1 @600k should land near v33 ctl's 0.674
 #
-# WHY ctl IS RERUN RATHER THAN REUSED. This tree changed contact_templates.py
-# and gym_env.py for the face guard. The change is flag-gated and the v32 env
-# digest 249434216cd2 is reproduced exactly (that is what folding the new mode
-# into `guard_face` instead of adding a second key bought), so reusing v32's
-# numbers would be defensible -- but three cells is cheaper than the argument,
-# and it re-checks that the v32 curric result reproduces at all.
+# WHY THE BUDGET AXIS IS FIRST. Every one of v33's 18 cells was STILL IMPROVING
+# at 600k -- measured diag-eval slope per 100k over the last half of training:
+# widecone +0.0553, freefinger +0.0437, faceguard +0.0306, ctl +0.0266, spread
+# +0.0250, midaction +0.0225, and the argmax sat at 555k-595k of 600k for every
+# arm. The two STEEPEST are exactly the two whose paired CIs cross zero. So v33
+# priced its scaffolds at a budget where nothing had converged, which is v28's
+# mistake at a larger scale: there, 150k -> 400k bought the working arm +0.45 and
+# the friction-cone arm only +0.09, and the short sweep read the cone's cost as
+# 0.126 against its true 0.46.
 #
-# TWO KEY CLASSES, TWO SCORING TREATMENTS. This is the part that decides whether
-# the results mean anything.
-#   freefinger and midaction change INTERFACE keys, which sit OUTSIDE the env
-#   digest and are read per cell. Same benchmark as ctl, directly comparable.
-#   widecone, spread and faceguard change TASK keys, so each gets its own
-#   digest. slurm/finalize.sh scores every arm under the COMMON tight protocol
-#   in PINS.txt -- does the loosened training still do the standard task?
-#   Scoring them a second time on their OWN distribution -- is the loosened task
-#   learnable at all -- is a separate deliberate step, not automatic, because
-#   which override belongs to which arm is a judgement call.
+#   IF A1 @1.2M LANDS MATERIALLY ABOVE 0.674, EVERY v33 SCAFFOLD PRICE NEEDS
+#   RE-READING. `midaction` (-0.535, slower slope, CI [-0.632, -0.438]) is the
+#   only v33 verdict that was safe at 600k.
 #
-# THE FACE GUARD, AND A MEASUREMENT THAT CHANGED THE DESIGN.
-# Eq 7 makes the contact face an edge parameter and Eq 40's chi_push enforces
-# it, so a policy that walks onto another face has executed a different edge
-# than the one it was labelled with. v32's two best policies were scored under
-# guard_face=true with nothing else changed (logs/eval/v32_faceprobe):
+# WHY THE SPAWN IS ITS OWN ARM RATHER THAN FOLDED INTO A3. A contact at the face
+# CENTRE pushing along the inward normal produces EXACTLY ZERO torque -- the
+# lever arm is parallel to the force. That is why push's net rotation measures a
+# median 1.8deg/episode against a +/-45deg goal window, and it is why the spawn
+# GATES the orientation-diversity arm in Sweep B. Folding it into the obs change
+# would make two unrelated effects inseparable.
 #
-#   push_curric_s1   guard_face=false   0.683   arrived 41, horizon 14, lost 5
-#                    guard_face=true    0.083   WRONG_FACE 49/60 (81.7%)
-#   push_base_s1     guard_face=false   0.600
-#                    guard_face=true    0.083   WRONG_FACE 52/60 (86.7%)
+# ZERO-SHOT, already measured, NOT a prediction: v33 ctl_s1 scores 0.583 on the
+# randomized-spawn protocol against 0.683 on its own. A2 turns that into a
+# trained number.
 #
-# So face switching is not a rare corner-rounding artifact: it is how these
-# policies push, on ~82-87% of episodes, at a median of 12 ticks. An earlier
-# reading that the 4.0cm contact-loss budget bounds it was WRONG -- that budget
-# applies only to time spent NOT touching, and a finger that keeps contact can
-# slide along the surface indefinitely. The real number is geometric: the finger
-# starts at the face centre of a 10x6 object and the corner is
-# |ly| = 3*5.5/5 = 3.3cm away, which is ~4 ticks at 20cm/s.
+# UNTRAINED FLOOR: logs/eval/v34_floor, and it is 0.042 on goals >=3cm for ALL
+# THREE contact_frame configs -- the spawn does not move it. So THE PUSH SUCCESS
+# BAR IS UNCHANGED (docs/TODO.md, Bar 1 >=0.40, ~10x the floor) and is not up for
+# re-litigation. Raw actions floor at 0.000, which is what Sweep C's ppo_raw arm
+# is measured against. The a1_v1_centre floor cell reproduces
+# logs/eval/v32_floor/untrained_pose_contact_frame exactly, so the archived
+# anchor survived every change between v33 and here.
 #
-# Splitting those violations by WHICH face, same policies, guard_face=adjacent:
+# DIGESTS. obs_version and normalize_goal_keys are INTERFACE keys, so they do NOT
+# move the digest: A2 and A3 share 646ba4ae1fd4 and are directly comparable.
+# A1 sits on 249434216cd2, v33's own digest, because a post-hoc TASK key at its
+# default is omitted from the stamp -- which is what keeps A1 comparable to
+# every archived v32/v33 number. finalize.sh must print 646ba4ae1fd4 for the
+# PINS below; if it prints anything else, stop.
 #
-#   push_curric_s1   0.683 unguarded -> 0.483   wrong_face 13/60 (21.7%)
-#   push_base_s1     0.600 unguarded -> 0.583   wrong_face  9/60 (15.0%)
-#
-# So most of the 82-87% is one corner rounded onto an ADJACENT face, and only
-# 15-22% of episodes reach the OPPOSITE face -- the transition that actually
-# breaks the edge label, since pushing from the far side is the reverse of the
-# edge that was named. That is why this arm runs `adjacent` and not `strict`:
-# strict is unlearnable-shaped (v31 took 9/9 cells to 0.000), while adjacent
-# starts from 0.483-0.583 ZERO-SHOT on policies that never saw the constraint.
-# Those two numbers are the arm's FLOOR, not a prediction -- a policy trained
-# under the guard can learn to avoid the corner it currently rounds.
-#
-# ONE FINDING THIS ALREADY FORCES INTO THE RECORD. Unguarded, curric beats base
-# 0.683 to 0.600. Under the face guard the ordering INVERTS, 0.483 to 0.583. So
-# part of the curriculum's v32 advantage is bought with behaviour that violates
-# the edge label it was executing. v32's headline stands as "the curriculum
-# helps on the task as scored" and does NOT stand as "the curriculum learns a
-# better push option". This arm is the test of which one is true.
-#
-# UNCHANGED FROM v32, and why: pure sparse reward (all w_*=0, goal_reward=10 on
-# arrival, arrival terminates, so Q* <= 10 and target_clip=10 is a provable
-# bound); same_room_goal_prob=0.5 with portal_goal (the doorway POSE is the
-# proxy for entering the next region, which keeps ONE definition of success so
-# HER can relabel toward it); theta_tol_deg=22.5 (Eq 11's eight orientation
-# bins); push_range_min_cm=null; angular_drag_arm_cm=3.12; band curriculum with
-# 4 levels and threshold 0.6, windows (0.00,0.35) (0.15,0.60) (0.35,0.85)
-# (0.00,1.00) as fractions of each edge's reachable range.
-#
-# THE CONTROL SHARES THE SAMPLER, still: every arm runs curriculum_mode=band.
-#
-# UNTRAINED FLOOR on the common protocol, goals >=3cm: 0.042 restricted actions,
-# 0.000 raw (logs/eval/v32_floor). The digest there must match the digest
-# finalize.sh prints, or nothing below is anchored.
-#
-# PREREGISTERED VERDICTS -- written before the sweep, not after. All on goals
-# >=3cm, under BOTH model and model_best, on >=2 of 3 seeds.
-#   A scaffold is CHEAP if its arm lands within 0.05 of ctl. Remove it for good.
-#   A scaffold is LOAD-BEARING if its arm drops more than 0.15 below ctl. It
-#     stays, and it goes in the recorded fidelity-deviation list WITH its price.
-#   In between: report the number, no verdict, do not re-run hoping it moves.
-#   faceguard is the exception. Its own 0.042 floor is the bar, not ctl:
-#     untrained-under-the-guard is 0.083 with no training at all, so anything
-#     that does not clearly beat 0.083 means the constraint is unlearnable at
-#     this horizon rather than merely expensive.
+# PRIMARY METRIC, pinned before the sweep: mean success on goals >=3cm, under
+# BOTH model and model_best. The 5-bin mean has a 0.150 floor from the 0-3cm bin
+# alone and is not the number.
 #
 # NOT IN THIS SWEEP, deliberately:
-#   require_settled -- excluded by explicit instruction this round. Still real
-#     spec (Eq 13) and still what makes push composable; its own arm later.
-#   The flat (non-hierarchical) baseline. It is the actual blocker for any
-#     hierarchy claim and it must inherit EVERY scaffold left standing after
-#     this sweep, which is why it comes after, not before.
-#   The adaptive window (Florensa's real rule: hold the window where success
-#     sits between ~10% and ~90%). More machinery; the fixed schedule works.
+#   The diversity arms (Sweep B). They are defined RELATIVE to A3's winner, so
+#     they cannot be launched until this reads out.
+#   PPO (Sweep C) and recontact (Sweep D). Same reason for C; D is a different
+#     template with its own launcher.
+#   require_settled -- NO LONGER NEEDED AS AN ARM. Bar 2 was MET zero-shot on
+#     2026-09-03: v33's frozen ctl checkpoints score 0.625 on goals >=3cm under
+#     require_settled=true against 0.674 position-only and a 0.000 settled
+#     floor, so settling costs 0.049 and needs no training. See
+#     logs/eval/v34_bar2/ and tools/bar2_zeroshot.sh. Every arm here keeps
+#     require_settled=false so it stays comparable to v33; re-score with
+#     tools/bar2_zeroshot.sh afterwards, which is minutes, not an arm.
+#   The flat baseline. It must inherit whatever scaffolds survive, so it comes
+#     after, not before.
 # ===========================================================================
 
 set -e
 
-ARMS=(ctl freefinger widecone spread faceguard midaction)
+ARMS=(a1_v1_centre a2_v1_along a3_v2_along)
 SEEDS=(0 1 2)
 i=$SLURM_ARRAY_TASK_ID
 ARM=${ARMS[$(( i / 3 ))]}
@@ -159,33 +111,38 @@ PORT="portals=[{x:25.0,y_lo:10.0,y_hi:20.0}]"
 PROTO="require_settled=false same_room_goal_prob=0.5 \
 push_range_min_cm=null angular_drag_arm_cm=3.12 \
 portal_arrival=false portal_goal=true portal_clearance_cm=0.5 \
-rich_obs=true push_range_max_cm=null"
+push_range_max_cm=null"
 GOAL="theta_tol_deg=22.5 theta_goal_window_deg=45.0"
 CURRIC="curriculum_mode=band curriculum_levels=4 curriculum_threshold=0.6"
 
+# Held FIXED across all three arms, and stated rather than defaulted: these are
+# the scaffolds v33 priced and none of them is what this sweep is asking about.
 CONE="push_cone_deg=30"
 SPREAD="object_theta_spread_deg=null"
 FACE="guard_face=false"
 MASK="mask_inactive_finger=true"
 IFACE="action_interface=contact_frame slip_model=speed_fraction slip_limit=1.0 gap_assist=false"
 
+# The two axes this sweep moves. SPAWN is a TASK key (it moves the reset
+# distribution and the digest); OBS is two INTERFACE keys (they change how the
+# policy READS the world, not what the task is), which is exactly why A2 and A3
+# score on one benchmark.
+SPAWN="push_spawn_along_frac=null"
+OBS="obs_version=1 rich_obs=true normalize_goal_keys=false"
+
 case "${ARM}" in
-  ctl)        ;;
-  freefinger) MASK="mask_inactive_finger=false" ;;
-  widecone)   CONE="push_cone_deg=90" ;;
-  spread)     SPREAD="object_theta_spread_deg=90" ;;
-  faceguard)  FACE="guard_face=adjacent" ;;
-  # gap_assist is inert under finger_velocity (it only feeds ContactFrameCommand)
-  # but is stated anyway: it is an INTERFACE key and lands in every eval's
-  # recorded interface dict, so leaving it to the config default makes two arms
-  # look like they differ on it when they do not.
-  midaction)  IFACE="action_interface=finger_velocity restrict_contact_actions=true gap_assist=false" ;;
+  a1_v1_centre) ;;
+  a2_v1_along)  SPAWN="push_spawn_along_frac=0.7" ;;
+  a3_v2_along)  SPAWN="push_spawn_along_frac=0.7"
+                OBS="obs_version=2 rich_obs=true normalize_goal_keys=true" ;;
   *) echo "unknown arm ${ARM}" >&2; exit 2 ;;
 esac
 
 TEMPLATE="push"
-TOTAL_STEPS=600000
-CKPT_FREQ=200000
+TOTAL_STEPS=1200000
+# 600000 exactly, so the mid-run snapshot IS v33's budget and the budget axis is
+# a checkpoint rather than three more arms.
+CKPT_FREQ=600000
 # 32, not the default 16: the advance gate compares a success rate against 0.6,
 # and 16 episodes make that a 10-of-16 coin flip.
 EVAL_EPS=32
@@ -193,7 +150,8 @@ EXTRA_OVERRIDE="use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true
 ${PORT} min_progress_ticks=1 her_n_sampled_goal=4 learning_starts=10000 \
 target_clip=10 ckpt_freq=${CKPT_FREQ} diag_eval_episodes=${EVAL_EPS} \
 board_w_cm=50.0 board_h_cm=30.0 disengaged_away_deg=60 \
-${PROTO} ${CONE} ${SPREAD} ${FACE} ${MASK} ${GOAL} ${CURRIC} ${IFACE}"
+${PROTO} ${CONE} ${SPREAD} ${FACE} ${MASK} ${GOAL} ${CURRIC} ${IFACE} \
+${SPAWN} ${OBS}"
 RUN_TAG="push_${ARM}_s${SEED}"
 
 SWEEP_DIR="logs/sweep_${SLURM_ARRAY_JOB_ID}"
@@ -201,12 +159,20 @@ mkdir -p "${SWEEP_DIR}"
 
 # THE BENCHMARK PROTOCOL, written next to the runs rather than retyped in the
 # scorer -- a protocol that lives only in a launcher comment is what made every
-# v25 cross-version comparison wrong. These are the CONTROL's task keys with
-# curriculum_levels=null (the reverse sampler at full range, which is what every
-# arm's last level trains on), so every arm is scored on one common task.
-# Written via mv, which is atomic: 18 tasks race here with identical content.
+# v25 cross-version comparison wrong, and a hardcoded portal in the scorer is
+# what invalidated v33's first scoring run. curriculum_levels=null is the reverse
+# sampler at full range, which is what every arm's last level trains on.
+#
+# THE COMMON PROTOCOL IS THE ALONG-FACE ONE (push_spawn_along_frac=0.7), i.e.
+# A2/A3's task, not A1's. Two of three arms train there and it is the protocol
+# Sweeps B/C/D inherit, so it is the one worth being exact about. A1 therefore
+# gets the v33 two-way treatment: scored HERE (does a centre-trained policy do
+# the randomized task?) and, as a deliberate second step, on its own
+# 249434216cd2 protocol, which is what makes it comparable to every archived
+# v32/v33 number. Expected digest here: 646ba4ae1fd4.
+# Written via mv, which is atomic: 9 tasks race here with identical content.
 cat > "${SWEEP_DIR}/.PINS.$$" <<PINSEOF
-use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true board_w_cm=50.0 board_h_cm=30.0 min_progress_ticks=1 learning_starts=10000 her_n_sampled_goal=4 target_clip=10 disengaged_away_deg=60 require_settled=false push_cone_deg=30 same_room_goal_prob=0.5 push_range_min_cm=null object_theta_spread_deg=null angular_drag_arm_cm=3.12 portal_arrival=false portal_goal=true portal_clearance_cm=0.5 guard_face=false rich_obs=true push_range_max_cm=null curriculum_mode=band curriculum_levels=null theta_tol_deg=22.5 theta_goal_window_deg=45.0 ${PORT}
+use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true board_w_cm=50.0 board_h_cm=30.0 min_progress_ticks=1 learning_starts=10000 her_n_sampled_goal=4 target_clip=10 disengaged_away_deg=60 require_settled=false push_cone_deg=30 same_room_goal_prob=0.5 push_range_min_cm=null object_theta_spread_deg=null angular_drag_arm_cm=3.12 portal_arrival=false portal_goal=true portal_clearance_cm=0.5 guard_face=false rich_obs=true push_range_max_cm=null curriculum_mode=band curriculum_levels=null theta_tol_deg=22.5 theta_goal_window_deg=45.0 push_spawn_along_frac=0.7 ${PORT}
 PINSEOF
 mv -f "${SWEEP_DIR}/.PINS.$$" "${SWEEP_DIR}/PINS.txt"
 
@@ -231,13 +197,19 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
 export JAX_PLATFORMS=cpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+rc=0
 python train_contact.py \
   contact=${TEMPLATE} total_steps=${TOTAL_STEPS} seed=${SEED} \
   ${EXTRA_OVERRIDE} \
   out_dir="${RUN_DIR}" \
   wandb=true wandb_run_name="${RUN_TAG}_${SLURM_ARRAY_JOB_ID}" \
-  wandb_group="abl_${SLURM_ARRAY_JOB_ID}"
-rc=$?
+  wandb_group="sweepA_${SLURM_ARRAY_JOB_ID}" || rc=$?
+# `|| rc=$?` and NOT a bare `rc=$?`: `set -e` is on, so a training
+# failure would exit the task RIGHT HERE -- skipping the last-task-standing
+# block below, which is what moves the staging logs and submits
+# finalize.sh. A sweep whose last cell dies would then silently produce no
+# scoring and leave its logs orphaned, which is how 621 staging files
+# accumulated. rc is initialised so the trap still reports success.
 
 # Am I the last task standing? `-o "%i"`, NOT "%A_%a": on this Slurm %a renders
 # as the ACCOUNT name ("43892866_hankyang_lab"), so the grep matched nothing,
@@ -255,6 +227,6 @@ if [ "${still}" -eq 0 ] && mkdir "${SWEEP_DIR}/.finalized" 2>/dev/null; then
        -exec mv -t "${SWEEP_DIR}/slurm_logs/" {} + 2>/dev/null
   # Score + render, as a follow-on job rather than inline: this cell may be near
   # its own 8h wall, and scoring 36 checkpoints is not free.
-  sbatch slurm/finalize.sh "${SWEEP_DIR}"
+  sbatch slurm/finalize.sh "${SWEEP_DIR}" sweepA
 fi
 exit $rc
