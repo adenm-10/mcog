@@ -208,6 +208,61 @@ def part_d() -> list:
     return out
 
 
+# Commanded contact count per interface class, under the Gamma =
+# {free, one-contact, two-contact} abstraction adopted 2026-09-04. push
+# anchors one finger and retracts the other; pinch and pivot are both
+# two-contact.
+COUNT_OF = {"push": 1, "pinch": 2, "pivot": 2}
+
+
+def part_e(gamma: str, still: bool, frac: float) -> dict:
+    """Would a CONTACT-COUNT goal be reachable where the positional one is not?
+
+    Same scripted controller and same rollouts as part B, but scored under the
+    arrival test the count abstraction implies: the touch flags match the
+    commanded count AND the object is settled. No positional tolerance at all,
+    so the 0.3cm two-finger needle disappears.
+
+    Simulated here rather than run through a `gamma_goal=count` env, which does
+    not exist yet -- the env is frozen until Sweep B is scored. The test is a
+    pure function of the state, so computing it alongside is exact, not an
+    approximation.
+
+    `frac` scales the commanded velocity, standing in for a lower v_max: part D
+    measured 0.85 of touches leaving the object settled at 2cm/s against 0.00 at
+    20cm/s, so the count goal is a race between touching and disturbing.
+    """
+    from domains.contact.planar_fingertips import IDX_CONTACT, IDX_FINGER_XY
+    from domains.contact_templates import object_settled
+    env = make(gamma, still)
+    v_max = float(env.params.v_max_cm_s)
+    want = COUNT_OF[gamma]
+    hit, t_hit, exits = 0, [], {}
+    for k in range(N_EP):
+        env.reset(seed=900_000 + k)
+        got, why = False, "horizon"
+        for t in range(env.horizon):
+            x = env._x
+            tw = targets_world(env, x)
+            a = np.zeros(4, dtype=np.float32)
+            for side, j in (("L", 0), ("R", 2)):
+                err = np.asarray(tw[side], float) - np.asarray(x[IDX_FINGER_XY[side]], float)
+                a[j:j + 2] = frac * np.clip(KP * err / v_max, -1.0, 1.0)
+            _o, _r, term, trunc, info = env.step(a)
+            n = int(float(env._x[IDX_CONTACT["L"]]) > 0.5) + \
+                int(float(env._x[IDX_CONTACT["R"]]) > 0.5)
+            if n == want and object_settled(env._x, 0.5, 5.0):
+                got = True; why = "count_ok"; t_hit.append(t + 1); break
+            if term or trunc:
+                go = info.get("guard_outcome")
+                why = go if isinstance(go, str) else ("horizon" if trunc else "term")
+                break
+        hit += got
+        exits[why] = exits.get(why, 0) + 1
+    return dict(succ=hit / N_EP, t_med=float(np.median(t_hit)) if t_hit else float("nan"),
+                exits=exits)
+
+
 def main() -> None:
     print("=" * 74)
     print("A. SATISFIABILITY -- fingers placed EXACTLY on the commanded targets")
@@ -260,6 +315,21 @@ def main() -> None:
     for frac, cms, touched, kept, vp, wp in part_d():
         print(f"{frac:>6.2f}{cms:>7.2f}{touched:>9.3f}{kept:>15.3f}"
               f"{vp:>14.3f}{wp:>14.2f}")
+
+    print()
+    print("=" * 74)
+    print("E. WOULD A CONTACT-COUNT GOAL BE REACHABLE? Same rollouts, scored")
+    print("   as 'touch flags match the commanded count AND object settled'.")
+    print("   No positional tolerance. Guard ON throughout -- that is the test.")
+    print("=" * 74)
+    print(f"{'class':>7s}{'want':>6s}{'speed':>8s}{'SUCC':>7s}{'tick med':>10s}   exits")
+    for gamma in CLASSES:
+        for frac in (1.0, 0.10):
+            r = part_e(gamma, True, frac)
+            ex = " ".join(f"{k}={v}" for k, v in sorted(r["exits"].items(),
+                                                        key=lambda kv: -kv[1]))
+            print(f"{gamma:>7s}{COUNT_OF[gamma]:>6d}{frac * 20:>7.0f}cm/s"
+                  f"{r['succ']:>7.3f}{r['t_med']:>10.1f}   {ex}")
 
 
 if __name__ == "__main__":
