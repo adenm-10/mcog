@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import types
 
 MAZE_YAML = "config/maze/nine_rooms.yaml"
@@ -168,6 +169,26 @@ def cmd_static() -> None:
             check(_k in _body or _k in _src,
                   f"{os.path.basename(_lau)}: PINS carries {_k}",
                   "a TASK key the sweep moves must be in the scored protocol")
+
+    section("cell_dirs survives the directories finalize.sh creates")
+    # finalize.sh writes slurm_logs/ INTO the sweep dir it then scores, so the
+    # first time the auto-trigger ever fired it killed its own scorer: cell_dirs
+    # globbed */, handed slurm_logs/ to a sort key that regexes out the task
+    # index, and all three v34 sweeps died on AttributeError with the eval dirs
+    # created and empty. Build the exact layout and assert the skip fires.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+    import score_sweep as _ss
+    with tempfile.TemporaryDirectory() as _tmp:
+        for _d in ("20260903_103433_jobid44180162_10_push_a_s0",
+                   "20260903_103433_jobid44180162_2_push_b_s0",
+                   "slurm_logs", ".finalized"):
+            os.makedirs(os.path.join(_tmp, _d))
+        _cells = _ss.cell_dirs(_tmp)
+        check(len(_cells) == 2, "cell_dirs skips slurm_logs/ and .finalized/",
+              f"got {[os.path.basename(c.rstrip('/')) for c in _cells]}")
+        check(len(_cells) == 2 and "_2_push_b_s0" in _cells[0],
+              "cell_dirs orders by task index, not lexically (2 before 10)",
+              f"got {[os.path.basename(c.rstrip('/')) for c in _cells]}")
 
     section("the interface-key list agrees everywhere it is copied")
     # These eleven keys are EXCLUDED from the env digest, so they decide what two

@@ -37,9 +37,13 @@ TASK_PINS = ("use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true "
 
 
 def cell_dirs(sweep: str) -> list[str]:
-    def idx(p: str) -> int:
-        return int(re.search(r"jobid\d+_(\d+)_", p).group(1))
-    return sorted(glob.glob(os.path.join(sweep, "*/")), key=idx)
+    """Cell dirs of a sweep, in task-index order. Non-cell dirs are skipped:
+    finalize.sh writes slurm_logs/ into the sweep it scores, so a bare glob of
+    */ handed the sort key a directory with no task index and killed all three
+    v34 finalize jobs the first time the auto-trigger ever fired."""
+    hits = [(int(m.group(1)), p) for p in glob.glob(os.path.join(sweep, "*/"))
+            if (m := re.search(r"jobid\d+_(\d+)_", p))]
+    return [p for _, p in sorted(hits)]
 
 
 def iface_of(cell: str) -> list[str]:
