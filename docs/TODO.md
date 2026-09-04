@@ -257,6 +257,46 @@ forgotten, in one place:
    finger's surface gap is 0.7-12.9cm (median 7.4) against a spec of 4-8cm.
 
 
+## DEFERRED — the xi face encoding does not generalize past a rectangle
+
+Noted 2026-09-04, deliberately NOT fixed now. Not a bug and not an oracle: xi
+carries the EDGE's commanded contact face, which is what Eq 7 says it should
+carry and what a planner would supply on a real robot. The problem is the
+ENCODING -- a 4-way one-hot.
+
+- It assumes exactly four faces, so **it breaks at the memo's own second
+  object**: sec 3.1 says "a rectangle, then a T-shape of similar footprint",
+  and a T-shape has eight edges. It is also meaningless for a round object,
+  does not extend to 3D (box 6, cylinder 2 + a lateral surface), and has no
+  definition at all for a deformable one.
+- **The fix is lossless on the current object**: replace the one-hot with the
+  commanded contact POINT (2) and commanded NORMAL (2), both in the object
+  frame. For a rectangle that recovers the face exactly, so adopting it should
+  carry a measured price of zero. If it does NOT, the one-hot was doing
+  optimization work a continuous encoding is not, which is worth knowing before
+  the T-shape rather than during it.
+- **We already do it the general way on the other template.** `sample_interface`
+  draws Gamma contacts continuously from a class and v34 ran
+  `continuous_gamma=true`. Push's categorical xi is the inconsistency.
+- **It is NOT redundant with the live contact normal**, so this is a migration
+  and not a deletion. Measured on a trained A1 policy over 30 episodes / 2126
+  ticks: commanded face == live nearest face on 63.1% of ticks, DISAGREES on
+  29.6%, and the normal feature is zeros on the remaining 7.3% (not touching).
+  That ~30% is the same drift the 82-87% face-switch rate describes, and it is
+  also a second reading of the face guard's price: about a third of current
+  behaviour becomes terminal when the guard is on.
+
+**Next action:** fold one `xi_continuous` arm into the interface sweep, expecting
+a price of zero. Do it before any non-rectangular object, held-out geometry axis,
+or 3D work -- all three are in the plan and all three break the one-hot.
+
+A conformable object is a much larger change and is out of scope: object pose
+stops being a complete state (so the pose goal, `achieved_goal` and the arrival
+test all assume too much), `face_frame` needs fixed object dimensions, and the
+angular-drag model `tau = mu*m*g*L` with L=3.12cm is derived for a rigid uniform
+rectangle. Point-and-normal is the one piece that would survive, which is the
+cheap insurance argument for doing it early.
+
 ## Historical — v28/v29/v30, all superseded by the entries above
 
 Full numbers in `docs/PROGRESS.md`. Kept here only for the facts still load-bearing:
