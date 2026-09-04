@@ -263,6 +263,63 @@ def part_e(gamma: str, still: bool, frac: float) -> dict:
                 exits=exits)
 
 
+def part_f(gamma: str, frac: float) -> dict:
+    """What a RUNNING-MAX DISPLACEMENT guard would allow, and what each guard
+    form leaves HER to work with.
+
+    The velocity guard does not only terminate episodes -- `object_disturbed`
+    is sticky and gates `_her_arrived` (gym_env.py:1316-1321), so every
+    transition after the first violation produces relabeled goals that can
+    never pay. HER is the only gradient a sparse two-finger conjunction has, so
+    "relabel-eligible fraction" is the quantity that matters, not the
+    termination rate.
+
+    Guard OFF here so the episode runs its full horizon and both forms can be
+    evaluated over the same trajectory. Displacement is a RUNNING MAX, not
+    instantaneous: an instantaneous bound lets a policy shove the object and
+    push it back, the same cheat as w_m=50 parking it against a wall.
+    """
+    from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+                                                   IDX_OBJ_XY)
+    from domains.contact_templates import object_settled
+    env = make(gamma, still=False)
+    v_max = float(env.params.v_max_cm_s)
+    peak, vel_ok, disp_ok = [], [], {1.0: [], 2.0: [], 3.0: []}
+    for k in range(N_EP):
+        env.reset(seed=900_000 + k)
+        p0 = np.array(env._x[IDX_OBJ_XY], dtype=float)
+        th0 = float(np.arctan2(env._x[IDX_OBJ_HEADING][1], env._x[IDX_OBJ_HEADING][0]))
+        run, nv, nd, n = 0.0, 0, {e: 0 for e in disp_ok}, 0
+        for _t in range(env.horizon):
+            x = env._x
+            tw = targets_world(env, x)
+            a = np.zeros(4, dtype=np.float32)
+            for side, j in (("L", 0), ("R", 2)):
+                err = np.asarray(tw[side], float) - np.asarray(x[IDX_FINGER_XY[side]], float)
+                a[j:j + 2] = frac * np.clip(KP * err / v_max, -1.0, 1.0)
+            _o, _r, term, trunc, _i = env.step(a)
+            th = float(np.arctan2(env._x[IDX_OBJ_HEADING][1], env._x[IDX_OBJ_HEADING][0]))
+            d = float(np.hypot(*(np.array(env._x[IDX_OBJ_XY], dtype=float) - p0)))
+            # deg of rotation converted to the arc a 3.12cm lever sweeps, so one
+            # scalar bounds both -- the same pressure-weighted radius the table
+            # drag uses, rather than a second free constant.
+            arc = abs(np.arctan2(np.sin(th - th0), np.cos(th - th0))) * 3.12
+            run = max(run, float(np.hypot(d, arc)))
+            n += 1
+            nv += bool(object_settled(env._x, 0.5, 5.0))
+            for e in nd:
+                nd[e] += run <= e
+            if term or trunc:
+                break
+        peak.append(run)
+        vel_ok.append(nv / max(n, 1))
+        for e in disp_ok:
+            disp_ok[e].append(nd[e] / max(n, 1))
+    return dict(peak_med=float(np.median(peak)), peak_p90=float(np.percentile(peak, 90)),
+                vel=float(np.mean(vel_ok)),
+                disp={e: float(np.mean(v)) for e, v in disp_ok.items()})
+
+
 def main() -> None:
     print("=" * 74)
     print("A. SATISFIABILITY -- fingers placed EXACTLY on the commanded targets")
@@ -330,6 +387,22 @@ def main() -> None:
                                                         key=lambda kv: -kv[1]))
             print(f"{gamma:>7s}{COUNT_OF[gamma]:>6d}{frac * 20:>7.0f}cm/s"
                   f"{r['succ']:>7.3f}{r['t_med']:>10.1f}   {ex}")
+
+    print()
+    print("=" * 74)
+    print("F. GUARD FORM vs WHAT HER CAN USE. `object_disturbed` is sticky and")
+    print("   gates _her_arrived, so a violated tick makes every later relabel")
+    print("   unpayable. Fraction of ticks each guard form leaves ELIGIBLE:")
+    print("=" * 74)
+    print(f"{'class':>7s}{'speed':>8s}{'peak med':>10s}{'p90':>7s}"
+          f"{'velocity':>10s}{'disp 1cm':>10s}{'disp 2cm':>10s}{'disp 3cm':>10s}")
+    for gamma in CLASSES:
+        for frac in (1.0, 0.10):
+            r = part_f(gamma, frac)
+            print(f"{gamma:>7s}{frac * 20:>7.0f}cm/s{r['peak_med']:>10.2f}"
+                  f"{r['peak_p90']:>7.2f}{r['vel']:>10.3f}"
+                  f"{r['disp'][1.0]:>10.3f}{r['disp'][2.0]:>10.3f}"
+                  f"{r['disp'][3.0]:>10.3f}")
 
 
 if __name__ == "__main__":
