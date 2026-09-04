@@ -36,65 +36,186 @@ adapter). A badly-calibrated `p_hat` exercises every line, and push is already G
 than floored (0.86 under 1cm down to 0.01 beyond 12cm). **Build it in parallel; that is 4-8
 days of work that has been waiting on a number it never needed.**
 
-## ORDER OF WORK — updated 2026-09-04, v34 SCORED, SWEEP B IN FLIGHT
+## DECISIONS TAKEN 2026-09-04 — do not re-litigate, they are priced
 
-**Nothing below is gated on Sweep B (job 44379812, lands ~2026-09-05 18:00 EDT) except
-its own reading. But do NOT edit env, reward or eval code until it is scored** —
-`finalize.sh` scores those runs with whatever is on disk then, and any `gym_env`/`physics`/
-`reward` change can move the digest and orphan every floor.
+**D1. Gamma is `{free, one-contact, two-contact}`.** The commanded contact FACE is
+retired. Reasons, all measured: the 4-way one-hot breaks at the memo's own second object
+(a T-shape has eight edges) and has no meaning in 3D or for a conformable body; `strict`
+face-guarding scores **0.090** with `wrong_face` on 81-82% of episodes, so Eq 40's literal
+form is not reachable; and contact count is topological, so it transfers to any shape and
+needs only tactile sensing rather than face localization. Priced by the `count` arm in the
+interface sweep with an adoption threshold below.
 
-1. **BUILD THE STAGE 1 CONTACT LADDER. It is the long pole AND now the critical path.**
+**D2. The still-guard becomes a DISPLACEMENT bound, `eps = 2cm`.** Recorded memo deviation
+with its price. The memo's recontact invariant is "the object does not move"; velocity and
+displacement are two readings of it and they forbid DIFFERENT things — velocity forbids
+sharp taps but tolerates a 0.4cm/s drift for 3.2cm over a horizon, displacement forbids net
+motion but tolerates the unavoidable contact transient. The invariant exists so a successor
+option finds the object where it expected it, which is a displacement property. The velocity
+reading's measured price: two-contact Gamma unreachable at any speed tried (0.000 / 0.013),
+71-80 of 80 episodes disturbed even at 2cm/s, and HER's relabel credit blacked out from
+median tick 8 of 200. `eps=2cm` leaves 1.000 of ticks eligible at a 2cm/s action scale
+(median peak 0.62-0.76cm, p90 1.03-1.19cm); `eps=1cm` leaves 0.961-0.979 and is marginal for
+no benefit. Rotation folds into the same scalar as the arc a 3.12cm lever sweeps — the
+pressure-weighted mean radius the table drag already uses — so one bound covers position and
+heading with no second swept constant. **Form: LATCHED RUNNING MAX.** Instantaneous net
+displacement lets a policy shove the object and push it back, the same cheat as `w_m=50`
+teaching push to park it against a wall.
+
+**D3. `push_cone_deg` 30 -> 75**, set from `tools/probe_reachable.py`'s measured p90 of
+74.2deg under `guard_face=adjacent`. Not swept. +/-180 is NOT supportable (1.4% of reachable
+directions land in the 120-180deg bin with the guard on).
+
+**D4. Board v2 is the new benchmark.** 90x60, 3 rooms, 13.0cm doors offset 34cm in y,
+`portal_goal=false`, `portal_arrival=false`, `require_settled=true`, `push_cone_deg=75`,
+`same_room_goal_prob=0.5`, `guard_face=false`. The gap is DERIVED, not swept: object diagonal
+sqrt(10^2+6^2)=11.66cm, so gap >= diagonal + clearance admits every orientation. The
+portal-as-target-set (Eq 13, "a portal is passed through, not stopped at") is correct for a
+crossing edge INSIDE a route and returns at composition, where a second edge follows it; for
+a single-edge benchmark a goal in the far room is the honest task.
+
+**D5. `guard_face` stays OFF in the interface sweep** and is measured free, zero-shot, on
+every cell. `adjacent` costs 0.042-0.083 and a1 still clears Bar 1 at 0.653 on 3/3 seeds, so
+it CAN be enforced later — but an interface comparison between two floored arms answers
+nothing, so the hard factors are trained only once the interface is decided.
+
+## PREREGISTERED VERDICTS — written 2026-09-04, before the sweeps
+
+- **`ctl` on board v2** clears Bar 1's shape (`>=3cm >= 0.40`, `>=2 of 3` seeds, BOTH
+  checkpoints, no bin at 0.00) or the board is wrong and no arm is readable. Stop and fix
+  the board rather than reading an arm.
+- **`count` is adopted** iff the paired per-episode bootstrap CI on (`count` - `ctl`) has an
+  upper bound **>= -0.15**. Deliberately wider than `raw`'s: it buys an abstraction that
+  generalizes past a rectangle and needs only contact sensing, so it is worth real
+  performance.
+- **`raw` is adopted** iff (`raw` - `ctl`) upper bound **>= -0.05**. It removes an
+  assumption, so it wins ties.
+- **Gamma ladder has NO bar** — it is a measurement. `g_one` below **0.425** is a LEARNING
+  failure, not a task failure: that is what a crude scripted controller achieves.
+  `g_two_disp` has no scripted reference (the controller ran out of horizon), so it measures.
+- **Primary metric unchanged:** mean success on goals **>=3cm** under BOTH `model` and
+  `model_best`. The 5-bin mean carries a 0.150 floor from the 0-3cm bin and is not the number.
+
+## ORDER OF WORK — updated 2026-09-04 (late), PHASE 0 DONE, SWEEP B IN FLIGHT
+
+**Sweep B (job 44379812) is 37% done and lands ~2026-09-05 09:00 EDT.** It scores itself.
+**Do NOT edit `eval_contact.py`, `tools/score_sweep.py`, `tools/render_best.py` or anything
+they import until it is scored** — that is exactly what `finalize.sh` runs, and a
+`gym_env`/`physics`/`reward` change can move the digest and orphan every floor. Everything
+else is fair game; the freeze is narrower than earlier entries implied.
+
+1. **READ SWEEP B against its preregistered verdicts** (`slurm/submit_sweep.sh` header),
+   `ctl` first: it must reproduce **0.618 @600k** and **0.826 @1.2M** at digest
+   `249434216cd2`, and if it misses either, stop and find out why before reading an arm.
+   Check `logs/sweep_44379812/slurm_logs/` exists and that BOTH follow-ons ran
+   (`slurm/finalize.sh <dir> sweepB` and `tools/score_v35_rungs.sh <dir>`); run them by hand
+   if absent. **Two things downstream depend on the reading:** whether obs v2 is on for the
+   interface sweep's arms, and — if push saturates by 1.8M — dropping every later cell from
+   2.4M to 1.8M, which is 25% off the whole program for nothing but sequencing.
+
+2. **PHASE 1 — code, gates, floors, smoke.** In this order:
+   - **1a. The portal-passability check** in `_sample_push_edge_reverse`, mirroring
+     gym_env.py:727-733, inside the existing 256-attempt rejection loop. TASK key. Without it
+     board v2 hands 73.5% of crossing resets a goal with no straight-line path. Gate: 0/400
+     blocked. Measured acceptance 27.1%.
+   - **1b. Contact-count Gamma (D1).** Four parts: `xi` writes a 3-dim commanded count
+     instead of the 4-dim face one-hot, **width stays 11** with unused dims zeroed so
+     archived checkpoints still load; `push_guard`'s `forbidden_contact` becomes conditional
+     on the commanded count rather than hardcoding "the other finger must not touch";
+     recontact gains a `gamma_goal=count` mode whose goal IS the count and whose arrival is
+     "touch flags match + object settled", with NO positional tolerance; `xi_gamma_mode=face|count`
+     selects it. xi is INTERFACE, guard and arrival are TASK. Gates: unused xi dims exactly
+     zero; `xi_gamma_mode=face` bit-identical (replay `a78252c0a0a6`); a state with the
+     commanded count scores arrived; one extra contact scores `forbidden_contact` under
+     `count=one` and ARRIVED under `count=two`.
+   - **1c. The displacement guard (D2).** `guard_object_still` WIDENS from `false|true` to
+     `false|velocity|displacement` rather than gaining a new key. Velocity is DEPRECATED, not
+     deleted — archived Gamma checkpoints trained against it. Latched running max, eps=2cm,
+     rotation as a 3.12cm arc. Gates: rollout reward == relabeled reward for a transition
+     under the new guard (**this is the regression test for the exact bug that made v31's
+     Gamma arms uninterpretable**); a satisfying state scores arrived; one past the bound
+     scores the guard.
+   - **1d. Per-template `v_max_cm_s`** (widen, don't add). The Gamma arms need 2cm/s.
+   - **1e. `slurm/pins_board_v2.sh`** — ONE home for board v2's task pins, sourced by the
+     launcher, the floor builder and the rung scorer. Retyping a protocol already cost a
+     floor once (`make_v32_floor.sh` omitted `disengaged_away_deg`: `1a72f6438f34` vs
+     `249434216cd2`). Gate: no retyped protocol string in the floor script.
+   - **Then:** 3 push floors (`ctl`/`count`/`raw` interfaces) + 2 Gamma floors, regenerated
+     BEFORE the sweeps; and a **200k `ctl` smoke on board v2** (~1.5h) checking the diag
+     climbs off the floor and the sampler's retry/leak counters stay sane. **The smoke must
+     also check the Gamma travel budget:** `v_max=2` x `horizon=400` x 0.04 = 32cm against a
+     disengaged spawn radius of 8.0-16.1cm.
+
+3. **INTERFACE + ABSTRACTION SWEEP — 9 cells, board v2, 2.4M (or 1.8M per item 1), four
+   rungs.** A 2x2 on (action interface x Gamma encoding) with one cell deferred.
+
+   | arm | action interface | Gamma encoding | question |
+   |---|---|---|---|
+   | `ctl` | contact_frame | face | Does push learn on board v2 at +/-75deg? Sets the bar. |
+   | `count` | contact_frame | **count** | D1, whole: count xi + cone 180 + second finger free. |
+   | `raw` | finger_velocity | face | Raw velocities at the fixed observation. Never tested — every raw number on disk (0.217 / 0.139 / 0.139) predates obs v2's three scale fixes. |
+
+   Action interface, xi encoding and `rl_algo` are all INTERFACE keys and the scorer pins the
+   reward, so **all 9 cells share ONE benchmark and ONE digest.** `push_cone_deg` and
+   `mask_inactive_finger` differ for `count`, so it gets the two-way treatment: common
+   protocol AND its own. Free zero-shot re-scores on all 9: `guard_face=adjacent`, and sensor
+   noise to price fragility.
+
+   **`raw_count` is DEFERRED to a conditional 3 cells** — run it only if BOTH `count` and
+   `raw` are adopted, which is the only branch where the interaction matters.
+
+4. **GAMMA LADDER — 6 cells, 1M, in parallel with item 3.**
+
+   | arm | Gamma | guard | v_max | horizon |
+   |---|---|---|---|---|
+   | `g_one` | one-contact | displacement, eps=2cm | 2 | 400 |
+   | `g_two_disp` | two-contact | displacement, eps=2cm | 2 | 400 |
+
+   `gamma_free` (0.000) and `gamma_init` (0.000) are REUSED as reference columns from v34 at
+   the same 1M budget, saving 6 cells. Each arm moves a task key, so each gets its own floor
+   and the two-way score.
+
+5. **BUILD THE STAGE 1 CONTACT LADDER — the long pole, and it needs no experiment.**
    4-8 days (see THE STAGE 1 LADDER IS A BUILD at the bottom): a contact bundle,
    `contact_entry_conditions`, `contact_descriptors`, wiring `contact_hooks` into
-   `calibrate`/`run_eval`, and an `eval_harness` adapter. It needs push **graded**, not
-   converged, and push is graded (0.826 at 1.2M, no floored bin, 0.86 under 1cm down to
-   0.01 beyond 12cm). **Build `contact_descriptors` on ORIENTATION, not distance:** success
-   is flat at 0.833 across the 3-6/6-9/9-12cm bins while the orientation split carries
-   0.762 vs 0.500. This is 4-8 days of work that has been waiting on a number it never
-   needed, and it now also unblocks item 3.
-2. **THE OFFSET DOOR.** The wall blocks the straight object->goal path in **0 of 400**
-   cross-room resets, so "crosses a room" means "a long straight push that passes a
-   doorway", and a distance curriculum has only 6-16cm of range. Needs no training,
-   strands nothing, changes the digest — and it is what makes a composed task, hence
-   item 3, possible at all. Highest-value task-design change available.
-3. **THE FLAT BASELINE IS NOT DEFINABLE YET — that is a finding, not a delay.** Memo
-   sec 5.2's decisive flat arm is "identical reset distribution and action space, no
-   temporal hierarchy" (and sec 5.2 #3, "same resets and training-state coverage as the
-   option policies"). On a SINGLE-EDGE task that IS the push option, so the comparison is
-   empty until a composed task exists. It therefore comes after items 1-2, not before.
-   The partial flat baselines already on disk price the ACTION SPACE, not the hierarchy:
-   v29 `rawact` 0.217, v32 `raw` 0.139, v33 `midaction` 0.139 (CI [-0.632,-0.438]).
-   When it is built it must inherit whatever scaffolds survive Sweep B, per memo sec 5.2/7.
-4. **READ SWEEP B against its preregistered verdicts** (`slurm/submit_sweep.sh` header).
-   Check `finalize.sh` fired — it has now fired exactly once — and that BOTH follow-on jobs
-   ran: `slurm/finalize.sh <dir> sweepB` and `tools/score_v35_rungs.sh <dir>`. Read `ctl`
-   first: it must reproduce 0.618 @600k and 0.826 @1.2M, and if it misses either, stop and
-   find out why before reading an arm.
-5. **GAMMA / Eq 13 IS CLOSED AS POSED.** 12 of 12 cells at 0.000, both checkpoints, against
-   a 0.000 floor, with zero of 576 failures inside 1cm. **Do not re-run gamma at a larger
-   budget.** The next move is task design: staged or sequential fingertip goals, looser
-   per-finger tolerances, or implementing the `pivot` template. Real rotation diversity
-   probably needs `pivot` regardless.
-6. **DECIDE `rich_obs`.** Measured 2026-09-04: it sits INSIDE the env digest while changing
-   only what the policy reads, so `a78252c0a0a6` and `1ecc01e69a3d` are the same task —
-   verified by 60 identical per-episode `d0` values and an identical 0.033 floor. It is the
-   **twelfth interface key**. Moving it collapses those two digests, which is correct, and
-   relabels every stored score, which makes it a decision rather than a drive-by fix.
-7. **Housekeeping, whenever.** Move the 621 orphaned staging files into their sweep dirs
-   (a bulk move, **needs approval**). Add the PPO branch to `tools/make_untrained_ckpt.py`
-   — a PPO sweep still cannot be scored without a PPO floor. `ruff` is still not installed
-   in `tsmc`.
+   `calibrate`/`run_eval`, an `eval_harness` adapter. It needs push **graded**, not
+   converged, and push is graded. **Build `contact_descriptors` on ORIENTATION, not
+   distance:** success is flat at 0.833 across the 3-6/6-9/9-12cm bins while the orientation
+   split carries 0.762 vs 0.500. **Touches none of the frozen files, so it can start
+   immediately and run beside everything above.** This is the item most likely to be the real
+   critical path by the next session.
 
-**DONE 2026-09-04, recorded so they are not reopened:** the tree is COMMITTED (four commits,
-`main` at `4a1bfd9`, verified byte-identical to the sha all 24 v34 cells recorded);
-`score_sweep.cell_dirs` fixed and gated (`static` 36 -> 38); all of v34 scored on its pinned
-protocols plus the 600k rung and A1's own protocol; `tools/summarize_v29.py` renamed to
-`summarize_sweep.py` with an arm regex that survives multi-token arm names.
+6. **THE FLAT BASELINE IS STILL NOT DEFINABLE** — a finding, not a delay. Memo sec 5.2's
+   decisive flat arm is "identical reset distribution and action space, no temporal
+   hierarchy"; on a SINGLE-EDGE task that IS the push option. Empty until a composed task
+   exists, so it comes after items 3-5. The partial baselines on disk price the ACTION SPACE,
+   not the hierarchy.
 
-**SUPERSEDED 2026-09-04:** "finish v33's loosened-distribution scoring for `widecone` and
-`spread`" — both arms are re-running at 2.4M in Sweep B and `tools/score_v35_rungs.sh`
-scores each on its own distribution as part of the sweep, so the v33 debt is retired rather
-than paid.
+7. **DEFERRED, with reasons.** PPO + its `sac_dense` control (6 cells): answers memo Table 4's
+   algorithm-independence REPLICATION and gates no design decision; move it to a late
+   replication sweep once the task is frozen, where the claim is also stronger. The PPO floor
+   branch is DONE (`a82d90f`), so it is launch-ready whenever. `rich_obs` is still the
+   TWELFTH interface key sitting inside the digest — moving it is correct and relabels every
+   stored score, so it is a decision. The `xi` point-and-normal migration is now SUBSUMED by
+   D1: contact count replaces the one-hot outright, so that entry closes rather than needing
+   its own arm.
+
+8. **Housekeeping.** Move the 621 orphaned staging files into their sweep dirs (a bulk move,
+   **needs approval**). `ruff` is still not installed in `tsmc`.
+
+**DONE 2026-09-04 (late), recorded so it is not reopened:** Phase 0's five free
+measurements (`docs/PROGRESS.md`, entry dated 2026-09-04 later) — Gamma satisfiability,
+the still-guard's HER blackout, contact-count feasibility, the eps=2cm threshold scan, the
+reachable set, the face-guard re-score, and board v2's distributions plus the latent sampler
+bug. PPO floor branch landed and gated (`static` 38 -> 40); SAC path verified bit-identical
+across all 33 weight tensors. `tools/score_v34_faceguard.sh` added and run (job 44432898).
+Four commits: `d64bf71`, `a82d90f`, `b0fe6be`, `3618a80`.
+
+**SUPERSEDED 2026-09-04 (late):** ORDER OF WORK item 5's "Gamma is closed as posed, the next
+move is looser per-finger tolerances or `pivot`" — the tolerance hypothesis is DEAD
+(satisfiability is 100%, 80/80 all three classes) and the blocker is the guard's form. Item 2's
+"THE OFFSET DOOR ... needs no training, strands nothing" is superseded by D4, which is the
+offset door plus four other changes, and by the sampler bug that must land with it.
 
 ## V34 RESULT — 24 cells, scored 2026-09-04
 
@@ -286,9 +407,13 @@ ENCODING -- a 4-way one-hot.
   also a second reading of the face guard's price: about a third of current
   behaviour becomes terminal when the guard is on.
 
-**Next action:** fold one `xi_continuous` arm into the interface sweep, expecting
-a price of zero. Do it before any non-rectangular object, held-out geometry axis,
-or 3D work -- all three are in the plan and all three break the one-hot.
+**CLOSED 2026-09-04 by DECISION D1, which goes further.** The migration this entry
+asked for -- one-hot -> commanded point + normal -- is superseded by retiring the
+commanded FACE altogether in favour of Gamma = `{free, one-contact, two-contact}`.
+Contact count is topological, so it survives the T-shape, a round object, 3D and a
+conformable body, where point-and-normal survives only the first two. The
+measurement below is why the migration was needed and is retained as the record;
+the `xi_continuous` arm is not run, because `count` replaces it.
 
 A conformable object is a much larger change and is out of scope: object pose
 stops being a complete state (so the pose goal, `achieved_goal` and the arrival

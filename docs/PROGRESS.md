@@ -3600,3 +3600,212 @@ measured reason (launcher header). Floors regenerated first and bit-identical on
 re-run: `ctl` 0.042 at `249434216cd2` reproducing `logs/eval/v34_floor/a1_v1_centre` exactly,
 `obsv2` 0.021 same digest, `widecone` 0.000 at `b21b11ecf4fc`, `spread` 0.000 at
 `5a24875f15c4`. **First sweep in eight to record `GIT_DIRTY=no`.**
+
+---
+
+## 2026-09-04 (later) — PHASE 0: five free probes, and four of them deleted a sweep arm
+
+**Question:** the plan had grown to 30 cells / 55M steps across two sweeps. Which of those
+arms could be answered by a scripted controller or a frozen checkpoint instead?
+
+**What ran:** three new probes (`tools/probe_gamma_feasible.py`, `tools/probe_reachable.py`,
+`tools/probe_board_v2.py`), one frozen-checkpoint re-score (`tools/score_v34_faceguard.sh`,
+job 44432898, 4 minutes), and a PPO branch for the floor builder. ~0.5M env steps total.
+No GPU. Sweep B untouched and still running throughout.
+
+Commits: `d64bf71` (three probes) -> `a82d90f` (PPO floor + face-guard re-score) ->
+`b0fe6be` (contact-count Gamma) -> `3618a80` (displacement threshold). Gates 40/27/243/172.
+
+### Result 1 — Eq 13's Gamma is SATISFIABLE. The still-guard was the blocker.
+
+Place both fingertips exactly on the commanded targets and the env scores it arrived
+**80/80 for all three classes**, with the object moving **0.000cm**. So the 0.000-on-12-cells
+result was never bad geometry or a broken arrival test.
+
+Scripted straight-line P controller, guard on vs off, 80 episodes each:
+
+| class | `guard_object_still=true` | false | exits with the guard on |
+|---|---|---|---|
+| push | 0.037 | 0.125 | `object_disturbed` 77/80 |
+| pinch | 0.000 | 0.250 | `object_disturbed` 80/80 |
+| pivot | 0.000 | 0.175 | `object_disturbed` 80/80 |
+
+**237 of 240 episodes die on `object_disturbed`, at a median tick 8 of 200.** Zero of 240
+do with the guard off.
+
+And it is satisfiable on contact — one finger, straight at a face, fixed speed:
+
+| approach | 2cm/s | 5cm/s | 10cm/s | 20cm/s (= v_max) |
+|---|---|---|---|---|
+| object still 5 ticks after contact | **0.85** | 0.55 | 0.00 | 0.00 |
+
+**Mechanism (inferred from those two tables):** `object_disturbed` is an INSTANTANEOUS
+0.5cm/s test, `guard_terminates=true` ends the episode on one violating tick, and SAC's
+exploration noise on a 20cm/s action space is +/-6cm/s. **Exploration noise alone exceeds
+the guard.** Under pure sparse reward the episode is killed before the policy can ever see
+the 0.3cm two-finger conjunction.
+
+**A correction to a hypothesis of mine:** the guard is not merely mis-tuned. With it off,
+the crude controller shoves the object a median 2.9-7.1cm and rotates it 13-27deg (p90
+103-137deg). A 1cm displacement bound would fire on most of those too. The problem is
+control precision, not the guard's threshold.
+
+### Result 2 — the guard has also been switching HER OFF, which nothing else explained
+
+`~disturbed` gates `_her_arrived` (gym_env.py:1316-1321) and the flag is STICKY. Firing at
+median tick 8 of 200 means **~96% of an episode's transitions carry `disturbed=True`**, so
+every relabeled goal drawn from them is scored a failure. HER — the only gradient a sparse
+conjunction has — produces relabels that can never pay.
+
+This is the only account offered so far for v34's strangest Gamma statistic: **39.4% of
+episodes never got closer than their start.** Not a hard task. No gradient.
+
+It also means `guard_terminates=false` would NOT have fixed it: removing the termination
+leaves the relabel blackout untouched.
+
+### Result 3 — CONTACT-COUNT Gamma splits at the second contact
+
+Same rollouts, re-scored under the arrival test Gamma = {free, one-contact, two-contact}
+implies — touch flags match the commanded count AND object settled, **no positional
+tolerance**. Computed alongside rather than through a `gamma_goal=count` env (frozen until
+Sweep B scores); the test is a pure function of state, so this is exact.
+
+| class | wants | 20cm/s | 2cm/s | exits at 2cm/s |
+|---|---|---|---|---|
+| push | 1 | 0.050 | **0.425** | `object_disturbed` 41, **count_ok 34**, horizon 5 |
+| pinch | 2 | 0.000 | **0.000** | `object_disturbed` 71, horizon 9 |
+| pivot | 2 | 0.000 | 0.013 | `object_disturbed` 75, horizon 4 |
+
+**One contact is reachable; two are not, at any speed tried.** Holding an object between two
+fingertips needs opposing forces, and the transient before they balance moves it — an
+instantaneous speed threshold cannot survive that.
+
+### Result 4 — a DISPLACEMENT bound of 2cm is satisfiable; 1cm is not
+
+Latched running-max disturbance (position, with rotation folded in as the arc a 3.12cm lever
+sweeps — the same pressure-weighted radius the table drag uses, so one scalar bounds both
+without a second swept constant), guard off so the episode runs:
+
+| class | speed | peak med / p90 | eligible: velocity (per-tick) | eps=1cm | eps=2cm | eps=3cm |
+|---|---|---|---|---|---|---|
+| push | 20cm/s | 10.61 / 39.18 | 0.336 | 0.226 | 0.292 | 0.326 |
+| push | **2cm/s** | **0.70 / 1.03** | 0.609 | 0.979 | **1.000** | 1.000 |
+| pinch | 20cm/s | 9.88 / 37.42 | 0.411 | 0.352 | 0.390 | 0.427 |
+| pinch | **2cm/s** | **0.62 / 1.13** | 0.643 | 0.961 | **1.000** | 1.000 |
+| pivot | 20cm/s | 10.11 / 35.61 | 0.357 | 0.240 | 0.316 | 0.377 |
+| pivot | **2cm/s** | **0.76 / 1.19** | 0.606 | 0.967 | **1.000** | 1.000 |
+
+**eps = 2cm.** 1cm is marginal (p90 just above it) for no benefit. At 20cm/s even 3cm leaves
+only 0.33-0.43, so **the displacement form and the low action scale are COMPLEMENTARY, not
+substitutes** — one arm needs both.
+
+The `velocity` column is the PER-TICK settled fraction, not the latch. At 0.61 per-tick the
+first violation lands early, which is why the latch terminated 41/80 push and 71-75/80
+pinch/pivot episodes even at 2cm/s. The displacement bound is never crossed, so eligibility
+holds at 1.000 for the whole episode. That gap is the point.
+
+**A fourth thing this caught:** `v_max=2` with `horizon=200` gives only 2*200*0.04 = **16cm**
+of finger travel against a disengaged spawn radius of 8.0-16.1cm. Not enough for two
+sequential placements — pinch/pivot ran out of horizon rather than tripping the guard
+(`horizon=9`, zero `count_ok`). **The arm needs `horizon=400`,** and the travel budget is
+what the smoke test must check. Without this probe that arm would have returned 0.000 for a
+reason unrelated to its hypothesis.
+
+### Result 5 — one push option's reachable set: the +/-30deg cone is far too narrow
+
+1024 open-loop rollouts, 32 resets x 32 piecewise-constant action sequences, measured in the
+contacted face's frame (+x = inward normal):
+
+| | `guard_face=false` | `guard_face=adjacent` |
+|---|---|---|
+| contact kept | 0.626 | 0.377 |
+| \|direction\| off the inward normal, p90 | 141.6deg | **74.2deg** |
+| fraction in the 120-180deg (behind) bin | **0.176** | **0.014** |
+| max net rotation | 180.0deg | 179.5deg |
+| top exit | `contact_lost` 322 | `wrong_face` **434** |
+
+Two readings. (a) **Most "behind the contact" reachability was bought by walking to another
+face** — 0.176 -> 0.014 under the guard, with `wrong_face` becoming the largest exit at 42%.
+(b) **+/-30deg is far narrower than the feasible set even with the guard on** (p90 74deg,
+and the 60-90deg bin holds 18.8%), while +/-180deg is NOT supportable at 1.4%.
+**`push_cone_deg` 30 -> 75, set from measurement rather than swept.**
+
+Net rotation is a median 1.8-2.7deg but p90 40-64deg and max 179.5deg, so same-face rotation
+authority is real but rare under random actions — consistent with push's measured median
+1.8deg/episode.
+
+### Result 6 — the face guard costs 4-8 points at `adjacent` and is fatal at `strict`
+
+`tools/score_v34_faceguard.sh`, Sweep A's 9 cells, own PINS with `guard_face` flipped and
+nothing else. Zero-shot (these policies never trained with it), so a transfer column read as
+a DELTA, not pooled.
+
+| arm | guard off | `adjacent` | cost | `strict` | cost |
+|---|---|---|---|---|---|
+| a1 | 0.736 | **0.653** | -0.083 | 0.090 | -0.646 |
+| a2 | 0.701 | 0.646 | -0.055 | 0.090 | -0.611 |
+| a3 | 0.681 | 0.639 | -0.042 | 0.083 | -0.598 |
+
+Digests `780f93cc40d9` (adjacent) and `ad7e75719a0f` (strict). `wrong_face` 11-17% at
+adjacent, **81-82%** at strict.
+
+Three readings: (a) `adjacent` is cheap and a1 still clears Bar 1 at 0.653 on 3/3 seeds, so
+Eq 40 can be ENFORCED rather than only measured; (b) `strict` is dead, matching v31 (0.000
+on 9/9) and v32 (0.083) — "exactly one face, ever" is not reachable, "never the opposite
+face" is; (c) **the arm ordering does NOT invert this time** (a1 ahead under both guards), so
+v32's inversion was a curriculum artifact and that worry retires.
+
+### Result 7 — board v2 works, and exposed a LATENT SAMPLER BUG
+
+Board v2 = 90x60, 3 rooms, 13.0cm doors offset 34cm in y, `portal_goal=false`,
+`portal_arrival=false`, `require_settled=true`. The gap is DERIVED: the object's diagonal is
+sqrt(10^2+6^2) = 11.66cm, so gap >= diagonal + clearance admits every orientation and the
+door becomes a routing constraint instead of an orientation lottery.
+
+| | board v1 | board v2 |
+|---|---|---|
+| cross-room goals within 3cm of the wall plane | **1.000** | **0.000** |
+| cross-room goal distance (median) | 11.18cm | **28.67cm** |
+| straight object->goal path blocked by a wall | 0.000 | 0.352 |
+| doorway admissible heading half-width | 23.6deg (26%) | **all orientations** |
+| regions / edge types seen | 2 / 4 | 3 / 7 |
+| perfect-goal state scored a success | 60/60 | 60/60 |
+
+**THE BUG.** `_sample_push_edge_reverse` — the sampler `curriculum_mode=band` selects, i.e.
+the one EVERY sweep since v32 uses, Sweep B included — draws a crossing edge's goal with
+`_sample_room_xy(dst)`, a uniform point in the destination room, and **never checks that the
+object->goal ray passes the doorway.** `_sample_goal_in_push_cone` DOES check
+(gym_env.py:727-733); the reverse sampler does not.
+
+`portal_goal=true` hid it completely by making the goal BE the doorway. Flipping it to false
+— the fix for "cross-room goals only need the object to reach the wall plane" — leaves
+**73.5% of crossing resets with no straight-line path**, and it is latent on board v1 too
+(0.324), not a board-v2 artifact.
+
+**No shipped number is affected** — every sweep pinned `portal_goal=true`. Rejection accepts
+27.1% and leaves the distance distribution intact (27.2 vs 28.7cm median), so the fix drops
+into the sampler's existing 256-attempt rejection loop.
+
+### What this deleted from the plan
+
+30 cells / 55.2M -> **15 cells / 27.6M**, with nothing load-bearing lost:
+
+- Gamma tolerance rung — deleted; satisfiability is 100%, 0.3cm was never the wall.
+- Gamma action-scale arm — deleted; the probe priced it directly (0.050 vs 0.425).
+- Gamma `g_soft` and `g_pos_slow` — deleted; the guard FORM is one arm, and the
+  abstraction/action-scale attribution has no decision attached now that count Gamma is adopted.
+- two-contact positional arms — deleted; replaced by one displacement-guard arm.
+- strict face-guard arm — deleted; 0.090.
+- `push_cone_deg` — set from measurement (p90 74deg) instead of swept.
+- PPO + its `sac_dense` control — deferred, 6 cells; it answers memo Table 4's
+  algorithm-independence REPLICATION and gates no design decision.
+- `raw_count` — deferred to a conditional 3 cells, run only if both `count` and `raw` are adopted.
+- and a sampler bug caught that would have wasted an entire round.
+
+**The rule that paid: before adding an arm, ask whether a scripted controller or a frozen
+checkpoint can answer it.** Half the arms proposed this session died to that question.
+
+### Next — Sweep B lands ~2026-09-05 09:00 EDT, then Phase 1
+
+Read Sweep B first, `ctl` before any arm. Then the Phase 1 code list and the two sweeps in
+`docs/TODO.md`'s ORDER OF WORK.
