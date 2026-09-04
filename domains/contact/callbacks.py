@@ -8,6 +8,8 @@ exposes for HER -- so it works unchanged for any later template or simulator.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -42,7 +44,8 @@ class ContactPeriodicEvalCallback(BaseCallback):
     def __init__(self, eval_env, eval_freq: int, n_eval_episodes: int = 16,
                  dist_edges=(3.0, 6.0, 9.0, 12.0), seed: int = 777,
                  best_model_path=None, train_env=None, local_env=None,
-                 curriculum_levels=None, curriculum_threshold: float = 0.6):
+                 curriculum_levels=None, curriculum_threshold: float = 0.6,
+                 obs_normalizer=None, vecnorm=None):
         super().__init__()
         self.env = eval_env
         self.freq = int(eval_freq)
@@ -69,6 +72,12 @@ class ContactPeriodicEvalCallback(BaseCallback):
         self.curriculum_levels = curriculum_levels
         self.curriculum_threshold = float(curriculum_threshold)
         self.curriculum_level = 0
+        # self.env / self.local_env are BARE gym envs, so they emit raw goal
+        # keys while the policy trained on normalized ones. Normalize at the
+        # predict() call ONLY: _rollout bins by goal distance in cm, and
+        # normalizing before that would silently move the bin edges.
+        self._norm = obs_normalizer
+        self._vecnorm = vecnorm
 
     def _on_step(self) -> bool:
         if self.num_timesteps >= self._next:
@@ -85,7 +94,9 @@ class ContactPeriodicEvalCallback(BaseCallback):
             d = _goal_dist(obs)
             done, s, steps, ret = False, 0.0, 0, 0.0
             while not done:
-                a, _ = self.model.predict(obs, deterministic=True)
+                a, _ = self.model.predict(
+                    self._norm(obs) if self._norm is not None else obs,
+                    deterministic=True)
                 obs, r, term, trunc, info = env.step(a)
                 s = max(s, float(info.get("is_success", 0.0)))
                 steps += 1; ret += float(r)
@@ -102,6 +113,13 @@ class ContactPeriodicEvalCallback(BaseCallback):
         if self.best_model_path is not None and success_rate > self.best_success_rate:
             self.best_success_rate = success_rate
             self.model.save(self.best_model_path)
+            if self._vecnorm is not None:
+                # The stats drift, so model_best needs the stats AS OF the step
+                # it was best at -- not the end-of-run ones. Imported here, not
+                # at module scope: train_contact imports this module.
+                from train_contact import VECNORM_BEST_FILE
+                self._vecnorm.save(os.path.join(
+                    os.path.dirname(self.best_model_path), VECNORM_BEST_FILE))
         if self.curriculum_levels is not None and self.train_env is not None:
             # Falls back to the full-task rate only when no local env was given,
             # which is the old (broken-gate) behaviour and is kept so a caller

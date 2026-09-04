@@ -36,6 +36,49 @@ wandb_project: mcog
 wandb_run_name: null
 wandb_group: null          # null -> old behavior (out_dir's basename); set explicitly
                             # to group many sweep runs under one wandb "group" banner
+# --- algorithm ---
+# NAMED rl_algo, not `algo`: `config/algo/` is nav's Hydra config GROUP
+# (config/algo/{sac,ppo}.yaml), so `algo=ppo` on the CLI is parsed as a group
+# override and dies with "No match in the defaults list". Do not rename back.
+#
+# sac: SAC+HER, everything this repo has ever run. ppo: memo sec 4's
+# "PPO as an algorithm-independence replication" (Table 4).
+#
+# PPO IS ON-POLICY, so three SAC-only things are REFUSED rather than ignored:
+# use_her (no replay buffer to relabel into), target_clip (a TD-target clamp
+# that has no analogue), and learning_starts. train_contact raises on each,
+# because silently dropping a flag a launcher passed is how the v29 w_m sweep
+# trained 8 cells at the wrong value.
+#
+# AND PPO WITHOUT DENSE SHAPING IS EXPECTED TO FAIL. It has no HER, so a pure
+# sparse arrival bonus gives it essentially no gradient -- push's untrained
+# floor is 0.042. Pair `rl_algo=ppo` with the w_* terms; train_contact warns
+# loudly if you do not.
+rl_algo: sac
+# PPO only. `n_steps` is the TOTAL rollout across envs and must divide n_envs
+# -- same convention as train.py/config/algo/ppo.yaml, so the two files read
+# alike. Memo Table 4 asks for 2048-8192 steps/update, hence 4096 with the
+# n_envs=8 a PPO run wants.
+n_steps: 4096
+batch_size: 256
+n_epochs: 10
+gae_lambda: 0.95
+ent_coef: 0.0             # Table 4 allows 0.0-0.01. 0.0 by default: contact's
+                          # action space is 2 live dims under masking, and an
+                          # entropy bonus is what the affine `push` remap exists
+                          # to avoid needing.
+clip_range: 0.2
+learning_rate: 0.0003     # Table 4, both algos. SAC's SB3 default is the same
+                          # value, so passing it explicitly is bit-identical.
+lr_linear_decay: false    # Table 4 says "3e-4 with linear decay" for PPO. Off by
+                          # default so a run is reproducible from one number.
+# BOTH algos. null -> SB3's own default, which DIFFERS by algorithm: SAC gets
+# [256, 256] and PPO only [64, 64], i.e. PPO would carry ~16x fewer parameters.
+# So `null` resolves to [256, 256] for PPO too, matching SAC exactly -- memo
+# sec 9 requires the advantage to survive a control for total network capacity,
+# and an unfair capacity gap would confound the whole comparison. Table 4's
+# literal 3x256 is available as an override and is a recorded deviation.
+net_arch: null
 use_her: true              # false -> plain SAC replay buffer, no goal relabeling
 target_clip: null          # clamp the critic's TD target to [0, this]. null -> stock
                            # SAC. With a one-shot terminal bonus and every other
@@ -73,7 +116,16 @@ object_h_cm: 6.0
 object_mass_kg: 0.20
 table_friction: 0.40
 finger_friction: 0.75
-angular_drag_arm_cm: 6.0
+# 3.12, not 6.0, since 2026-09-03. tau = mu*m*g*L, and for a body sliding on a
+# plane L is the PRESSURE-WEIGHTED MEAN RADIUS of the contact patch: uniform
+# pressure over a 10x6cm rectangle gives 3.12cm, and 5.83cm (the half-diagonal,
+# all load on the two farthest corners) is the hard ceiling. The old 6.0 was
+# above that ceiling, i.e. NO pressure distribution can produce it. Costed at
+# zero: v29's physdamp arm measured 0.739 -> 0.706 on the identical 60 episodes
+# (paired mean -0.033) and held under both checkpoints, so the unphysical value
+# was never buying performance. Every v32/v33 cell already passed 3.12
+# explicitly, so their digests are unaffected.
+angular_drag_arm_cm: 3.12
 finger_radius_cm: 1.2
 finger_mass_kg: 0.05
 finger_gain: 10.0
@@ -95,6 +147,41 @@ w_F: 0.0
 w_m: 0.0
 w_T: 0.0
 force_max: null
+# --- dense shaping, all 0.0 by default so every archived config is unchanged ---
+# READ reward.py's RewardWeights docstring before setting any of these. Two
+# constraints are measured, not stylistic:
+#   1. every guard penalty must stay well BELOW goal_reward. At w_m=50/100 push
+#      learned to PARK THE OBJECT AGAINST A WALL -- pinned there it cannot
+#      slide, so contact-loss becomes impossible and the guard is satisfied
+#      forever at the cost of ever finishing. A bigger penalty made that trade
+#      MORE attractive (docs/PROGRESS.md v16).
+#   2. w_settle MUST stay proximity-gated (settle_radius_cm). Ungated it is
+#      maximised by not moving, i.e. the same cheat.
+# Turning ANY of these on invalidates target_clip, whose [0, goal_reward] bound
+# is only provable under pure sparse -- ContactEnv raises if you do both.
+w_guard: null             # per-outcome guard penalty, e.g.
+                          # '{contact_lost: 2.0, wrong_face: 2.0, forbidden_contact: 3.0, off_board: 5.0}'
+                          # Keys from reward.GUARD_OUTCOMES; unlisted -> w_m.
+w_hold: 0.0               # per tick, ONLY while the required contact is held AND
+                          # on the commanded face. One conjunction, not two terms.
+                          # MEASURED: at 0.02 on a 200-tick horizon a 2k-step run
+                          # hit ep_rew_mean 4.57 with success_rate 0.0 and every
+                          # episode at full horizon -- "hold and stall" was worth
+                          # 46% of the arrival bonus. Start at 0.005-0.01.
+hold_cap: 2.0             # ceiling on the hold bonus per EPISODE, so a per-tick
+                          # bonus cannot scale with the horizon.
+w_settle: 0.0             # per tick, ONLY while settled AND within settle_radius_cm
+settle_radius_cm: 1.2     # 3x arrival_eps. The gate that stops "stand still" winning.
+settle_cap: 0.5           # ceiling on the settle bonus per EPISODE
+w_prog: 0.0               # POTENTIAL-BASED distance shaping: rewards the REDUCTION
+                          # in distance, so it is policy-invariant (Ng et al. 1999).
+                          # Use this, never w_d -- w_d charges the ABSOLUTE distance
+                          # every tick, which at 0.005 costs a 20cm goal -20 over
+                          # 200 ticks, TWICE the arrival bonus. That arithmetic is
+                          # why "bailing out was cheaper than attempting the task".
+w_arrive_pos: 0.0         # one-shot bonus for POSITION-only arrival, so the settle
+                          # requirement is a gradient rather than a cliff (53% of
+                          # push's failures already land within 1cm).
 
 # --- curriculum constants (formerly bare module-level globals in gym_env.py) ---
 wall_margin_cm: 6.0
@@ -115,6 +202,30 @@ push_range_min_cm: null   # push only, cone sampler only -- floor on the goal's
                           # 5 of the 60 benchmark episodes under 1cm, i.e. goals
                           # the object is already almost on. Rays too short to
                           # hold the floor are rejected, not clamped.
+push_spawn_along_frac: null # PUSH ONLY. Half-width, as a FRACTION of the
+                          # half-face, of the uniform spread the active
+                          # finger's contact point is drawn from ACROSS the
+                          # contacted face. null keeps the historical face
+                          # CENTRE (measured max along-face offset 0.0000cm over
+                          # 400 resets), draws no extra random number, and is
+                          # bit-identical. Max 0.9: a contact ON the corner
+                          # makes nearest_face flip on rounding, which is why
+                          # contact_templates caps its own interface sampler at
+                          # ALONG_MAX_FACE=0.7.
+                          #
+                          # NOT COSMETIC, and not just the memo's "random point
+                          # along the face". A contact at the face CENTRE
+                          # pushing along the inward normal produces EXACTLY
+                          # ZERO torque -- the lever arm is parallel to the
+                          # force. All of push's rotation authority came from
+                          # the friction-limited tangential component, which is
+                          # why net rotation measures a median 1.8deg/episode
+                          # against a +/-45deg goal window. So this GATES any
+                          # orientation-diversity experiment: widening the
+                          # window without it only adds unwinnable episodes.
+                          # A TASK key -- it moves the reset distribution and
+                          # the digest, so the untrained floor is regenerated
+                          # with it.
 object_theta_spread_deg: null  # push only, cone sampler only -- half-width (deg)
                           # of the uniform spread the object's INITIAL HEADING is
                           # drawn from. null keeps the historical fixed 0 deg
@@ -225,6 +336,38 @@ init_gamma_modes: null       # which interface the fingers START in. null -> (fr
                              # the historical both-disengaged reset. Adding the
                              # contact classes lets recontact represent a
                              # GRASP-TO-GRASP transition, which composition needs.
+# --- observation version and its scales (physics.ObsScales) ---
+# An INTERFACE key, like action_interface: it changes how the policy READS the
+# world, not the reset distribution, reward or horizon. So it is EXCLUDED from
+# the env digest, and obs v1 vs v2 are directly comparable on one benchmark.
+#   1  the historical layout, bit-identical -- including its two missing
+#      divisors (angular velocity went in raw at +/-3.27 while every
+#      neighbouring velocity was scaled; force was divided by a 1000.0 fallback
+#      against a measured p99 of 284/323) and the recontact frame mix, where
+#      the goal tail differenced an OBJECT-frame target against the object's
+#      WORLD position (measured mean -0.492, range 0.21).
+#   2  xi always emitted at N_XI_V2=11, so the state+xi head is byte-identical
+#      across push and recontact; angular velocity and force normalized; the
+#      goal tail measured against the ACHIEVED goal; goal positions scaled by
+#      the max same-room goal distance instead of the board extent (2.3x of the
+#      range was being wasted -- measured std 0.039/0.071, the two weakest
+#      signals in the vector). Requires rich_obs=true.
+obs_version: 1
+# Normalize ONLY achieved_goal/desired_goal, via SB3's VecNormalize. Also an
+# INTERFACE key. Measured: those two keys' positions are the four
+# highest-variance dims of the whole 49-D network input (std 7.79/7.55/4.64/3.93
+# against a median of 0.227 -- a 34x ratio) because they are raw CENTIMETRES
+# while `observation` is all in +/-1 and SB3 just Flattens every key.
+# `observation` is deliberately NOT normalized: 22 of its dims are unit-vector
+# pairs or one-hots, and whitening those destroys cos^2+sin^2=1 and "exactly
+# one is 1". Safe with HER -- compute_reward runs on RAW arrays before
+# normalization, so arrival_eps keeps meaning centimetres.
+# The running stats are saved as vecnormalize.pkl beside model.zip and
+# eval_contact.py REFUSES to score without them (both directions).
+normalize_goal_keys: false
+omega_max_rad_s: 3.0      # obs_version=2 only. Measured |omega| max 3.27, p99 1.04.
+force_scale_kgcms2: 300.0 # obs_version=2 only, and only when force_abort_kgcms2
+                          # is null (it always is). Measured peak-force p99 284/323.
 rich_obs: false              # adds Eq 18's xi block (which template, which finger is
                              # active, which face) plus contact normals, force and the
                              # four nearest wall distances -- all object-centric.
@@ -243,7 +386,13 @@ push_range_max_cm: null      # PUSH ONLY, cone sampler only -- cap on the goal's
 curriculum_levels: null      # null -> OFF (bit-identical). Number of Eq 15 levels
                              # I^(1) subset ... subset I_e, expanding BACKWARD from
                              # the target along the goal-range axis.
-curriculum_start_cm: null    # Low end of the Eq 15 ramp, in cm. MUST be >= the
+curriculum_start_cm: null    # DEPRECATED 2026-09-03, raises if set. It only fed
+                             # Eq 15's nested ramp, which was measured INERT
+                             # (same-room median 2.02/1.94/2.15/1.78cm across
+                             # four levels against 2.00 with no curriculum) and
+                             # is deleted. No run ever set it. The key survives
+                             # only so an archived config still parses.
+                             # ORIGINAL: Low end of the Eq 15 ramp, in cm. MUST be >= the
                              # edge's geometric minimum goal distance or the cap is
                              # unsatisfiable: cross-room goals are >= ~15cm because
                              # the object must reach the other room, and a level-0

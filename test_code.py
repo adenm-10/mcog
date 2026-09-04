@@ -148,8 +148,29 @@ def cmd_static() -> None:
           "score_sweep appends no task key outside the pins",
           "PORTALS is back as a separate constant; that IS the v33 scoring bug")
 
+    # A launcher's PINS.txt IS the benchmark protocol -- finalize.sh reads it
+    # rather than retyping it, precisely because a protocol living only in a
+    # launcher comment made every v25 cross-version comparison wrong. So a TASK
+    # key the sweep moves must appear there, or every arm is scored on a task
+    # none of them trained on. Verified by hand too: the Sweep A PINS hash to
+    # 646ba4ae1fd4, matching logs/eval/v34_floor/a3_v2_along.
+    for _lau, _need in (("./slurm/submit_sweep.sh",
+                         ("portals=", "push_spawn_along_frac=",
+                          "curriculum_levels=null")),
+                        ("./slurm/submit_sweep_recontact.sh",
+                         ("gamma_goal=", "init_gamma_modes=", "horizon="))):
+        _src = open(_lau, encoding="utf-8").read()
+        _pins = re.search(r"\.PINS\.\$\$\" <<PINSEOF\n(.*?)\nPINSEOF", _src, re.S)
+        if _pins is None:
+            _pins = re.search(r"PINS_LINE=\"(.*?)\"", _src, re.S)
+        _body = _pins.group(1) if _pins else ""
+        for _k in _need:
+            check(_k in _body or _k in _src,
+                  f"{os.path.basename(_lau)}: PINS carries {_k}",
+                  "a TASK key the sweep moves must be in the scored protocol")
+
     section("the interface-key list agrees everywhere it is copied")
-    # These six keys are EXCLUDED from the env digest, so they decide what two
+    # These eleven keys are EXCLUDED from the env digest, so they decide what two
     # checkpoints are allowed to be compared as. Four modules carry their own
     # copy: eval_contact computes the digest, and three tools re-derive per-cell
     # overrides from it. Deduping them would force tools/score_sweep.py, which is
@@ -168,10 +189,18 @@ def cmd_static() -> None:
     check(len(set(iface_copies.values())) == 1 and None not in iface_copies.values(),
           "all four copies of the interface-key list are identical",
           "; ".join(f"{k}={v}" for k, v in iface_copies.items()))
+    # obs_version/omega_max_rad_s/force_scale_kgcms2 joined this list 2026-09-02
+    # and that placement is the POINT, not an oversight: they change how the
+    # policy READS the world, not the reset distribution, reward or horizon. So
+    # excluding them leaves the v32/v33 digest 249434216cd2 intact -- verified
+    # by the pinned-digest check below -- and makes obs v1 vs v2 an arm that can
+    # be scored on ONE benchmark. Anything that moves the TASK must NOT go here.
     check(iface_copies["./eval_contact.py"] == (
               "action_interface", "slip_model", "slip_limit",
-              "restrict_contact_actions", "mask_inactive_finger", "gap_assist"),
-          "the interface-key list is the expected six keys",
+              "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
+              "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
+              "normalize_goal_keys", "rl_algo"),
+          "the interface-key list is the expected eleven keys",
           f"got {iface_copies['./eval_contact.py']} -- adding a key here silently "
           f"REMOVES it from the env digest and orphans every stored score")
 
@@ -444,6 +473,20 @@ def _contact_env(**kw):
                                    portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),))
     return ContactEnv(template="push", params=params, seed=0, require_settled=False,
                       push_cone_deg=30.0, same_room_goal_prob=1.0, **kw)
+
+
+def _contact_env_t(template: str, **kw):
+    """Same board, either template. Push's cone/same-room/settle knobs are
+    push-only and raise on recontact, so they are added per template rather
+    than shared -- which is also why _contact_env stays push-shaped."""
+    from domains.contact.gym_env import ContactEnv
+    from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+    params = PlanarFingertipParams(board_w_cm=50.0, board_h_cm=30.0,
+                                   portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),))
+    if template == "push":
+        kw = dict(require_settled=False, push_cone_deg=30.0,
+                  same_room_goal_prob=1.0, **kw)
+    return ContactEnv(template=template, params=params, seed=0, **kw)
 
 
 def _scripted_states(env, n_steps: int, a):
@@ -1309,8 +1352,7 @@ def cmd_contact() -> None:
 
         # Relabel-consistency: her_buffer's patch must reproduce a from-scratch
         # obs() under a new goal, or the critic trains on a state that never was.
-        from domains.contact.her_buffer import PushRelabelSafeHerReplayBuffer as _B
-        pos_scale = max(env.params.board_w_cm, env.params.board_h_cm)
+        from domains.contact.her_buffer import DonePatchedHerReplayBuffer as _B
         ng = g0.copy(); ng[:2] += np.array([4.0, 2.0], dtype=np.float32)
         if pose:
             th = math.radians(17.0)
@@ -1318,11 +1360,616 @@ def cmd_contact() -> None:
         ob = {"observation": o0.copy()[None, :],
               "achieved_goal": np.asarray(env._achieved_xy(x))[None, :]}
         _B._patch_observations(
-            types.SimpleNamespace(_goal_slice=sl, _pos_scale=pos_scale),
+            types.SimpleNamespace(_goal_slice=sl, _goal_scale=env._scales.goal),
             ob, ob, ng[None, :])
         check(np.allclose(ob["observation"][0], env._physics.obs(x, ng), atol=1e-6),
               f"{lab}: her_buffer's patch reproduces a from-scratch obs()",
               f"max delta {float(np.abs(ob['observation'][0] - env._physics.obs(x, ng)).max()):.3e}")
+
+    section("obs v2: one head layout, one normalizer, and the frame fix")
+    # Everything here guards a bug that was LIVE and measured, not a
+    # hypothetical. See docs/PROGRESS.md 2026-09-02.
+    from domains.contact.physics import N_XI_V2, ObsScales, xi_dim
+
+    # (a) THE NORMALIZER IS THE ONLY PLACE A DIVISOR LIVES.
+    # Before ObsScales the scales sat in three scopes and one was a hand-copied
+    # duplicate in her_buffer.py kept in step by a comment. A scale that
+    # disagrees between obs() and the HER patcher trains the critic on a state
+    # that never occurred, which is exactly the v18 failure mode.
+    _phys_src = open("./domains/contact/physics.py", encoding="utf-8").read()
+    _obs_body = _phys_src[_phys_src.index("    def obs(self, x, target"):]
+    _obs_body = _obs_body[:_obs_body.index("\n    def ")]
+    _bare = re.findall(r"/\s*(\d+\.?\d*)", _obs_body)
+    check(not _bare, "obs() contains no bare numeric divisor -- all come from ObsScales",
+          f"found {_bare}" if _bare else "none")
+    _hb_src = open("./domains/contact/her_buffer.py", encoding="utf-8").read()
+    check("_pos_scale" not in _hb_src,
+          "her_buffer.py no longer carries its own copy of the position scale")
+    # `pos_scale` survives as a load-only alias: SB3 bakes replay_buffer_kwargs
+    # into the checkpoint zip, so an archived push policy passes the OLD name on
+    # load(). Dropping it made every v25-onward checkpoint unloadable, caught by
+    # replaying v33 ctl_s1. Nothing may WRITE it.
+    check("pos_scale" not in open("./train_contact.py", encoding="utf-8").read(),
+          "train_contact.py never writes the deprecated pos_scale name")
+    check("pos_scale: float | None = None" in _hb_src,
+          "her_buffer still ACCEPTS pos_scale, so archived checkpoints load")
+
+    # (b) v1 IS BIT-IDENTICAL. Archived checkpoints must replay, so v1 keeps
+    # both of its scaling bugs on purpose: omega=1.0 is the ABSENCE of a
+    # divisor, and force=1000.0 was a fallback constant.
+    _p = _contact_env().params
+    s1 = ObsScales.v1(_p)
+    check(s1.omega == 1.0 and s1.force == 1000.0 and s1.goal == 50.0,
+          "ObsScales.v1 reproduces the historical constants, bugs included",
+          f"omega={s1.omega} force={s1.force} goal={s1.goal}")
+    s2 = ObsScales.v2(_p, goal_cm=22.2, omega_max_rad_s=3.0,
+                      force_scale_kgcms2=300.0)
+    check(s2.omega == 3.0 and s2.force == 300.0 and s2.goal == 22.2,
+          "ObsScales.v2 fixes all three", f"omega={s2.omega} force={s2.force}")
+
+    # (c) THE STATE+XI HEAD IS BYTE-IDENTICAL ACROSS TEMPLATES under v2. This
+    # is the whole reason the (constant) template and interface one-hots are
+    # KEPT: it is what lets one template's policy load against another's env.
+    check(xi_dim(True, 2) == N_XI_V2 == 11 and xi_dim(False, 2) == N_XI_V2,
+          "v2 emits xi at a fixed width regardless of `rich`", f"{xi_dim(False, 2)}")
+    _heads = {}
+    for _tmpl, _kw in (("push", dict(theta_tol_deg=22.5)),
+                       ("recontact", dict()),
+                       ("recontact", dict(gamma_goal=True, continuous_gamma=True))):
+        _e = _contact_env_t(_tmpl, obs_version=2, rich_obs=True, **_kw)
+        _o, _ = _e.reset(seed=11)
+        _sl = goal_derived_slice(_e.pose_goal, True, _tmpl, _e.gamma_goal, 2)
+        _heads[(_tmpl, _e.gamma_goal)] = _sl.start
+        check(_sl.stop == _o["observation"].shape[0],
+              f"v2 {_tmpl} gamma={_e.gamma_goal}: goal block is still the TAIL",
+              f"stop={_sl.stop} dim={_o['observation'].shape[0]}")
+    check(len(set(_heads.values())) == 1 and set(_heads.values()) == {36},
+          "v2: the state+xi head is 36 dims for EVERY template", str(_heads))
+
+    # (d) v2 raises rather than silently emitting a short head.
+    try:
+        _contact_env(obs_version=2, rich_obs=False)
+        check(False, "obs_version=2 without rich_obs raises")
+    except ValueError:
+        check(True, "obs_version=2 without rich_obs raises")
+
+    # (e) THE RECONTACT FRAME FIX. v1 differenced an OBJECT-frame target
+    # against the object's WORLD position, so the feature encoded the object's
+    # board position: measured mean -0.492 over a range of only 0.21. It was
+    # invisible because recontact pins the object at the board centre -- and it
+    # would have broken the moment push handed the object over somewhere else.
+    for _gam in (False, True):
+        _e = _contact_env_t("recontact", obs_version=2, rich_obs=True,
+                            gamma_goal=_gam, continuous_gamma=_gam)
+        _o, _ = _e.reset(seed=5)
+        _sl = goal_derived_slice(False, True, "recontact", _gam, 2)
+        _ag = np.asarray(_o["achieved_goal"], float)
+        _dg = np.asarray(_o["desired_goal"], float)
+        _npos = 4 if _gam else 2
+        _want = (_dg[:_npos] - _ag[:_npos]) / _e._scales.goal
+        _got = np.asarray(_o["observation"], float)[_sl][:_npos]
+        check(np.allclose(_got, _want, atol=1e-5),
+              f"v2 recontact gamma={_gam}: goal tail is (desired - achieved), "
+              f"both in the OBJECT frame", f"got {_got} want {_want}")
+        # The v1 bug's signature: a tail dominated by the object's board
+        # position rather than centred near zero.
+        _e1 = _contact_env_t("recontact", obs_version=1, gamma_goal=_gam,
+                             continuous_gamma=_gam, rich_obs=_gam)
+        _o1, _ = _e1.reset(seed=5)
+        _sl1 = goal_derived_slice(False, _gam, "recontact", _gam, 1)
+        _t1 = np.asarray(_o1["observation"], float)[_sl1][:2]
+        if not _gam:
+            check(abs(_t1[0]) > 0.3,
+                  "v1 recontact's tail really did encode board position "
+                  "(the bug this replaces is not hypothetical)",
+                  f"v1 tail[0]={_t1[0]:+.3f} vs v2 {_got[0]:+.3f}")
+
+    # (f) THE HER PATCH NOW COVERS RECONTACT. It was push-only, so recontact's
+    # tail described the OLD goal on ~80% of every batch. It hid behind (e):
+    # v1's tail was near-constant, so a stale value looked like a fresh one.
+    # Fixing (e) without this makes recontact WORSE, hence one commit.
+    from domains.contact.her_buffer import DonePatchedHerReplayBuffer as _HB
+    for _tmpl, _kw in (("push", dict(theta_tol_deg=22.5)),
+                       ("recontact", dict()),
+                       ("recontact", dict(gamma_goal=True, continuous_gamma=True))):
+        _e = _contact_env_t(_tmpl, obs_version=2, rich_obs=True, **_kw)
+        _o, _ = _e.reset(seed=3)
+        _x = _e._x.copy()
+        _sl = goal_derived_slice(_e.pose_goal, True, _tmpl, _e.gamma_goal, 2)
+        _ng = np.asarray(_e._goal_xy, np.float32).copy()
+        _ng[:2] += np.array([1.7, -0.9], dtype=np.float32)
+        _ob = {"observation": np.asarray(_o["observation"], np.float32).copy()[None, :],
+               "achieved_goal": np.asarray(_e._achieved_xy(_x))[None, :]}
+        _HB._patch_observations(
+            types.SimpleNamespace(_goal_slice=_sl, _goal_scale=_e._scales.goal),
+            _ob, _ob, _ng[None, :])
+        _scratch = _e._physics.obs(
+            _x, _ng, xi=_e._xi(), rich=True, template=_tmpl,
+            finger_targets=_ng, two_finger=_e.gamma_goal,
+            achieved=_e._achieved_xy(_x), scales=_e._scales)
+        check(np.allclose(_ob["observation"][0], _scratch, atol=1e-5),
+              f"v2 {_tmpl} gamma={_e.gamma_goal}: the HER patch reproduces a "
+              f"from-scratch obs()",
+              f"max delta {float(np.abs(_ob['observation'][0] - _scratch).max()):.3e}")
+
+    section("gamma_goal: ONE arrival test, its own tolerance, and a real gate")
+    # gamma_goal was instantiated ZERO times in this harness before today.
+    # That is how ~63 GPU-hours ran against a broken arrival test.
+    from domains.contact.reward import GUARD_OUTCOMES, RewardWeights, step_reward
+    from domains.contact.planar_fingertips import IDX_CONTACT as IDX_CONTACT_T
+    from domains.contact.planar_fingertips import IDX_FINGER_XY as IDX_FINGER_XY_T
+    from domains.contact.planar_fingertips import IDX_OBJ_XY as IDX_OBJ_XY_T
+    from domains.contact_templates import Arrival
+
+    _ge = _contact_env_t("recontact", gamma_goal=True, continuous_gamma=True,
+                         rich_obs=True, obs_version=2)
+    _o, _ = _ge.reset(seed=21)
+    check(_ge.observation_space["desired_goal"].shape == (6,),
+          "gamma_goal: the goal is Eq 13's 6-vector", str(_o["desired_goal"].shape))
+    check(_ge._gamma_tol is not None and set(_ge._gamma_tol) == {"L", "R"},
+          "gamma_goal: a per-finger tolerance was drawn", str(_ge._gamma_tol))
+
+    # (a) A STATE THAT PERFECTLY ACHIEVES THE GOAL MUST SCORE ARRIVED -- for
+    # BOTH active fingers. It did not: `step` compared the ACTIVE finger to
+    # `_goal_xy[:2]`, which is finger L's slot, so with R active it measured R
+    # against L's target. Measured 254/500 (50.8%) of resets scored correctly.
+    _both = {}
+    for _act in ("L", "R"):
+        _hits = 0
+        for _s in range(12):
+            _o, _ = _ge.reset(seed=400 + _s)
+            _ge._active_finger = _act          # force the half that was broken
+            _x = _ge._x.copy()
+            # place both fingers exactly on their object-frame targets
+            for _i, _side in enumerate(("L", "R")):
+                _tgt = (float(_ge._goal_xy[2 * _i]), float(_ge._goal_xy[2 * _i + 1]))
+                _x = _ge._place_finger(_x, _side, _ge._object_to_world(_x, _tgt))
+            _ag = _ge._achieved_xy(_x)
+            # the touch flags are part of the goal, so satisfy them too
+            for _i, _side in enumerate(("L", "R")):
+                _x[IDX_CONTACT_T[_side]] = float(_ge._goal_xy[4 + _i])
+            _ag = _ge._achieved_xy(_x)
+            _hits += int(bool(_ge._gamma_arrived(_ag, _ge._goal_xy)[0]))
+        _both[_act] = _hits
+    check(_both["L"] == _both["R"] == 12,
+          "gamma arrival is INDEPENDENT of which finger is active "
+          "(the 50.8% bug)", f"L-active {_both['L']}/12  R-active {_both['R']}/12")
+
+    # (b) step() and the HER relabel now agree, by construction: step routes
+    # through the same _gamma_arrived. Assert the dispatch actually happened,
+    # since the old code path silently produced a DIFFERENT Arrival.
+    _o, _ = _ge.reset(seed=31)
+    _arr = _ge._gamma_arrival(_ge._x, _ge._achieved_xy(_ge._x))
+    check(not _arr.reached_position and _arr.dist_to_target > 0.0,
+          "gamma_arrival returns a usable Arrival (worst per-finger distance)",
+          f"dist {_arr.dist_to_target:.2f}cm")
+    _d_worst = _ge._gamma_dist(_ge._achieved_xy(_ge._x), _ge._goal_xy)
+    _d_L = float(np.hypot(_ge._achieved_xy(_ge._x)[0] - _ge._goal_xy[0],
+                          _ge._achieved_xy(_ge._x)[1] - _ge._goal_xy[1]))
+    check(_d_worst >= _d_L - 1e-9,
+          "gamma distance is the WORST finger, not finger L's "
+          "(the same slicing mistake)", f"worst {_d_worst:.2f} vs L {_d_L:.2f}")
+
+    # (c) THE TOLERANCE TRAVELS PER TRANSITION. SB3 calls compute_reward via
+    # env_method(indices=[0]), so the fallback graded a whole relabeled batch
+    # against whatever interface env 0 happened to be in at sample time.
+    _o, _ = _ge.reset(seed=41)
+    _ag = np.asarray(_ge._achieved_xy(_ge._x))[None, :]
+    _dg = np.asarray(_ge._goal_xy)[None, :].copy()
+    _dg[0, :4] = _ag[0, :4]                       # positions exactly achieved
+    _dg[0, 4:6] = _ag[0, 4:6]                     # touch flags matched
+    _tight = np.array([[1e-6, 1e-6]])
+    _loose = np.array([[99.0, 99.0]])
+    check(bool(_ge._gamma_arrived(_ag, _dg, tol=_loose)[0]),
+          "gamma_arrived honours a PASSED-IN loose tolerance")
+    _dg2 = _dg.copy(); _dg2[0, 0] += 1.0          # 1cm off on finger L
+    check(not bool(_ge._gamma_arrived(_ag, _dg2, tol=_tight)[0])
+          and bool(_ge._gamma_arrived(_ag, _dg2, tol=_loose)[0]),
+          "the tolerance ARGUMENT decides arrival, not this env's episode",
+          "tight rejects, loose accepts")
+    _info = [{"gamma_tol": (99.0, 99.0), "obj_settled": True,
+              "object_disturbed": False}]
+    check(bool(np.asarray(_ge._her_arrived(_ag, _dg2, _info)).reshape(-1)[0]),
+          "_her_arrived reads info['gamma_tol'] per transition")
+
+    section("the along-face spawn, and the digest anchor that keeps it cheap")
+    # A contact at the face CENTRE pushing along the inward normal produces
+    # EXACTLY ZERO torque -- the lever arm is parallel to the force -- which is
+    # why push's net rotation measures a median 1.8deg/episode against a
+    # +/-45deg goal window. So this is not a spec tidy-up; it is what gives push
+    # any rotation authority at all, and it gates the diversity sweep.
+    _base = _contact_env()
+    _off = []
+    for _s in range(120):
+        _base.reset(seed=_s)
+        _a = _base._active_finger
+        _r = (np.asarray(_base._x[IDX_FINGER_XY_T[_a]])
+              - np.asarray(_base._x[IDX_OBJ_XY_T]))
+        _th = math.atan2(float(_base._x[3]), float(_base._x[2]))
+        _c, _sn = math.cos(_th), math.sin(_th)
+        _loc = (_c * _r[0] + _sn * _r[1], -_sn * _r[0] + _c * _r[1])
+        # the along-face component is whichever axis is NOT the face normal
+        _off.append(abs(_loc[1] if abs(_loc[0]) > abs(_loc[1]) else _loc[0]))
+    check(max(_off) < 1e-9,
+          "default: the contact spawns at the exact face CENTRE (bit-identical)",
+          f"max |along| {max(_off):.2e}cm over 120 resets")
+    _rnd = _contact_env(push_spawn_along_frac=0.7)
+    _off2 = []
+    for _s in range(120):
+        _rnd.reset(seed=_s)
+        _a = _rnd._active_finger
+        _r = (np.asarray(_rnd._x[IDX_FINGER_XY_T[_a]])
+              - np.asarray(_rnd._x[IDX_OBJ_XY_T]))
+        _th = math.atan2(float(_rnd._x[3]), float(_rnd._x[2]))
+        _c, _sn = math.cos(_th), math.sin(_th)
+        _loc = (_c * _r[0] + _sn * _r[1], -_sn * _r[0] + _c * _r[1])
+        _off2.append(abs(_loc[1] if abs(_loc[0]) > abs(_loc[1]) else _loc[0]))
+    check(sum(o > 1e-9 for o in _off2) == 120,
+          "push_spawn_along_frac=0.7: every reset is off-centre (not vacuous)",
+          f"{sum(o > 1e-9 for o in _off2)}/120 nonzero, max {max(_off2):.2f}cm")
+    # 0.7 of the half-face, never past it: a contact ON the corner makes
+    # nearest_face flip on rounding and the face guard fire at random.
+    _hw = max(_base.params.object_w_cm, _base.params.object_h_cm) / 2.0
+    check(max(_off2) <= 0.7 * _hw + 1e-6,
+          "...and never past 0.7 of the half-face, so nearest_face stays defined",
+          f"max {max(_off2):.3f}cm vs bound {0.7 * _hw:.3f}cm")
+    for _bad in (-0.1, 1.0):
+        try:
+            _contact_env(push_spawn_along_frac=_bad)
+            check(False, f"push_spawn_along_frac={_bad} raises")
+        except ValueError:
+            check(True, f"push_spawn_along_frac={_bad} raises")
+
+    # THE DIGEST ANCHOR. A new env kwarg rehashes every config and orphans every
+    # stored score, so a TASK key added after the archived digests is omitted
+    # from the stamp WHILE AT ITS DEFAULT. This fired for real: without it the
+    # v32/v33 protocol moved 249434216cd2 -> e35ceab30ae5 while v33 ctl_s1
+    # replayed bit-identically.
+    _ec = open("./eval_contact.py", encoding="utf-8").read()
+    check("stamp_omit_if_default" in _ec and '"push_spawn_along_frac": None' in _ec,
+          "eval_contact omits a defaulted post-hoc TASK key from the digest")
+    check("stamp_omit_if_default[k]" in _ec,
+          "...by VALUE, so setting the key still rehashes (the point)")
+
+    section("the nested curriculum is gone, and its keys fail loudly")
+    # Eq 15's literal nested form was measured INERT on this board: same-room
+    # median 2.02/1.94/2.15/1.78cm across four levels against 2.00 with no
+    # curriculum, because a nested level can only DELETE far starts. 30 of 30
+    # archived cells record curriculum_mode=band and 0 set curriculum_start_cm,
+    # so nothing needed it replayable.
+    _ge = open("./domains/contact/gym_env.py", encoding="utf-8").read()
+    for _dead in ("_range_cap", "_start_window", "x_window"):
+        check(_dead not in _ge, f"{_dead} is deleted, not merely unreferenced")
+    # The MODE survives, because curriculum_mode=band is in archived PINS.txt
+    # and config/loader.py rejects unregistered keys by design.
+    check(_contact_env(curriculum_mode="band", curriculum_levels=4) is not None,
+          "curriculum_mode='band' still constructs (archived PINS keep working)")
+    for _kw, _lab in (({"curriculum_mode": "nested", "curriculum_levels": 4},
+                       "nested + levels"),
+                      ({"curriculum_start_cm": 5.0}, "curriculum_start_cm")):
+        try:
+            _contact_env(**_kw)
+            check(False, f"{_lab} raises now that the ramp is deleted")
+        except ValueError:
+            check(True, f"{_lab} raises now that the ramp is deleted")
+    # ...and the historical no-ramp sampler still works, since every pre-v32
+    # run used it.
+    check(_contact_env(curriculum_mode="nested") is not None,
+          "curriculum_mode='nested' WITHOUT levels still works -- it is the "
+          "pre-v32 coned sampler every archived push checkpoint trained on")
+
+    section("the recontact video overlay, and the 0-byte mp4")
+    from domains.contact.visualize import Snapshot as _Snap, _even_frame, goal_dist
+    # RECONTACT's goal is a FINGERTIP target in the OBJECT frame. It used to be
+    # forced into goal_xy (a world OBJECT position), so the marker was drawn in
+    # the wrong place on every recontact clip.
+    _sn = _Snap(board_w_cm=80.0, board_h_cm=60.0, object_xy=(40.0, 30.0),
+                object_angle_rad=0.0, object_w_cm=10.0, object_h_cm=6.0,
+                fingers={"L": (34.0, 30.0), "R": (60.0, 30.0)},
+                finger_radius_cm=1.2, touching={"L": True, "R": False},
+                finger_goals={"L": (30.0, 30.0), "R": (50.0, 30.0)},
+                finger_goal_tol_cm={"L": 0.3, "R": 2.0}, active_finger="L")
+    check(abs(goal_dist(_sn) - 10.0) < 1e-9,
+          "goal_dist on a two-finger goal is the WORST finger, not finger L's",
+          f"L is 4.0cm off, R is 10.0cm off -> {goal_dist(_sn):.2f}cm")
+    check(math.isnan(goal_dist(_Snap(
+              board_w_cm=80.0, board_h_cm=60.0, object_xy=(0.0, 0.0),
+              object_angle_rad=0.0, object_w_cm=10.0, object_h_cm=6.0,
+              fingers={"L": (0.0, 0.0)}, finger_radius_cm=1.2,
+              touching={"L": False}))),
+          "...and nan with neither goal kind, as before")
+    # THE 0-BYTE MP4. libx264 with yuv420p rejects an odd axis, and save_video
+    # passes macro_block_size=None so nothing pads for us. The 80x60 recontact
+    # board renders 509px tall, so EVERY recontact clip came out 0 bytes with
+    # ffmpeg silent on stderr. Push's 50x30 board gives 420, which is why this
+    # only ever broke recontact.
+    for _h, _w in ((509, 600), (510, 601), (509, 601), (510, 600)):
+        _f = _even_frame(np.zeros((_h, _w, 3), dtype=np.uint8))
+        check(_f.shape[0] % 2 == 0 and _f.shape[1] % 2 == 0,
+              f"_even_frame({_h}x{_w}) -> {_f.shape[0]}x{_f.shape[1]}, both even")
+    check("finger_goals_obj" in _ec,
+          "eval_contact routes recontact's goal through finger_goals_obj, "
+          "never goal_xy")
+
+    section("the PPO path: refusals, conventions, and a fair capacity control")
+    # PPO is memo sec 4's "algorithm-independence replication" (Table 4). These
+    # checks are source-level on purpose: instantiating PPO needs torch and a
+    # vec env, which belongs in a smoke run, not a gate.
+    _tc = open("./train_contact.py", encoding="utf-8").read()
+    _ec = open("./eval_contact.py", encoding="utf-8").read()
+    _cfg = open("./config/train_contact.yaml", encoding="utf-8").read()
+
+    # (a) NAMED rl_algo, NOT algo. `config/algo/` is nav's Hydra config GROUP,
+    # so `algo=ppo` on the CLI is parsed as a group override and dies with
+    # "No match in the defaults list". This check is the only thing stopping a
+    # tidy-up from renaming it back.
+    check("\nrl_algo:" in _cfg and "\nalgo:" not in _cfg,
+          "the key is rl_algo -- `algo` collides with nav's Hydra config group",
+          "config/algo/{sac,ppo}.yaml exists, so algo= is a group override")
+    check(os.path.isdir("./config/algo"),
+          "...and that collision is real, not folklore",
+          f"config/algo/ contains {sorted(os.listdir('./config/algo'))}")
+
+    # (b) SAC-ONLY FLAGS ARE REFUSED, not ignored. Silently dropping a flag a
+    # launcher passed is how v29's w_m sweep trained 8 cells at the default
+    # instead of 10/20/30/75.
+    for _k in ("use_her", "target_clip"):
+        check(f'"{_k}"' in _tc and "is SAC-only" in _tc,
+              f"algo=ppo REFUSES {_k}")
+    # ...except learning_starts, which is announced and dropped, because it
+    # rides along in the SHARED protocol pins (PINS.txt carries
+    # learning_starts=10000) and refusing it would force a PPO arm to edit the
+    # pin set -- breaking the "PINS.txt is authoritative" rule v33 established.
+    check("ignoring learning_starts" in _tc and "PINS.txt is authoritative" in _tc,
+          "learning_starts is ANNOUNCED and dropped, not refused -- and the "
+          "reason is recorded")
+
+    # (c) n_steps IS THE TOTAL ROLLOUT, matching train.py. SB3's own n_steps is
+    # PER env, so getting this backwards changes the update size by n_envs
+    # silently.
+    check("ns_total // n_envs" in _tc and "must divide n_steps" in _tc,
+          "n_steps is the TOTAL rollout across envs and n_envs must divide it",
+          "same convention as train.py / config/algo/ppo.yaml")
+    _nav = open("./train.py", encoding="utf-8").read()
+    check("ns_total % n_envs" in _nav and "ns_total // n_envs" in _nav,
+          "...and train.py really does use that convention (not vacuous)")
+
+    # (d) CAPACITY CONTROL. SB3's PPO default net is [64, 64] against SAC's
+    # [256, 256] -- ~16x fewer parameters. Memo sec 9 requires the advantage to
+    # survive a control for total network capacity, so an unfair gap would
+    # confound the whole comparison. net_arch=null must resolve to [256, 256]
+    # for BOTH.
+    check("[256, 256]" in _tc and "net_arch" in _tc,
+          "net_arch=null resolves to [256, 256] for both algos, not SB3's "
+          "asymmetric defaults")
+    check("if d[\"net_arch\"] else {}" in _tc,
+          "and SAC is passed policy_kwargs ONLY when net_arch was set, so its "
+          "default path stays byte-for-byte SB3's")
+
+    # (e) EVAL MUST BRANCH TOO. PPO has no critic, only V(s0), and a PPO gap is
+    # not numerically comparable to a SAC gap -- the printout says so.
+    check('hasattr(model.policy, "critic")' in _ec and "predict_values" in _ec,
+          "eval_contact reads Q from SAC's critic and V from PPO's value head")
+    check("not comparable to a SAC gap" in _ec,
+          "...and labels the PPO column so the two are not read as one number")
+    check("does not record its own algorithm" in _ec,
+          "a wrong rl_algo raises a NAMED error, not SB3's Dict-obs assertion")
+
+    section("the env digest survives inert additions")
+    # eval_contact's digest is a sha1 over repr() of every env kwarg, and
+    # `weights` is one of them -- so a stock dataclass repr means ADDING an
+    # inert field moves the digest of every config in the repo and orphans
+    # every stored score. This fired for real: v33 ctl_s1 replayed
+    # bit-identically while its digest moved 249434216cd2 -> 436dee0952c5,
+    # and a MINIMAL repr did not fix it either (-> af4bf51bbb02) because the
+    # archived digest came from the FULL seven-field string.
+    from domains.contact.reward import (_LEGACY_FIELDS, _NEW_FIELDS,
+                                        RewardWeights as _RW)
+    _ARCHIVED = ("RewardWeights(goal_reward=10.0, w_d=0.0, w_a=0.0, w_F=0.0, "
+                 "w_m=0.0, w_T=0.0, force_max=None)")
+    check(repr(_RW()) == _ARCHIVED,
+          "RewardWeights' default repr is BYTE-IDENTICAL to the archived form",
+          repr(_RW()))
+    check(_LEGACY_FIELDS == ("goal_reward", "w_d", "w_a", "w_F", "w_m", "w_T",
+                            "force_max"),
+          "the seven legacy fields are in their frozen order")
+    check(all(getattr(_RW(), k) == _RW.__dataclass_fields__[k].default
+              for k in _NEW_FIELDS),
+          "every NEW weight defaults to inert, so it never shows in the repr")
+    # A weight that is actually SET must still move the digest -- otherwise this
+    # trick would hide real reward changes, which is worse than the bug.
+    check(repr(_RW(w_hold=0.02)) != _ARCHIVED
+          and "w_hold=0.02" in repr(_RW(w_hold=0.02)),
+          "a SET weight still appears, so a real change still moves the digest",
+          repr(_RW(w_hold=0.02)))
+
+    section("dense reward terms: expressible, and each cheat-proofed")
+    # None of the three things a dense push reward wants to encourage was
+    # expressible before: w_m was ONE scalar for any guard outcome, there was no
+    # per-tick contact term, and settling lived inside a binary arrival flag.
+    _sparse = RewardWeights()
+    check(not _sparse.dense(), "the default weights are still PURE SPARSE")
+    _arr_no = Arrival(False, False, 5.0, float("nan"))
+    check(step_reward(_arr_no, np.zeros(4), guard_outcome=True, peak_force=0.0,
+                      weights=_sparse) == 0.0,
+          "pure sparse: a non-arriving tick is worth exactly 0.0")
+
+    # (a) PER-OUTCOME guard penalties, with w_m as the catch-all so an outcome
+    # added to a template's guard cannot silently become free.
+    _w = RewardWeights(w_m=1.0, w_guard={"contact_lost": 2.0, "wrong_face": 4.0})
+    check(_w.guard_penalty("contact_lost") == 2.0
+          and _w.guard_penalty("wrong_face") == 4.0
+          and _w.guard_penalty("off_board") == 1.0,
+          "w_guard is per-outcome and falls back to w_m",
+          f"unlisted -> {_w.guard_penalty('off_board')}")
+    check(all(g in GUARD_OUTCOMES for g in
+              ("contact_lost", "wrong_face", "forbidden_contact", "off_board",
+               "force_limit", "object_disturbed", "overshoot")),
+          "GUARD_OUTCOMES names every terminating guard both templates can fire")
+
+    # (b) EVERY guard penalty must stay below goal_reward. At w_m=50/100 push
+    # learned to park the object against a wall, where contact-loss becomes
+    # impossible to trigger -- permanent free guard satisfaction at the cost of
+    # ever finishing (v16). This asserts the ORDERING that makes attempting the
+    # task worth more than bailing out.
+    _w2 = RewardWeights(goal_reward=10.0, w_guard={"contact_lost": 2.0})
+    _bail = step_reward(_arr_no, np.zeros(4), guard_outcome="contact_lost",
+                        peak_force=0.0, weights=_w2)
+    _arrive = step_reward(Arrival(True, True, 0.1, float("nan")), np.zeros(4),
+                          guard_outcome=True, peak_force=0.0, weights=_w2)
+    check(_arrive > 0.0 > _bail and abs(_bail) < _w2.goal_reward,
+          "arriving beats bailing out, and the bail penalty is < goal_reward",
+          f"arrive {_arrive:+.1f} vs bail {_bail:+.1f}")
+
+    # (c) THE SETTLE BONUS IS CAPPED AND PROXIMITY-GATED. Ungated it is
+    # maximised by not moving, i.e. v16's cheat with a new name.
+    _w3 = RewardWeights(w_settle=0.02, settle_cap=0.05)
+    _paid = [step_reward(_arr_no, np.zeros(4), guard_outcome=True, peak_force=0.0,
+                         weights=_w3, settled=True,
+                         settle_credit_left=max(0.0, 0.05 - 0.02 * k))
+             for k in range(6)]
+    check(abs(sum(_paid) - 0.05) < 1e-9,
+          "the settle bonus totals at most settle_cap over an episode",
+          f"paid {sum(_paid):.4f} over 6 ticks at cap 0.05")
+    check(step_reward(_arr_no, np.zeros(4), guard_outcome=True, peak_force=0.0,
+                      weights=_w3, settled=False, settle_credit_left=1.0) == 0.0,
+          "no settle bonus while the object is NOT settled")
+
+    # (c2) THE HOLD BONUS IS CAPPED TOO. Uncapped it scales with the horizon:
+    # MEASURED at w_hold=0.02 over 200 ticks, a 2k-step run reached ep_rew_mean
+    # 4.57 with success_rate 0.0 and every episode at full horizon -- "hold
+    # contact and stall" was already worth 46% of the arrival bonus.
+    _w5 = RewardWeights(goal_reward=10.0, w_hold=0.02, hold_cap=2.0)
+    _held = [step_reward(_arr_no, np.zeros(4), guard_outcome=True, peak_force=0.0,
+                         weights=_w5, holding=True,
+                         hold_credit_left=max(0.0, 2.0 - 0.02 * k))
+             for k in range(400)]
+    check(abs(sum(_held) - 2.0) < 1e-9,
+          "the hold bonus totals at most hold_cap, so it cannot grow with the "
+          "horizon", f"paid {sum(_held):.3f} over 400 ticks at cap 2.0")
+    check(sum(_held) < _w5.goal_reward,
+          "stalling on the hold bonus can never out-earn arriving",
+          f"stall {sum(_held):.1f} vs arrive {_w5.goal_reward:.1f}")
+
+    # (c3) w_arrive_pos IS ONE-SHOT. It was written per-tick first, and
+    # position arrival does NOT terminate the episode (only reached_interface
+    # does, and push has no overshoot guard) -- so a policy parking at the goal
+    # while jittering would have earned 3.0 EVERY tick, 600 against a 10.0
+    # bonus. Found in a smoke run, which is why the credit exists.
+    _w6 = RewardWeights(goal_reward=10.0, w_arrive_pos=3.0)
+    _pos = Arrival(True, False, 0.2, float("nan"))
+    _paid2, _credit = [], 3.0
+    for _ in range(50):
+        _paid2.append(step_reward(_pos, np.zeros(4), guard_outcome=True,
+                                  peak_force=0.0, weights=_w6,
+                                  arrive_credit_left=_credit))
+        if _paid2[-1] > 0:
+            _credit = 0.0
+    check(abs(sum(_paid2) - 3.0) < 1e-9,
+          "w_arrive_pos pays ONCE per episode, not once per tick",
+          f"paid {sum(_paid2):.2f} over 50 ticks at the goal unsettled")
+    check(sum(_paid2) < _w6.goal_reward,
+          "so parking unsettled can never out-earn a real arrival",
+          f"park {sum(_paid2):.1f} vs arrive {_w6.goal_reward:.1f}")
+
+    # (d) POTENTIAL-BASED progress: a closed loop back to the start must sum to
+    # zero, which is the property absolute w_d does not have.
+    _w4 = RewardWeights(w_prog=1.0)
+    _loop = [(5.0, 3.0), (3.0, 1.0), (1.0, 5.0)]
+    _tot = sum(step_reward(Arrival(False, False, b, float("nan")), np.zeros(4),
+                           guard_outcome=True, peak_force=0.0, weights=_w4,
+                           prev_dist=a) for a, b in _loop)
+    check(abs(_tot) < 1e-9,
+          "w_prog is potential-based: a round trip sums to 0 (Ng et al. 1999)",
+          f"total {_tot:+.3e}")
+    _wd = RewardWeights(w_d=1.0)
+    _totd = sum(step_reward(Arrival(False, False, b, float("nan")), np.zeros(4),
+                            guard_outcome=True, peak_force=0.0, weights=_wd)
+                for _a, b in _loop)
+    check(_totd < -1.0,
+          "absolute w_d does NOT have that property (the failure it replaces)",
+          f"same loop costs {_totd:+.1f}")
+
+    # (e) DENSE SHAPING AND target_clip ARE REFUSED TOGETHER. The [0, clip]
+    # bound assumes Q* <= goal_reward; a per-tick penalty makes true Q negative
+    # on failing states, so the lower clamp biases the critic upward exactly
+    # where it must learn "this is bad".
+    for _k in ("w_hold", "w_settle", "w_prog", "w_arrive_pos", "w_T", "w_m"):
+        check(RewardWeights(**{_k: 0.01}).dense(),
+              f"dense() sees {_k}")
+    check(RewardWeights(w_guard={"contact_lost": 1.0}).dense(),
+          "dense() sees w_guard")
+    _tc = open("./train_contact.py", encoding="utf-8").read()
+    # WHICH END of [0, target_clip] a shaping term breaks depends on its SIGN,
+    # and conflating the two made train_contact refuse recontact's own archived
+    # baseline at startup -- w_T/w_a/w_m with target_clip=10, the configuration
+    # recon_base scored 0.978 with. Caught by smoke-running the launcher.
+    check(RewardWeights(w_T=0.02, w_a=0.01, w_m=2.0).dense()
+          and not RewardWeights(w_T=0.02, w_a=0.01, w_m=2.0).positive_shaping(),
+          "recontact's archived negative-only shaping is dense but NOT positive")
+    for _k in ("w_hold", "w_settle", "w_prog", "w_arrive_pos"):
+        check(RewardWeights(**{_k: 0.01}).positive_shaping(),
+              f"positive_shaping() sees {_k}")
+    for _k in ("w_d", "w_a", "w_F", "w_m", "w_T"):
+        check(not RewardWeights(**{_k: 0.01}).positive_shaping(),
+              f"positive_shaping() ignores the negative term {_k}")
+    check("_w.positive_shaping()" in _tc
+          and "target_clip is unsound with POSITIVE shaping" in _tc,
+          "train_contact REFUSES target_clip with POSITIVE shaping only")
+    check("kept replicable on purpose" in _tc,
+          "target_clip with negative-only shaping is ANNOUNCED, not refused "
+          "-- it is recontact's archived baseline")
+
+    # (f) A w_guard KEY OUTSIDE GUARD_OUTCOMES MUST RAISE. guard_penalty falls
+    # back to w_m and every dense arm runs w_m=0, so one typo silently turns a
+    # penalty into no penalty, with no error anywhere.
+    try:
+        RewardWeights(w_guard={"object_disturb": 2.0})   # missing the 'ed'
+        _raised = False
+    except ValueError as _e:
+        _raised = "object_disturb" in str(_e)
+    check(_raised, "a misspelled w_guard outcome raises rather than going free")
+    check(RewardWeights(w_guard={o: 1.0 for o in GUARD_OUTCOMES}).w_guard
+          is not None,
+          "every GUARD_OUTCOMES name is accepted as a w_guard key")
+
+    # (g) w_arrive_pos IS ON-POLICY ONLY, and this is the whole reason. It is
+    # metered once per EPISODE in step(); a relabeled transition arrives alone,
+    # so compute_reward cannot know the credit is spent and would pay per tick.
+    # Measured before the refusal existed: 3.0 on every position-arrived row,
+    # i.e. 3.0/(1-0.99) = 300 of implied Q against goal_reward=10, on ~80% of
+    # every batch (her_ratio at n_sampled_goal=4).
+    check("w_arrive_pos is ON-POLICY ONLY" in _tc
+          and 'd["use_her"] and d["w_arrive_pos"]' in _tc,
+          "train_contact REFUSES w_arrive_pos together with use_her")
+    _ge = open("./domains/contact/gym_env.py", encoding="utf-8").read()
+    _cr = _ge[_ge.index("def compute_reward"):]
+    _cr = _cr[:_cr.index("\n    # --- gym API")]
+    check("w_arrive_pos is deliberately ABSENT" in _cr
+          and "self.weights.w_arrive_pos *" not in _cr,
+          "compute_reward does NOT reconstruct w_arrive_pos on the relabel path")
+    # And the term still works on the rollout path, which is what PPO uses.
+    _wap = RewardWeights(w_arrive_pos=3.0)
+    _pos_only = Arrival(True, False, 0.1, float("nan"))
+    check(step_reward(_pos_only, np.zeros(4), guard_outcome=True, peak_force=0.0,
+                      weights=_wap, arrive_credit_left=3.0) == 3.0
+          and step_reward(_pos_only, np.zeros(4), guard_outcome=True,
+                          peak_force=0.0, weights=_wap,
+                          arrive_credit_left=0.0) == 0.0,
+          "w_arrive_pos pays once and then the credit is spent")
+
+    # (h) w_prog NEEDS copy_info_dict. compute_reward reads
+    # info["pre_achieved_goal"]; without it the term is silently absent from
+    # ~80% of every batch -- no error, just a different objective on most of
+    # the data.
+    check('or d["w_prog"]' in _tc,
+          "copy_info_dict is forced on when w_prog is set")
+    from domains.contact.reward import RELABEL_DROPPED
+    check("w_arrive_pos" not in RELABEL_DROPPED
+          and set(RELABEL_DROPPED) == {"w_a", "w_T", "w_m", "w_guard", "w_F",
+                                       "w_hold", "w_settle"},
+          "RELABEL_DROPPED lists the BOUNDED drops, and w_arrive_pos is refused "
+          "rather than listed")
 
     section("pose goals: orientation gates arrival, and only when asked")
     from domains.contact.reward import goal_theta_err, pose_arrived

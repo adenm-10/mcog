@@ -23,8 +23,8 @@ except ModuleNotFoundError as e:  # pragma: no cover
     ) from e
 
 from domains.contact.board import Board
-from domains.contact.physics import (OBS_DIM, Physics, goal_derived_slice,
-                                     obs_dim)
+from domains.contact.physics import (N_XI, N_XI_V2, OBS_DIM, ObsScales,
+                                     Physics, goal_derived_slice, obs_dim)
 from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_XY,
                                                IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
@@ -34,10 +34,11 @@ from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_XY,
                                                face_frame)
 from domains.contact.reward import (RewardWeights, arrived_loose, goal_dist,
                                     pose_arrived, step_reward)
-from domains.contact_templates import (GAMMA_CLASSES,
+from domains.contact_templates import (GAMMA_CLASSES, Arrival,
                                        RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
                                        interface_targets, n_variants,
-                                       object_settled, sample_interface)
+                                       nearest_face, object_settled,
+                                       sample_interface)
 
 _WALL_MARGIN_CM = 6.0    # > the object's half-diagonal (~5.8cm) plus a margin
 _OBS_BOUND = 500.0       # generous, non-tight Box bound; SAC does not clip against it
@@ -103,6 +104,10 @@ class ContactEnv(gym.Env):
                 push_range_min_cm: Optional[float] = None,
                 object_theta_spread_deg: Optional[float] = None,
                 restrict_contact_actions: bool = False,
+                push_spawn_along_frac: Optional[float] = None,
+                obs_version: int = 1,
+                omega_max_rad_s: float = 3.0,
+                force_scale_kgcms2: float = 300.0,
                 action_interface: str = "finger_velocity",
                 slip_model: str = "speed_fraction",
                 slip_limit: float = 1.0,
@@ -216,6 +221,34 @@ class ContactEnv(gym.Env):
         if self.curriculum_mode not in ("nested", "band"):
             raise ValueError("curriculum_mode must be 'nested' or 'band', "
                              f"got {curriculum_mode!r}")
+        # THE NESTED RAMP IS GONE, 2026-09-03. Eq 15's literal nested form was
+        # measured INERT on this board -- same-room median 2.02/1.94/2.15/1.78cm
+        # across four levels against 2.00cm with no curriculum at all -- because
+        # a nested level can only DELETE far starts, never make near ones
+        # commoner. No run ever used it (30 of 30 archived cells record
+        # curriculum_mode=band, 0 set curriculum_start_cm), so nothing needs it
+        # replayable.
+        #
+        # The MODE survives as a name, and the key with it, because
+        # curriculum_mode=band appears in archived PINS.txt files and dropping
+        # the key would make those protocols un-replayable (config/loader.py
+        # rejects unregistered keys, by design). "nested" now means only "the
+        # historical coned forward sampler, no ramp" -- which is what every
+        # pre-v32 run actually did -- so the combination that used to be silently
+        # inert is the one that now fails loudly.
+        if self.curriculum_mode == "nested" and self.curriculum_levels is not None:
+            raise ValueError(
+                "curriculum_mode='nested' with curriculum_levels set was Eq 15's "
+                "literal nested ramp, measured INERT and deleted 2026-09-03 "
+                "(docs/PROGRESS.md). Use curriculum_mode='band', the reverse "
+                "curriculum of Florensa 2017 / Backplay 2018, which is what "
+                "every trained cell used.")
+        if self.curriculum_start_cm is not None:
+            raise ValueError(
+                "curriculum_start_cm only fed the deleted nested ramp "
+                "(measured inert, never used by any run). Remove it; "
+                "curriculum_mode='band' takes its window schedule from "
+                "_LEVEL_WINDOWS instead.")
         # RECONTACT ONLY. False (default) keeps the single-finger 2-D goal and is
         # bit-identical, which also keeps the v23 checkpoints loadable. True
         # makes the goal Eq 13's canonical interface: BOTH fingertip targets in
@@ -275,6 +308,32 @@ class ContactEnv(gym.Env):
         self._face_idx = 0          # xi's "which face"
         self._init_gamma = "push" if template == "push" else "free"
 
+        # OBSERVATION VERSION. An INTERFACE key, not a task key: it changes how
+        # the policy reads the world, not the reset distribution, the reward or
+        # the horizon. So it is excluded from the env digest and two arms that
+        # differ only here are directly comparable on one benchmark -- which is
+        # the whole point, since obs v1 vs v2 is a sweep arm.
+        #   1: the historical layout, bit-identical, including its two missing
+        #      divisors (angular velocity, force) and the recontact frame mix.
+        #   2: xi always present at N_XI_V2; angular velocity and force
+        #      normalized; the goal tail measured against the ACHIEVED goal.
+        self.obs_version = int(obs_version)
+        if self.obs_version not in (1, 2):
+            raise ValueError(f"obs_version must be 1 or 2, got {obs_version}")
+        if self.obs_version >= 2 and not self.rich_obs:
+            # v2's promise is ONE head layout across templates; a 15-dim state
+            # under the same version label would break exactly that.
+            raise ValueError("obs_version=2 requires rich_obs=true: the point "
+                             "of v2 is a single state+xi head shared by every "
+                             "template")
+        self.omega_max_rad_s = float(omega_max_rad_s)
+        self.force_scale_kgcms2 = float(force_scale_kgcms2)
+        self._scales = (
+            ObsScales.v1(self.params) if self.obs_version < 2 else
+            ObsScales.v2(self.params, goal_cm=self._max_goal_cm(),
+                         omega_max_rad_s=self.omega_max_rad_s,
+                         force_scale_kgcms2=self.force_scale_kgcms2))
+
         # Push only: half-angle (deg) of the cone around the contact face's own
         # push direction that the goal is drawn from. None keeps the historical
         # sampler, bug included, so it stays a faithful control -- see
@@ -303,6 +362,23 @@ class ContactEnv(gym.Env):
         # heading of 0 deg (measured 300/300 before v29) and draws no extra
         # random number, so that path stays bit-identical.
         self.object_theta_spread_deg = object_theta_spread_deg
+        # Push only. Half-width, as a FRACTION of the half-face, of the uniform
+        # spread the active finger's contact point is drawn from ACROSS the
+        # contacted face. None keeps the historical face CENTRE, draws no extra
+        # random number, and is bit-identical. See _face_geometry for why the
+        # centre is not merely untidy: it produces exactly zero push torque.
+        self.push_spawn_along_frac = push_spawn_along_frac
+        if push_spawn_along_frac is not None:
+            if template != "push":
+                raise ValueError("push_spawn_along_frac is push-only")
+            if not 0.0 <= float(push_spawn_along_frac) <= 0.9:
+                # 0.9 not 1.0: a contact ON the corner makes "which face is it
+                # on" ill-defined, and the guard's nearest_face test flips on
+                # rounding there. contact_templates caps its own interface
+                # sampler at ALONG_MAX_FACE=0.7 for the same reason.
+                raise ValueError("push_spawn_along_frac must be in [0, 0.9]; "
+                                 "a contact on the corner makes nearest_face "
+                                 f"ill-defined, got {push_spawn_along_frac}")
         # Set by _place_object_for_push; the coned goal sampler reads it so the
         # push direction follows a rotated object.
         self._last_face_normal = np.array([1.0, 0.0])
@@ -379,6 +455,9 @@ class ContactEnv(gym.Env):
         # Recontact: sticky, to catch "bulldoze, then settle right before
         # arriving" -- which a settled-at-arrival check alone cannot see.
         self._object_disturbed = False
+        self._settle_credit = float(self.weights.settle_cap)
+        self._hold_credit = float(self.weights.hold_cap)
+        self._arrive_credit = float(self.weights.w_arrive_pos)
 
         if template == "push":
             g_lo = np.zeros(2, dtype=np.float32)
@@ -399,7 +478,8 @@ class ContactEnv(gym.Env):
             observation=spaces.Box(
                 -_OBS_BOUND, _OBS_BOUND,
                 shape=(obs_dim(self.pose_goal, self.rich_obs, template,
-                               self.gamma_goal),), dtype=np.float32),
+                               self.gamma_goal, self.obs_version),),
+                dtype=np.float32),
             achieved_goal=spaces.Box(g_lo, g_hi, dtype=np.float32),
             desired_goal=spaces.Box(g_lo, g_hi, dtype=np.float32)))
         self.action_space = spaces.Box(-1.0, 1.0, shape=(self._physics.control_dim,),
@@ -411,14 +491,9 @@ class ContactEnv(gym.Env):
 
     def _sample_room_xy(self, room: int, *,
                         extra_offsets: Tuple[Tuple[float, float], ...] = (),
-                        x_window: Optional[Tuple[float, float]] = None) -> Tuple[float, float]:
+                        ) -> Tuple[float, float]:
         """Sample the object center in `room`, keeping it and every
-        `center + offset` clear of the room/board edge by wall_margin_cm.
-
-        `x_window` further restricts x -- Eq 15's initiation ramp for a crossing
-        edge. One uniform draw either way, in the same order, so None is
-        bit-identical to before this argument existed.
-        """
+        `center + offset` clear of the room/board edge by wall_margin_cm."""
         x_lo, x_hi = self._board.room_edges_x[room], self._board.room_edges_x[room + 1]
         dxs = [0.0, *(dx for dx, _ in extra_offsets)]
         dys = [0.0, *(dy for _, dy in extra_offsets)]
@@ -428,15 +503,6 @@ class ContactEnv(gym.Env):
         y_hi_pad = self.wall_margin_cm + max(0.0, max(dys))
         xa = x_lo + x_lo_pad
         xb = max(xa, x_hi - x_hi_pad)
-        if x_window is not None:
-            wa, wb = max(xa, float(x_window[0])), min(xb, float(x_window[1]))
-            if wa <= wb:
-                xa, xb = wa, wb
-            else:
-                # The level's cap is below this edge's geometric minimum, so the
-                # window is empty. Recorded rather than silently clamped: a
-                # nonzero rate means curriculum_start_cm is set too low.
-                self.curriculum_leaks += 1
         x = self._rng.uniform(xa, xb)
         y = self._rng.uniform(y_lo_pad, max(y_lo_pad, self.params.board_h_cm - y_hi_pad))
         return float(x), float(y)
@@ -496,23 +562,55 @@ class ContactEnv(gym.Env):
     # contact_templates.nearest_face's indexing: 0=+x 1=-x 2=+y 3=-y.
     _FACE_IDX = {"east": 0, "west": 1, "north": 2, "south": 3}
 
-    def _face_geometry(self, face, theta):
+    def _face_geometry(self, face, theta, along=0.0):
         """The active finger's offset from the object centre, and that face's
         OUTWARD normal, both rotated into the object's orientation. Shared by the
-        forward and reverse samplers so the two cannot drift apart."""
+        forward and reverse samplers so the two cannot drift apart.
+
+        `along` is the contact's position ACROSS the face, in [-1, 1] of the
+        half-face. 0.0 is the historical face CENTRE, and it was doing more than
+        look tidy:
+
+          - the memo asks for "a random point along the face", so a fixed centre
+            is a deviation (measured max along-face offset 0.0000cm over 400
+            resets);
+          - the centre of a 10x6 object's long face is 3.0cm from the corner,
+            about 4 policy ticks at v_max, so every episode started the same few
+            ticks from a face change -- and policies leave the contacted face on
+            82-87% of episodes at a median of 12 ticks;
+          - and a contact at the centre pushing along the inward normal produces
+            EXACTLY ZERO torque, because the lever arm is parallel to the force.
+            All rotation authority came from the friction-limited tangential
+            component, which is why net rotation measures a median 1.8deg per
+            episode against a +/-45deg goal window. An off-centre contact is the
+            only thing that gives push real torque, so this gates any
+            orientation-diversity experiment rather than merely tidying spec.
+        """
         ow, oh = self.params.object_w_cm, self.params.object_h_cm
         clearance = self.params.finger_radius_cm - 0.02  # deliberate slight overlap
-        local = {"west": (-(ow / 2.0 + clearance), 0.0),
-                 "east": (ow / 2.0 + clearance, 0.0),
-                 "north": (0.0, oh / 2.0 + clearance),
-                 "south": (0.0, -(oh / 2.0 + clearance))}[face]
+        a = float(along)
+        local = {"west": (-(ow / 2.0 + clearance), a * oh / 2.0),
+                 "east": (ow / 2.0 + clearance, a * oh / 2.0),
+                 "north": (a * ow / 2.0, oh / 2.0 + clearance),
+                 "south": (a * ow / 2.0, -(oh / 2.0 + clearance))}[face]
         n = self._FACE_NORMALS[face]
         c, sn = math.cos(theta), math.sin(theta)
         return ((c * local[0] - sn * local[1], sn * local[0] + c * local[1]),
                 (c * n[0] - sn * n[1], sn * n[0] + c * n[1]))
 
-    def _place_object_for_push(self, src, face, active, inactive, theta_half=None,
-                               x_window=None):
+    def _draw_along(self) -> float:
+        """One draw of the along-face spawn offset, or 0.0 with NO draw.
+
+        Drawing nothing when the feature is off keeps the RNG stream
+        bit-identical to every archived run -- the same discipline
+        disengaged_away_deg and object_theta_spread_deg follow.
+        """
+        if self.push_spawn_along_frac is None:
+            return 0.0
+        f = float(self.push_spawn_along_frac)
+        return float(self._rng.uniform(-f, f))
+
+    def _place_object_for_push(self, src, face, active, inactive, theta_half=None):
         """Given a contact face, sample the object's position (keeping the
         finger's offset clear of the wall) and place both fingers. Shared by
         _sample_push_edge's two branches, which pick `face` in different
@@ -535,10 +633,9 @@ class ContactEnv(gym.Env):
         # face normal live in the object's frame and rotate with it. The object's
         # rotated bounding box reaches at most its half-diagonal, which is inside
         # wall_margin_cm, so no rotation can push it into a wall.
-        face_offset, fn = self._face_geometry(face, theta)
+        face_offset, fn = self._face_geometry(face, theta, self._draw_along())
         face_normal = np.array(fn, dtype=float)
-        x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,),
-                                      x_window=x_window)
+        x0, y0 = self._sample_room_xy(src, extra_offsets=(face_offset,))
         obj_state = self._place_object(x0, y0, theta=None if theta == 0.0 else theta)
         obj_state = self._place_finger(obj_state, active,
                                        (x0 + face_offset[0], y0 + face_offset[1]))
@@ -666,11 +763,7 @@ class ContactEnv(gym.Env):
         # Capping the goal radius on a crossing edge is unsatisfiable -- a goal
         # past the portal is never near -- which is the leak measured
         # 2026-08-28, where a 10.1cm cap still drew a 24.6cm median.
-        crossing = portal is not None and dst != src
-        start_window, goal_cap = None, self._range_cap()
-        if crossing and self.curriculum_levels is not None:
-            start_window = self._start_window(src, dst, portal)
-            goal_cap = self.push_range_max_cm
+        goal_cap = self.push_range_max_cm
 
         if portal is not None and self.portal_goal:
             # A CROSSING edge's goal is a pose drawn from the portal region, and
@@ -678,8 +771,7 @@ class ContactEnv(gym.Env):
             # object physically cannot pass and no amount of training helps.
             half = self._portal_theta_half(portal)
             obj_state = self._place_object_for_push(src, face, active, inactive,
-                                                    theta_half=half,
-                                                    x_window=start_window)
+                                                    theta_half=half)
             th0 = float(np.arctan2(obj_state[IDX_OBJ_HEADING][1],
                                    obj_state[IDX_OBJ_HEADING][0]))
             w = math.radians(self.theta_goal_window_deg
@@ -689,8 +781,7 @@ class ContactEnv(gym.Env):
                                             min(half, th0 + w))
             return obj_state, goal
 
-        obj_state = self._place_object_for_push(src, face, active, inactive,
-                                               x_window=start_window)
+        obj_state = self._place_object_for_push(src, face, active, inactive)
         # _place_object_for_push may have rotated the object, so take the face's
         # normal from there rather than from the axis-aligned table.
         nx, ny = self._last_face_normal
@@ -895,26 +986,6 @@ class ContactEnv(gym.Env):
         if self.curriculum_levels is not None:
             self._curr_level = int(np.clip(level, 0, self.curriculum_levels - 1))
 
-    def _range_cap(self):
-        """Upper bound on the object's START-to-TARGET distance at this level.
-
-        Level 0 starts near the target and the cap expands to push_range_max_cm
-        (or unbounded) at the last level -- Eq 15's "starting near the portal and
-        expanding backward into the source region". WHICH END the cap moves is
-        the caller's decision, because only the free end can move: see
-        _sample_push_edge_coned.
-        """
-        if self.curriculum_levels is None:
-            return self.push_range_max_cm
-        lo = (self.curriculum_start_cm if self.curriculum_start_cm is not None
-              else float(self.push_range_min_cm or 0.0) + self.arrival_eps)
-        hi = self.push_range_max_cm
-        frac = (self._curr_level + 1) / float(self.curriculum_levels)
-        if hi is None:
-            # unbounded top end: ramp a multiple of the near end instead
-            return lo * (1.0 + frac * 24.0)
-        return lo + frac * (hi - lo)
-
     # Eq 15 asks for NESTED initiation sets, which measured inert on this board:
     # a nested level can only delete far starts, never make near ones commoner,
     # and the forward sampler already puts the median same-room goal at 2.0cm
@@ -980,7 +1051,11 @@ class ContactEnv(gym.Env):
             else:
                 s = float(self.object_theta_spread_deg)
                 theta = math.radians(float(self._rng.uniform(-s, s)))
-            face_offset, face_normal = self._face_geometry(face, theta)
+            # Inside the rejection loop, like theta: a value drawn once outside
+            # would be reused by all 256 retries, biasing the accepted set
+            # toward whatever offset happened to be drawn first.
+            face_offset, face_normal = self._face_geometry(
+                face, theta, self._draw_along())
             # The finger sits on `face`, so the object can only travel along that
             # face's INWARD normal, jittered by the cone -- same rule as forward.
             base = math.atan2(-face_normal[1], -face_normal[0])
@@ -1039,19 +1114,28 @@ class ContactEnv(gym.Env):
         self.curriculum_leaks += 1
         return self._sample_push_edge_coned(src, dst, active, inactive)
 
-    def _start_window(self, src, dst, portal):
-        """Eq 15's initiation ramp for a CROSSING edge: an x-interval in `src`
-        within _range_cap() of the portal plane, widening backward into the
-        source region as the level rises. The open side is +/-inf so
-        _sample_room_xy's own wall padding stays the only other constraint."""
-        cap = self._range_cap()
-        if cap is None:
-            return None
-        if dst > src:                      # pushing east; portal at src's high edge
-            return (float(portal.x) - float(cap), float("inf"))
-        return (float("-inf"), float(portal.x) + float(cap))
-
     _GAMMA_IDX = {"free": 0, "push": 1, "pivot": 2, "pinch": 3}
+
+    def _max_goal_cm(self) -> float:
+        """Diagonal of the usable object-centre box of the widest room -- the
+        furthest a same-room goal can ever be, and so the natural scale for the
+        goal-relative feature. 22.2cm on the pinned 50x30 two-room board, where
+        the board extent v1 divided by is 50.
+
+        Recontact has no rooms and its goal is a fingertip target in the
+        object's frame, bounded by the disengaged reach, so it takes that
+        instead of a room diagonal it does not have.
+        """
+        if self.template != "push":
+            half_diag = 0.5 * math.hypot(self.params.object_w_cm,
+                                         self.params.object_h_cm)
+            reach = (half_diag + self.params.finger_radius_cm + 1.0)
+            return float(reach * self.disengaged_reach_mult)
+        edges = self._board.room_edges_x
+        widest = max(edges[i + 1] - edges[i] for i in range(len(edges) - 1))
+        usable_w = max(1.0, widest - 2.0 * self.wall_margin_cm)
+        usable_h = max(1.0, self.params.board_h_cm - 2.0 * self.wall_margin_cm)
+        return float(math.hypot(usable_w, usable_h))
 
     def _xi(self) -> np.ndarray:
         """Eq 18's edge parameters: template, active finger, contact face, and
@@ -1065,27 +1149,81 @@ class ContactEnv(gym.Env):
         it disagree with the goal on ~80% of every relabeled batch -- the v18
         bug, in the one block that is supposed to be immune to it.
         """
-        v = np.zeros(12, dtype=np.float32)
+        if self.obs_version < 2:
+            v = np.zeros(N_XI, dtype=np.float32)
+            v[0 if self.template == "push" else 1] = 1.0
+            v[2 if self._active_finger == "L" else 3] = 1.0
+            v[4 + int(self._face_idx) % 4] = 1.0
+            v[8 + self._GAMMA_IDX[self._init_gamma]] = 1.0
+            return v
+        # v2: the active finger is ONE scalar, not a pair. Measured over 17,506
+        # benchmark ticks the pair correlated at exactly -1.000, so the second
+        # entry was a free dimension carrying no information.
+        v = np.zeros(N_XI_V2, dtype=np.float32)
         v[0 if self.template == "push" else 1] = 1.0
-        v[2 if self._active_finger == "L" else 3] = 1.0
-        v[4 + int(self._face_idx) % 4] = 1.0
-        v[8 + self._GAMMA_IDX[self._init_gamma]] = 1.0
+        v[2] = 0.0 if self._active_finger == "L" else 1.0
+        v[3 + int(self._face_idx) % 4] = 1.0
+        v[7 + self._GAMMA_IDX[self._init_gamma]] = 1.0
         return v
 
-    def _gamma_arrived(self, achieved_goal, desired_goal) -> np.ndarray:
+    def _gamma_arrived(self, achieved_goal, desired_goal, tol=None) -> np.ndarray:
         """Per-finger tolerance, per the interface table: the anchoring contact
-        gets a few mm, a retracted finger only has to be clear."""
+        gets a few mm, a retracted finger only has to be clear.
+
+        `tol` is (N, 2) of per-row (L, R) tolerances, or None to fall back to
+        THIS env's current episode. The argument exists because the fallback is
+        wrong under HER: SB3 calls compute_reward through
+        `env_method(..., indices=[0])`, so a relabeled batch was graded against
+        whatever interface env 0 happened to be in at sample time, not the one
+        its own episode drew. Callers pass it from info["gamma_tol"], which
+        rides along per transition like pre_achieved_goal does.
+        """
         ag = np.atleast_2d(np.asarray(achieved_goal, dtype=np.float64))
         dg = np.atleast_2d(np.asarray(desired_goal, dtype=np.float64))
-        tol = self._gamma_tol or {"L": self.arrival_eps, "R": self.arrival_eps}
+        if tol is None:
+            t = self._gamma_tol or {"L": self.arrival_eps, "R": self.arrival_eps}
+            tol = np.tile(np.array([[t["L"], t["R"]]], dtype=np.float64),
+                          (ag.shape[0], 1))
+        tol = np.atleast_2d(np.asarray(tol, dtype=np.float64))
         ok = np.ones(ag.shape[0], dtype=bool)
-        for i, side in enumerate(("L", "R")):
+        for i in range(2):
             d = np.hypot(ag[:, 2 * i] - dg[:, 2 * i],
                          ag[:, 2 * i + 1] - dg[:, 2 * i + 1])
-            ok &= d <= float(tol[side])
+            ok &= d <= tol[:, i]
             # the desired touching flag is part of the goal, so it relabels
             ok &= (ag[:, 4 + i] > 0.5) == (dg[:, 4 + i] > 0.5)
         return ok
+
+    def _gamma_dist(self, achieved_goal, desired_goal) -> float:
+        """Worst per-finger distance, for diagnostics and the shaping terms.
+
+        The two tolerances differ (anchor 0.3cm vs retracted 2.0cm), so this is
+        a reported quantity, not the arrival test -- `_gamma_arrived` is.
+        """
+        ag = np.asarray(achieved_goal, dtype=np.float64).reshape(-1)
+        dg = np.asarray(desired_goal, dtype=np.float64).reshape(-1)
+        return float(max(np.hypot(ag[2 * i] - dg[2 * i], ag[2 * i + 1] - dg[2 * i + 1])
+                         for i in range(2)))
+
+    def _gamma_arrival(self, x_next, achieved) -> Arrival:
+        """Eq 13's interface as an Arrival, so `step` and the HER relabel share
+        ONE definition of recontact-Gamma success.
+
+        They did not before: `step` called recontact_arrival with
+        `target=self._goal_xy[:2]`, which under a Gamma goal is finger L's slot,
+        while measuring whichever finger was ACTIVE. Active is R about half the
+        time, and a state perfectly achieving the intended 6-D goal was scored
+        arrived on only 254/500 (50.8%) of resets -- the rest needed a median
+        12.5cm against a 0.4cm tolerance. So the rollout reward and the
+        relabeled reward optimized two different objectives, and ~63 GPU-hours
+        of Gamma arms are uninterpretable because of it.
+        """
+        hit = bool(self._gamma_arrived(achieved, self._goal_xy)[0])
+        settled = object_settled(x_next, self.eps_v_cm_s, self.eps_omega_deg_s)
+        return Arrival(reached_position=hit,
+                       reached_interface=bool(hit and settled),
+                       dist_to_target=self._gamma_dist(achieved, self._goal_xy),
+                       heading_err=float("nan"))
 
     def _theta_tol_rad(self):
         return None if self.theta_tol_deg is None else math.radians(self.theta_tol_deg)
@@ -1139,11 +1277,17 @@ class ContactEnv(gym.Env):
                      dtype=np.float32)])
 
     def _observation(self, x) -> Dict[str, np.ndarray]:
+        achieved = self._achieved_xy(x)
         return {"observation": self._physics.obs(
                     x, self._goal_xy, xi=self._xi(), rich=self.rich_obs,
                     template=self.template, finger_targets=self._goal_xy,
-                    two_finger=self.gamma_goal),
-                "achieved_goal": self._achieved_xy(x),
+                    two_finger=self.gamma_goal, scales=self._scales,
+                    # v1 differenced the goal against the object's WORLD
+                    # position, which is only correct because push's achieved
+                    # goal IS that position. Passing it explicitly is the fix,
+                    # and it is bit-identical for push.
+                    achieved=(achieved if self.obs_version >= 2 else None)),
+                "achieved_goal": achieved,
                 "desired_goal": self._goal_xy.copy()}
 
     def _her_arrived(self, achieved_goal, desired_goal, info) -> np.ndarray:
@@ -1151,7 +1295,13 @@ class ContactEnv(gym.Env):
         with her_buffer.py's done-patch so the two cannot disagree."""
         ag, dg = np.asarray(achieved_goal), np.asarray(desired_goal)
         if self.template == "recontact" and self.gamma_goal:
-            arrived = self._gamma_arrived(ag, dg)
+            # Per-transition tolerance, so a relabeled batch is graded against
+            # the interface ITS OWN episode drew rather than whatever env 0
+            # happens to be in. Falls back only when info has not been carried.
+            tol = None
+            if info is not None and len(info) and "gamma_tol" in info[0]:
+                tol = np.asarray([d["gamma_tol"] for d in info], dtype=np.float64)
+            arrived = self._gamma_arrived(ag, dg, tol=tol)
         else:
             arrived = pose_arrived(ag, dg, self.arrival_eps, self._theta_tol_rad())
         if self.template == "push" and self.her_settled:
@@ -1187,12 +1337,40 @@ class ContactEnv(gym.Env):
             arrived = arrived & (goal_dist(dg, pre) > self.min_progress_cm)
         return arrived
 
+    def _goal_dist_vec(self, ag, dg) -> np.ndarray:
+        """Batched distance in the goal's own metric. Under a Gamma goal that is
+        the WORST per-finger distance, matching _gamma_dist -- `goal_dist` would
+        silently read finger L's slots only, which is the same slicing mistake
+        that made the Gamma arrival test wrong."""
+        if self.template == "recontact" and self.gamma_goal:
+            a = np.atleast_2d(np.asarray(ag, dtype=np.float64))
+            d = np.atleast_2d(np.asarray(dg, dtype=np.float64))
+            return np.maximum(np.hypot(a[:, 0] - d[:, 0], a[:, 1] - d[:, 1]),
+                              np.hypot(a[:, 2] - d[:, 2], a[:, 3] - d[:, 3]))
+        return goal_dist(ag, dg)
+
     def compute_reward(self, achieved_goal, desired_goal, info):
-        # HER calls this on batches of stored, position-only goal arrays;
-        # action/guard/force terms are goal-independent and dropped on relabel.
+        # HER calls this on batches of stored goal arrays; action/guard/force
+        # terms are goal-independent and dropped on relabel. Every
+        # GOAL-DEPENDENT term must be reconstructed here or the relabeled reward
+        # optimizes a different objective than the rollout reward -- which is
+        # exactly what the Gamma arrival bug did.
         ag, dg = np.asarray(achieved_goal), np.asarray(desired_goal)
         arrived = self._her_arrived(achieved_goal, desired_goal, info)
-        r = self.weights.goal_reward * arrived - self.weights.w_d * goal_dist(ag, dg)
+        dist = self._goal_dist_vec(ag, dg)
+        r = self.weights.goal_reward * arrived - self.weights.w_d * dist
+        # w_arrive_pos is deliberately ABSENT. It is metered once per episode in
+        # `step`, and "once per episode" is not a fact a lone relabeled
+        # transition carries: reconstructed here it paid on EVERY
+        # position-arrived row, so a critic bootstrapping at gamma=0.99 saw
+        # 3.0/(1-0.99) = 300 against goal_reward=10 (measured). train_contact
+        # refuses w_arrive_pos alongside use_her, which is what makes this
+        # omission sound rather than a silent drop -- see reward.RELABEL_DROPPED.
+        if self.weights.w_prog and info is not None and len(info) \
+                and "pre_achieved_goal" in info[0]:
+            pre = np.asarray([d_["pre_achieved_goal"] for d_ in info],
+                             dtype=np.float64)
+            r = r + self.weights.w_prog * (self._goal_dist_vec(pre, dg) - dist)
         return r.astype(np.float32)
 
     # --- gym API ---------------------------------------------------------------
@@ -1212,6 +1390,11 @@ class ContactEnv(gym.Env):
         self._close_not_settled_steps = 0
         self._guard_charged = False
         self._object_disturbed = False
+        # Episode budget for the settle bonus. Capped so "sit still near the
+        # goal forever" cannot out-earn arriving.
+        self._settle_credit = float(self.weights.settle_cap)
+        self._hold_credit = float(self.weights.hold_cap)
+        self._arrive_credit = float(self.weights.w_arrive_pos)
         return self._observation(self._x), {"t": 0}
 
     def _restrict_push_action(self, a: np.ndarray) -> np.ndarray:
@@ -1289,12 +1472,18 @@ class ContactEnv(gym.Env):
             theta_kw.update(
                 theta_target=float(np.arctan2(self._goal_xy[3], self._goal_xy[2])),
                 theta_tol_deg=self.theta_tol_deg)
-        arr = self._tmpl.score_arrival(x_next, target=self._goal_xy[:2],
-                                       arrival_eps=self.arrival_eps,
-                                       direction=self._active_finger,
-                                       eps_v_cm_s=self.eps_v_cm_s,
-                                       eps_omega_deg_s=self.eps_omega_deg_s,
-                                       **theta_kw)
+        next_achieved = self._achieved_xy(x_next)
+        if self.template == "recontact" and self.gamma_goal:
+            # ONE definition of success for rollout and relabel -- see
+            # _gamma_arrival for the bug this replaces.
+            arr = self._gamma_arrival(x_next, next_achieved)
+        else:
+            arr = self._tmpl.score_arrival(x_next, target=self._goal_xy[:2],
+                                           arrival_eps=self.arrival_eps,
+                                           direction=self._active_finger,
+                                           eps_v_cm_s=self.eps_v_cm_s,
+                                           eps_omega_deg_s=self.eps_omega_deg_s,
+                                           **theta_kw)
         if self.template == "push" and not self.require_settled:
             arr = replace(arr, reached_interface=arr.reached_position)
 
@@ -1324,8 +1513,45 @@ class ContactEnv(gym.Env):
                 self._guard_charged = True
 
         peak_force = float(max(x_next[IDX_PEAK_FORCE["L"]], x_next[IDX_PEAK_FORCE["R"]]))
+        # The dense terms' extra facts. Each stays None when its weight is 0.0,
+        # so the pure-sparse path is byte-for-byte what it was.
+        holding = settled_now = prev_d = None
+        if self.weights.w_hold:
+            # The conjunction, not two terms: "touching" alone pays a finger
+            # that has walked round a corner onto a face the edge never named.
+            touching = bool(x_next[IDX_CONTACT[self._active_finger]] > 0.5)
+            on_face = True
+            if touching and self.template == "push":
+                near = nearest_face(x_next, self._active_finger,
+                                    self.params.object_w_cm, self.params.object_h_cm)
+                on_face = int(near) == int(self._face_idx)
+            holding = bool(touching and on_face)
+        if self.weights.w_settle:
+            # PROXIMITY-GATED. Ungated, this is maximised by not moving, which
+            # is v16's wall-parking cheat with a new name.
+            settled_now = bool(
+                object_settled(x_next, self.eps_v_cm_s, self.eps_omega_deg_s)
+                and arr.dist_to_target <= self.weights.settle_radius_cm)
+        if self.weights.w_prog:
+            prev_d = (self._gamma_dist(pre_achieved, self._goal_xy)
+                      if self.template == "recontact" and self.gamma_goal
+                      else float(np.hypot(pre_achieved[0] - self._goal_xy[0],
+                                          pre_achieved[1] - self._goal_xy[1])))
         reward = step_reward(arr, a, guard_outcome=guard_for_reward, peak_force=peak_force,
-                             weights=self.weights)
+                             weights=self.weights, holding=holding,
+                             settled=settled_now, prev_dist=prev_d,
+                             settle_credit_left=self._settle_credit,
+                             hold_credit_left=self._hold_credit,
+                             arrive_credit_left=self._arrive_credit)
+        if self.weights.w_settle and settled_now:
+            self._settle_credit = max(
+                0.0, self._settle_credit - float(self.weights.w_settle))
+        if self.weights.w_hold and holding:
+            self._hold_credit = max(
+                0.0, self._hold_credit - float(self.weights.w_hold))
+        if self.weights.w_arrive_pos and arr.reached_position \
+                and not arr.reached_interface:
+            self._arrive_credit = 0.0
 
         self._x = x_next
         self._t += 1
@@ -1338,10 +1564,19 @@ class ContactEnv(gym.Env):
                "u_phys": u_phys,
                "pre_achieved_goal": pre_achieved}
         if self.template == "recontact":
-            # Both goal-independent, so compute_reward reads them off a
+            # All three are goal-independent, so compute_reward reads them off a
             # relabeled transition's info, like pre_achieved_goal above.
             info["obj_settled"] = obj_settled_now
             info["object_disturbed"] = self._object_disturbed
+            if self.gamma_goal:
+                # The interface tolerance belongs to THIS episode. Without it,
+                # `_gamma_arrived` fell back to self._gamma_tol, and SB3 calls
+                # compute_reward through env_method(indices=[0]) -- so a whole
+                # relabeled batch was graded against whatever interface env 0
+                # happened to be in at sample time.
+                t = self._gamma_tol or {"L": self.arrival_eps,
+                                        "R": self.arrival_eps}
+                info["gamma_tol"] = (float(t["L"]), float(t["R"]))
         elif obj_settled_now is not None:
             info["obj_settled"] = obj_settled_now
         if self.her_valid_filter:

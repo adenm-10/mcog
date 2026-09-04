@@ -54,6 +54,15 @@ class Snapshot:
     # so agency gets its own encoding.
     active_finger: Optional[str] = None
     inactive_masked: Optional[bool] = None
+    # RECONTACT's goal is a FINGERTIP target, not an object position, so it
+    # cannot ride in goal_xy. Both are WORLD-frame here -- recontact stores its
+    # targets in the object's frame, and physics.to_snapshot does that transform
+    # so this module stays frame-agnostic (see the module docstring).
+    # Eq 13's interface names BOTH fingertips, hence a dict: a single marker
+    # cannot show a two-finger goal, and the tolerances are deliberately
+    # asymmetric (anchor 0.3cm, retracted 2.0cm), so each carries its own.
+    finger_goals: Optional[Dict[str, Point]] = None
+    finger_goal_tol_cm: Optional[Dict[str, float]] = None
 
 
 _FINGER_COLOR = {True: "#2e7d32", False: "#9e9e9e"}   # touching / not
@@ -93,11 +102,21 @@ def _draw_walls(ax, walls: Sequence[Tuple[Point, Point]], board_w: float, board_
 
 
 def goal_dist(snap: Snapshot) -> float:
-    """Object-centre to goal, or nan when the Snapshot carries no goal."""
-    if snap.goal_xy is None:
-        return float("nan")
-    return float(np.hypot(snap.object_xy[0] - snap.goal_xy[0],
-                          snap.object_xy[1] - snap.goal_xy[1]))
+    """Distance to the goal in whatever the goal IS: object-centre to target
+    for push, worst fingertip-to-target for recontact. nan without either.
+
+    Worst rather than mean, and rather than the active finger's: Eq 13's
+    interface is a conjunction, so the binding constraint is the finger that is
+    furthest from where it must end up.
+    """
+    if snap.goal_xy is not None:
+        return float(np.hypot(snap.object_xy[0] - snap.goal_xy[0],
+                              snap.object_xy[1] - snap.goal_xy[1]))
+    if snap.finger_goals:
+        return max(
+            float(np.hypot(snap.fingers[k][0] - g[0], snap.fingers[k][1] - g[1]))
+            for k, g in snap.finger_goals.items() if k in snap.fingers)
+    return float("nan")
 
 
 def nearest_index(snapshots: Sequence[Snapshot]) -> Optional[int]:
@@ -114,15 +133,24 @@ def _draw_goal(ax, snap: Snapshot) -> None:
     a fixed minimum radius, never as a dot that would vanish."""
     from matplotlib.patches import Circle
 
-    if snap.goal_xy is None:
-        return
-    gx, gy = snap.goal_xy
-    if snap.arrival_eps_cm is not None:
-        r = max(float(snap.arrival_eps_cm), 0.02 * snap.board_w_cm)
-        ax.add_patch(Circle((gx, gy), r, fill=False, edgecolor=_GOAL_COLOR,
-                            linewidth=1.2, linestyle="--", zorder=2))
-    ax.plot([gx], [gy], marker="*", color=_GOAL_COLOR, markersize=17,
-            markeredgecolor="white", markeredgewidth=1.3, zorder=7)
+    def _ring_and_star(gx, gy, tol, marker, size):
+        if tol is not None:
+            r = max(float(tol), 0.02 * snap.board_w_cm)
+            ax.add_patch(Circle((gx, gy), r, fill=False, edgecolor=_GOAL_COLOR,
+                                linewidth=1.2, linestyle="--", zorder=2))
+        ax.plot([gx], [gy], marker=marker, color=_GOAL_COLOR, markersize=size,
+                markeredgecolor="white", markeredgewidth=1.3, zorder=7)
+
+    if snap.goal_xy is not None:
+        _ring_and_star(*snap.goal_xy, snap.arrival_eps_cm, "*", 17)
+    # One marker PER FINGERTIP target, labelled, because Eq 13's interface is a
+    # conjunction over both and a single star cannot say which finger is meant.
+    for name, (gx, gy) in (snap.finger_goals or {}).items():
+        tol = (snap.finger_goal_tol_cm or {}).get(name, snap.arrival_eps_cm)
+        _ring_and_star(gx, gy, tol, "X", 11)
+        ax.annotate(f"{name}*", (gx, gy), xytext=(0, 9),
+                    textcoords="offset points", ha="center", fontsize=7,
+                    color=_GOAL_COLOR, fontweight="bold", zorder=7)
 
 
 def _draw_fingers(ax, snap: Snapshot) -> None:
@@ -205,9 +233,16 @@ def plot_trajectory(snapshots: Sequence[Snapshot], ax=None):
 
     # Closest approach: "ran out of time" and "never got close" produce the same
     # success rate and need opposite fixes, so the trajectory has to show which.
+    # Marked on whatever goal_dist MEASURES -- the object for push, the driven
+    # fingertip for recontact -- or the circle sits on the object while the
+    # number beside it describes a finger.
     k = nearest_index(snapshots)
     if k is not None:
-        ax.plot(*obj_path[k], marker="o", markerfacecolor="none",
+        _at = (snapshots[k].fingers[first.active_finger]
+               if first.goal_xy is None and first.finger_goals
+               and first.active_finger in snapshots[k].fingers
+               else obj_path[k])
+        ax.plot(*_at, marker="o", markerfacecolor="none",
                 markeredgecolor=_NEAREST_COLOR, markeredgewidth=1.8,
                 markersize=11, zorder=6,
                 label=f"nearest {goal_dist(snapshots[k]):.2f}cm @ t{k}")
@@ -262,6 +297,24 @@ def _episode_caption(snapshots: Sequence[Snapshot], info: Optional[Dict] = None)
     return "   ".join(bits)
 
 
+def _even_frame(frame: np.ndarray) -> np.ndarray:
+    """Trim to even height and width.
+
+    libx264 with yuv420p rejects an odd axis, and save_video passes
+    macro_block_size=None so nothing pads frames to a multiple of 16 for us.
+    The 80x60 recontact board renders 509px tall -- 6.0 * 60/80 + 0.6 = 5.1in,
+    and 5.1 * 100dpi truncates to 509 -- so EVERY recontact clip came out
+    0 bytes, with ffmpeg reporting nothing on stderr. Push's 50x30 board happens
+    to give 420, which is why this only ever broke recontact.
+
+    Trimming the ARRAY rather than choosing an even figsize, because
+    matplotlib's own float rounding defeats the figsize approach: asking for
+    exactly 5.10in still renders 509.
+    """
+    h, w = frame.shape[:2]
+    return frame[:h - h % 2, :w - w % 2]
+
+
 def save_video(snapshots: Sequence[Snapshot], path: str, *,
               fps: float = 25.0, dpi: int = 100,
               info: Optional[Dict] = None) -> str:
@@ -279,7 +332,14 @@ def save_video(snapshots: Sequence[Snapshot], path: str, *,
         raise ValueError("save_video needs at least one snapshot")
 
     caption = _episode_caption(snapshots, info)
-    trail = np.array([s.object_xy for s in snapshots])
+    # Trail whatever the task actually MOVES. Recontact's premise is that the
+    # object stays put, so trailing the object draws a still dot and hides the
+    # only motion in the clip; there the driven fingertip is the trajectory.
+    _trail_finger = (snapshots[0].active_finger
+                     if snapshots[0].goal_xy is None
+                     and snapshots[0].finger_goals else None)
+    trail = np.array([s.fingers[_trail_finger] if _trail_finger else s.object_xy
+                      for s in snapshots])
     nearest = nearest_index(snapshots)
 
     frames = []
@@ -306,8 +366,8 @@ def save_video(snapshots: Sequence[Snapshot], path: str, *,
         ax.set_title(f"{caption}\n{live}", fontsize=7.5, loc="left")
         fig.tight_layout()
         fig.canvas.draw()
-        frame = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
-        frames.append(frame)
+        frames.append(_even_frame(
+            np.asarray(fig.canvas.buffer_rgba())[:, :, :3]).copy())
         plt.close(fig)
 
     # macro_block_size=None: our frame size need not be a multiple of 16.

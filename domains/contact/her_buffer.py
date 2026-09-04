@@ -9,10 +9,15 @@ reading SB3 2.9.0's _get_virtual_samples / _sample_goals, not assumed.
    Q(s0) at +40 against a realized return of -1.5 (v20). Applies to BOTH
    templates -- hence DonePatchedHerReplayBuffer.
 
-2. Relabeling swaps `desired_goal` but never touches `observation`, and push's
-   obs() bakes the original target into observation's last two slots. So on
-   ~80% of every batch (her_ratio at n_sampled_goal=4) the two disagree.
-   Push only: recontact's goal is object-frame, so nothing goes stale.
+2. Relabeling swaps `desired_goal` but never touches `observation`, and obs()
+   bakes the original target into observation's tail. So on ~80% of every batch
+   (her_ratio at n_sampled_goal=4) the two disagree. BOTH templates, corrected
+   2026-09-02: this docstring used to say "push only: recontact's goal is
+   object-frame, so nothing goes stale", which was wrong. Recontact's TAIL is
+   goal-derived whatever frame the goal lives in, so it went stale too -- it
+   just did not show, because v1's recontact tail was nearly constant for an
+   unrelated reason (the frame mix in physics.obs()). See
+   _patch_observations.
 
 3. HER's anti-free-win gate needs the goal's tick lag, which SB3 discards
    inside _sample_goals. Push only, and only because a distance gate cannot
@@ -41,11 +46,27 @@ class DonePatchedHerReplayBuffer(HerReplayBuffer):
     _sample_goals for why that is the right place for a settle requirement.
     """
 
-    def __init__(self, *args, valid_filter: bool = False, **kwargs):
+    def __init__(self, *args, valid_filter: bool = False,
+                 goal_scale: float | None = None,
+                 goal_slice: slice = _TARGET_SLICE,
+                 pos_scale: float | None = None, **kwargs):
+        # `pos_scale` is the pre-2026-09-02 name and is accepted ONLY so
+        # archived checkpoints load: SB3 bakes replay_buffer_kwargs into the
+        # zip and reconstructs the buffer with them on load(), so dropping the
+        # name would make every push checkpoint from v25 onward unloadable.
+        # Nothing writes it any more; the gate below asserts that.
+        if goal_scale is None and pos_scale is not None:
+            goal_scale = pos_scale
         super().__init__(*args, **kwargs)
         self._valid_filter = bool(valid_filter)
         self._valid = np.ones((self.buffer_size, self.n_envs), dtype=bool)
         self._lag_ticks = None
+        # `goal_scale` is ObsScales.goal, handed in rather than recomputed: a
+        # divisor that disagrees with obs()'s trains the critic on a state that
+        # never occurred, and it used to be a hand-copied duplicate here.
+        # None disables patching, which is the pre-v2 recontact behaviour.
+        self._goal_scale = None if goal_scale is None else float(goal_scale)
+        self._goal_slice = goal_slice
 
     def add(self, obs, next_obs, action, reward, done, infos):
         # infos[i] describes the NEXT state, which is exactly the state a
@@ -109,8 +130,50 @@ class DonePatchedHerReplayBuffer(HerReplayBuffer):
         return goals
 
     def _patch_observations(self, obs, next_obs, new_goals) -> None:
-        """Fix any goal-derived feature baked into `observation`. No-op unless
-        the template has one."""
+        """Rewrite `observation`'s goal-derived tail for the relabeled goal.
+
+        ONE rule covers every template, because obs()'s tail is always
+        `desired - achieved` on the goal's leading POSITION slots plus a
+        template-specific remainder. The arity says which template it is, so
+        nothing has to be passed in:
+
+            2  push 2-D goal, or recontact's single-finger goal
+                 -> 2 position deltas
+            4  push POSE goal
+                 -> 2 position deltas + relative heading (cos, sin)
+            6  recontact's Eq 13 interface goal
+                 -> 4 position deltas (both fingertips) + the 2 touch flags
+
+        This used to be push-only, which left recontact's tail describing the
+        OLD goal on ~80% of every batch. It went unnoticed because v1's
+        recontact tail was near-constant (measured range 0.21, dominated by a
+        -0.49 offset from the frame mix), so a stale value looked like a fresh
+        one -- one bug masking the other. Fixing the frame WITHOUT fixing this
+        makes recontact worse, so the two land together.
+        """
+        if self._goal_scale is None:
+            return
+        sl = self._goal_slice
+        width = sl.stop - sl.start
+        n_g = int(new_goals.shape[1])
+        n_pos = 4 if n_g >= 6 else 2
+        for o in (obs, next_obs):
+            ag = o["achieved_goal"]
+            tail = np.zeros((ag.shape[0], width), dtype=o["observation"].dtype)
+            tail[:, :n_pos] = (new_goals[:, :n_pos] - ag[:, :n_pos]) / self._goal_scale
+            if n_g >= 6 and width >= 6:
+                # the desired touching flag for each finger, carried verbatim
+                tail[:, 4:6] = new_goals[:, 4:6]
+            elif n_g >= 4 and width >= 4:
+                ct, st = new_goals[:, 2], new_goals[:, 3]
+                co, so = ag[:, 2], ag[:, 3]
+                tail[:, 2] = ct * co + st * so
+                tail[:, 3] = st * co - ct * so
+            elif width >= 4:
+                # A 4-wide tail under a 2-D goal: obs() writes the identity
+                # "already aligned" pair there.
+                tail[:, 2], tail[:, 3] = 1.0, 0.0
+            o["observation"][:, sl] = tail
 
     def _patch_infos(self, infos, batch_indices, env_indices) -> None:
         """Add per-pair fields `_her_arrived` needs but SB3 doesn't pass on."""
@@ -150,36 +213,10 @@ class DonePatchedHerReplayBuffer(HerReplayBuffer):
 
 
 class PushRelabelSafeHerReplayBuffer(DonePatchedHerReplayBuffer):
-    """Adds push's two extras: patch `observation`'s stale target slice, and
-    hand `_her_arrived` the tick lag its temporal gate needs."""
-
-    def __init__(self, *args, pos_scale: float, goal_slice: slice = _TARGET_SLICE,
-                 **kwargs):
-        super().__init__(*args, **kwargs)
-        self._pos_scale = float(pos_scale)  # must match physics.py's obs() normalization
-        # Width depends on whether the goal carries orientation, so it is passed
-        # in per-env rather than read from a module constant -- a 2-D-goal
-        # checkpoint and a pose-goal checkpoint have different obs widths.
-        self._goal_slice = goal_slice
-
-    def _patch_observations(self, obs, next_obs, new_goals) -> None:
-        # Must reproduce physics.obs()'s tail EXACTLY -- position delta scaled,
-        # then relative heading as (cos, sin). The `contact` gate diffs this
-        # against a from-scratch obs() so the two cannot drift apart.
-        sl = self._goal_slice
-        for o in (obs, next_obs):
-            ag = o["achieved_goal"]
-            tail = np.empty((ag.shape[0], sl.stop - sl.start),
-                            dtype=o["observation"].dtype)
-            tail[:, :2] = (new_goals[:, :2] - ag[:, :2]) / self._pos_scale
-            if new_goals.shape[1] >= 4 and tail.shape[1] >= 4:
-                ct, st = new_goals[:, 2], new_goals[:, 3]
-                co, so = ag[:, 2], ag[:, 3]
-                tail[:, 2] = ct * co + st * so
-                tail[:, 3] = st * co - ct * so
-            elif tail.shape[1] >= 4:
-                tail[:, 2], tail[:, 3] = 1.0, 0.0
-            o["observation"][:, sl] = tail
+    """Adds push's one remaining extra: hand `_her_arrived` the tick lag its
+    temporal gate needs. The tail patch moved to the base class, where it now
+    serves recontact too -- see DonePatchedHerReplayBuffer._patch_observations.
+    """
 
     def _patch_infos(self, infos, batch_indices, env_indices) -> None:
         if self._lag_ticks is None:
