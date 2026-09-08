@@ -96,7 +96,7 @@ nothing, so the hard factors are trained only once the interface is decided.
 - **Primary metric unchanged:** mean success on goals **>=3cm** under BOTH `model` and
   `model_best`. The 5-bin mean carries a 0.150 floor from the 0-3cm bin and is not the number.
 
-## ORDER OF WORK — updated 2026-09-08 late, SWEEPS C+D IN FLIGHT
+## ORDER OF WORK — updated 2026-09-08 evening, SWEEPS C+D IN FLIGHT (~3h in)
 
 **Sweep C = job `45467495` (12 cells, 2.4M, four rungs). Sweep D = job
 `45467480` (6 cells, 1M, four rungs).** Both at commit `87b7d3f`,
@@ -109,8 +109,35 @@ import until both sweeps are scored — that is what `finalize.sh` runs, and a
 change there can move a digest and orphan every floor. **Everything else is fair
 game, including all of item 3.**
 
-1. **SCORE SWEEP D BY HAND, per arm, against `PINS.<arm>.txt`.** Lands first
-   (~7-13h). The two arms train on DIFFERENT tasks — which Gamma classes are
+**REPO STATE CHANGED 2026-09-08 evening — six commits, `d473d44` -> `45fb16a`.**
+Read `status.md`'s top entry before touching anything. The five that will bite a
+new session:
+
+- **`domains/contact/physics.py` and `planar_fingertips.py` are GONE**, merged
+  into `domains/contact/world.py`. Every import is `domains.contact.world`.
+- **`tools/score_sweep.py` had a FATAL bug fixed AFTER C and D launched** — it
+  raised `ModuleNotFoundError` on every production call. C and D were launched at
+  `87b7d3f`, which has it, so **the scoring code is not the commit the runs
+  trained under. Say so when reporting their numbers.**
+- **Run gates with `sbatch slurm/gates.sh`**, never on the login node (one core,
+  load 50-64). Do not edit or switch branches while it is queued — it reads the
+  working tree at run time.
+- **24 scripts deleted.** If you want a probe back: `git show <sha>:<path>`. Most
+  were pinned to boards/sweeps that no longer exist and would answer about a task
+  nobody trains.
+- **`tools/score.sh` supersedes four scorers** but `score_rungs.sh` and
+  `score_v35_rungs.sh` MUST SURVIVE until C and D score — C's running tasks hold
+  `RUNG_SCORER=tools/score_rungs.sh` in memory and will `sbatch` that path.
+
+**LIVE SWEEP HEALTH at ~3h (NOT results — each is a cell's own diag eval on its
+own distribution, never a cross-cell number):** C `ctl_s0` 455k/2.4M, eval 0.438,
+**curriculum level 3**; D `g_one_s0` 450k/1M, eval 0.594. Item 2's curriculum
+worry is answered EARLY and `g_one` is clear of its 0.425 reference.
+
+1. **SCORE SWEEP D per arm — now `sbatch tools/score.sh logs/sweep_45467480 perarm`.**
+   Lands first (~3-4h from the 2026-09-08 evening entry). The `perarm` variant is
+   new and was built for exactly this; it reads `PINS.<arm>.txt` and passes
+   `--arm` so each arm is scored only on its own protocol. The two arms train on DIFFERENT tasks — which Gamma classes are
    drawn is a task key — so there is no single common protocol and `finalize.sh`
    is deliberately not wired up. Reference columns are v34's `gamma_free` and
    `gamma_init`, both 0.000 at this same 1M budget, already on disk.
@@ -168,8 +195,14 @@ game, including all of item 3.**
    - the historical silently-inert bugs (`Monitor` never applied, the finalize
      trigger never firing, `w_prog` absent from 80% of every batch).
 
-   **Next action: a gate mode that asserts a flag CHANGES AN OBSERVABLE
-   DISTRIBUTION** — flip it, sample resets or transitions both ways, assert they
+   **PARTIALLY LANDED 2026-09-08 evening.** Three gates added (`static` 42 -> 50):
+   the live scoring chain emits real work rather than merely importing; every
+   tool is invocable as a subprocess from the repo root; `ARCHITECTURE.md` names
+   no missing file. All three fired on a first run. The second one is what would
+   have caught the `score_sweep.py` crash.
+
+   **STILL THE NEXT ACTION, and now the highest-value gate not built: a mode that
+   asserts a flag CHANGES AN OBSERVABLE DISTRIBUTION** — flip it, sample resets or transitions both ways, assert they
    differ. That converts this class from a two-sweep discovery into a launch-time
    failure. Cheap, and it would have caught both.
 
@@ -189,9 +222,18 @@ game, including all of item 3.**
      a finding. **The fairness commitment and the composed task are the same
      piece of work**, which is another argument for item 3.
 
-6. **Housekeeping.** The 621 orphaned staging files are still orphaned; moving
-   them is a bulk move and NEEDS APPROVAL. `logs/sweep_audit/` is a scratch dir
-   from the 2026-09-08 audit and can be deleted. `ruff` is still not installed.
+6. **Housekeeping.**
+   - The 621 orphaned staging files are still orphaned; a bulk move, NEEDS APPROVAL.
+   - `logs/sweep_audit/` is a scratch dir from the 2026-09-08 audit, deletable.
+   - `ruff` is still not installed.
+   - **`tests/fixtures_smoke/**/models/` (31 MB) is still untracked** although
+     `slurm/freeze_fixtures.sh` instructs adding it. An open call: git-lfs must be
+     configured BEFORE a first add or it becomes a history rewrite.
+   - **`wandb/` is 903 MB**, not the 331 MB recorded under Housekeeping below.
+     Reclaim with `wandb sync --clean`, never `rm -rf`.
+   - **AFTER C AND D SCORE:** delete `tools/score_rungs.sh` and
+     `tools/score_v35_rungs.sh`, and point `slurm/submit_sweep_c.sh`'s
+     `RUNG_SCORER` at `tools/score.sh`.
 
 **KNOWN LIMITATIONS OF THE SWEEPS AS LAUNCHED — read before interpreting.**
 
@@ -204,6 +246,46 @@ game, including all of item 3.**
   comparison and also means 9 of 12 cells are re-scored for a known answer.
 - **Eq 35 is ~89M (C) + ~17M (D)**, not the training budget. The diagnostic eval
   costs 2.09x/1.78x the training steps. Report the total.
+
+## THE LONG ARC — where this is going, in order. Added 2026-09-08 evening.
+
+The ORDER OF WORK above is the next few days. This is the shape of the rest, and
+it exists because the immediate list keeps burying it.
+
+**Phase 1 (now):** freeze the interface. Sweeps C and D answer the action space,
+the Gamma encoding, the observation version, and whether the contact interface is
+acquirable. Everything downstream inherits those four answers, which is why they
+are being decided before anything is built on them.
+
+**Phase 2 (the critical path, and it needs NO GPU):** build the Stage 1 contact
+ladder — item 3 above. Today `option_graph/` is a one-domain core: `MazeBundle` is
+grid-native, `nav_descriptors` walks with `bfs_hops`, and `contact_hooks` is
+implemented but called by nothing. Until a contact bundle, contact entry
+conditions and contact descriptors exist, the right half of the loop
+(calibrate -> `p_hat` -> plan -> execute -> score the predictor) runs only on the
+maze. **This is the difference between a two-domain system and a one-domain
+system with a second training pipeline bolted to its left half.** 4-8 days build,
+~1-3h compute.
+
+**Phase 3:** composition. Bar 2 is already met zero-shot (0.625), so the composed
+push+recontact board is unblocked and only Phase 2 stands between here and it.
+**The flat baseline and the composed task are the SAME piece of work** — memo
+sec 5.2's decisive flat arm is not definable on a single-edge task, because there
+the flat arm IS the push option. The fairness commitment gets written down before
+any composition claim, not after.
+
+**Phase 4:** generalization, in the memo's own order — the T-shape (sec 3.1),
+which D1 exists to make possible at all; then `guard_face=adjacent` and the other
+hard factors, each a TASK key with its own digest, own floor and per sec 5.2 a
+re-baseline; then PPO as an algorithm-independence replication (built,
+launch-ready, gates no design decision).
+
+**Stage 2:** domain randomization. Friction and mass are fixed constants today —
+a deliberate Stage 1 scope limit, not an oversight.
+
+**Running alongside all of it, and cheap:** Stage 0's F1 (a second budget rung,
+CPU only, no training) and F2 (risk-aware routing, one flag and one eval run) are
+the two cheapest genuine new findings on the board and survive almost any cut.
 
 **SUPERSEDED 2026-09-08 late:** the previous ORDER OF WORK items 1-3 (read the
 smoke, submit C, submit D) are DONE. Item 6's "prevention, partially landed" is

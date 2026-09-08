@@ -4154,3 +4154,162 @@ success sits at 0.22-0.28 and must climb back to 0.4. At level 0's pace four
 rungs cost ~550-750k of 2.4M, but the later rungs are harder, so
 `eval/curriculum_level` at the 600k rung remains the number to watch — it should
 read 2 or 3.
+
+---
+
+## 2026-09-08 (evening) — repo cleanup during C+D, and a live scoring bug caught by wiring its replacement
+
+**Question:** the repo had accumulated 22 tools and 14 launchers and nobody could
+say which were live. Which are provably dead, what combines, and can the gates be
+made fast enough to run every time?
+
+**What ran:** no GPU. Six commits (`d473d44` -> `45fb16a`), all repo hygiene, all
+landed while Sweeps C (`45467495`) and D (`45467480`) trained. Gates
+42 -> **50**/27/290/172/18.
+
+### Result 1 — `tools/score_sweep.py` was crashing on every production call
+
+Found while wiring its replacement, not by looking for it.
+
+```
+from domains.contact.keys import IFACE_KEYS      # score_sweep.py:19
+python tools/score_sweep.py ...                  # how finalize.sh calls it
+-> ModuleNotFoundError: No module named 'domains'
+```
+
+`sys.path[0]` is `tools/` when a script is run by path, so the repo root is not
+importable. **Introduced the same morning, in `007e5b1`** — the commit that
+correctly collapsed five copy-pasted `IFACE_KEYS` lists into
+`domains/contact/keys.py`. The import was right; the invocation path was not.
+
+Three things make this the session's most useful finding:
+
+1. **`static` was green throughout.** `test_code.py` runs from the repo root,
+   where `import domains` resolves. The gate tested the wrong thing.
+2. **Sweep C's auto-scoring would have died** the moment its last cell exited —
+   12 cells x ~16h with no scores, and `score_rungs.sh` would have failed too.
+3. `score_sweep.py` was the ONLY one of the three repo-importing tools in
+   `tools/` missing the `sys.path.insert` guard. Fixed in `9f15d34`.
+
+**Provenance consequence, to be recorded with C and D's numbers:** both were
+launched at `87b7d3f`, which contains the bug. **The scoring code is no longer
+the commit the runs trained under.** Unavoidable; the alternative was scoring
+nothing.
+
+### Result 2 — 24 scripts deleted, and the criterion that made it safe
+
+"Zero references" is meaningless for a launcher — you `sbatch` them by hand, so
+they are all zero-reference. The criterion used instead: **tracked in git, no
+reference in any `.py`/`.sh`/`.yaml`/live doc, and superseded by a named
+successor.**
+
+Five candidates came OFF the list once read rather than counted, and each is the
+CLAUDE.md rule earning its keep:
+
+| kept | why |
+|---|---|
+| `slurm/freeze_fixtures.sh` | the ONLY way to regenerate `tests/fixtures/`, the weights the 18-check gate scores against |
+| `tests/probe_edges.py` | `STRUCTURE.md` labelled it a "deletion path"; the label was STALE. `summarize_horizon_sweep.py:29` imports it and TODO F1 reads its output. Label corrected |
+| `domains/nav/base.py` | imported by `car.py` via a RELATIVE import — the case CLAUDE.md says defeats naive scans |
+| `slurm/probe_cone.sh` (round 1) | live wrapper; deleted in round 2 only once its target was also spent |
+| `slurm/submit_test.sh` | a deliberate, self-documented scratch slot |
+
+Six probes went because they are **pinned to boards and sweeps that no longer
+exist**, so re-running one would answer about a task nobody is training:
+`probe_board_v2.py`'s "v2" portals are `y6.5-19.5 / y40.5-53.5` against the
+adopted `y10-23 / y44-57`; `probe_reachable.py` hardcodes board 50x30 against
+v2's 90x60; `probe_gamma_feasible.py` pins `normalize_goal_keys=true` (since
+measured harmful) and `horizon=200` (the Gamma arms need 400); and
+**`probe_scaling_geometry.py` drove `slurm/submit_scaling.sh`, which was NEVER
+COMMITTED** — broken from the day it landed, unnoticed, because nobody re-ran it.
+That last one is the evidence for the general rule: **a probe's artifact is the
+decision it produced, not the script.** `probe_curriculum.py` — 5 arguments, no
+hardcoded sweep, "run before submitting, never after" — was kept.
+
+The four superseded floor builders were **deleted rather than merged**. Merging
+would have meant moving four protocol strings by hand, which is exactly the
+operation that once produced digest `1a72f6438f34` against the sweep's
+`249434216cd2`. Their protocols survive where this project's own rule puts them:
+`PROTOCOL.md` beside the numbers, verified present for all four.
+
+### Result 3 — one scorer, one figure script, one world module
+
+- **`tools/score.sh`** replaces four scorers that were the same four steps (read
+  `PINS.txt` -> transform one key -> ASSERT it applied -> call `score_sweep.py`),
+  differing only in the key. Now a variant table: `rungs`, `countguard`,
+  `faceguard`, `settled`, `spawn`, `perarm`. **`perarm` is new and is Sweep D's**
+  — its arms train on different tasks, so there is no common protocol and
+  `finalize.sh` is deliberately unwired; it was scored by hand. Needed
+  `score_sweep.py --arm`, verified additive (24 cells -> 6 for `--arm ctl`;
+  a bogus arm fails loudly rather than scoring nothing).
+- **`tools/figs.py`** replaces `figs_v34.py` + `figs_sweepB.py`. The latter
+  already imported the palette and loaders from the former, so the shared library
+  was living inside a script named after a superseded sweep. **Verified: all
+  three PNGs regenerate BYTE-IDENTICAL.**
+- **`domains/contact/world.py`** replaces `planar_fingertips.py` + `physics.py`.
+  Seam kept as a section banner, not a file, so a future substrate still replaces
+  the pymunk half and reuses the `obs()`/`step()` half. Verified by the `contact`
+  gate, which carries the digest anchor — so 290/290 means no number moved.
+
+### Result 4 — three claims that were true and ungated
+
+- **`STRUCTURE.md` said `cmd_layering` enforced pymunk isolation to one file.**
+  It does not; it only asserts `option_graph/` is pymunk-free, which says nothing
+  about `domains/`. The confinement was TRUE and UNCHECKED. Now gated.
+- **`tests/test_option_graph.py` (the 172-check gate), `probe_edges.py`,
+  `summarize_horizon_sweep.py` and `status.md` were not in git** — `.gitignore`
+  carried a blanket `tests/*` and a `status.md` line, while `tests/fixture_eval.py`,
+  the sibling gate, WAS tracked. Inconsistent rather than deliberate, and an `rm`
+  there was unrecoverable. Fixed first, before any deletion, plus tag
+  `pre-cleanup-2026-09-08`.
+- **`gates.sh`'s own provenance header had a hole**, found by comparing two of its
+  runs: `DIFF_SHA` was IDENTICAL for a red run and the green run that fixed it,
+  because the fix was to an untracked file and `git diff HEAD` does not see
+  untracked files. Now hashes `git ls-files --others --exclude-standard` too.
+
+### Result 5 — the gates are fast enough to run every time, and 3 new ones
+
+`sbatch slurm/gates.sh` runs all five in parallel on a compute node. The login
+node has ONE core and sat at load 50-64 from other users all session, so **every
+gate timing previously recorded there is contaminated — including the 249s for
+`static`, which was never a real measurement.**
+
+Measured while investigating: `static`'s dominant cost is that it spawns **14
+Python subprocesses**, one per module, each paying a full torch/SB3 import on a
+network filesystem (118.6s across 13, slowest single 25.0s). Running them in a
+thread pool would floor the gate at ~25s. **Not built** — the isolation is the
+point, and importing them in one process would let an earlier import satisfy a
+later module, making the check vacuous.
+
+Three gates added, and **all three fired for real on a first run rather than
+passing vacuously**: the live scoring chain (asserts one well-formed
+`eval_contact.py` command per cell x checkpoint), tool invocability as a
+subprocess, and `ARCHITECTURE.md` path existence (which caught six bare
+filenames in its own draft).
+
+### Result 6 — two human-facing documents
+
+`ARCHITECTURE.md` (206 lines) and `RESEARCH_LOG.md` (75). The four dense docs are
+~7,500 lines written for a session; nothing was written for a human. **Neither
+new doc carries a measured number or a protocol string** — a third copy of a
+number is how this project's ~22 defects start, and the rule is now in
+`CLAUDE.md`. `RESEARCH_LOG.md` section 3 (memo asked-vs-answered) exists nowhere
+else and is what a write-up needs.
+
+### Sweep health at ~3h elapsed — NOT results
+
+| cell | steps | diag eval | level |
+|---|---|---|---|
+| C `ctl_s0` | 455k / 2.4M | 0.438 | **3** |
+| D `g_one_s0` | 450k / 1M | 0.594 | — |
+
+The curriculum worry is answered EARLY (level 3 at 455k, not the 600k rung), and
+`g_one` is clear of its 0.425 scripted reference and 0.208 floor. **Both are each
+cell's OWN diag eval on its OWN distribution and are not cross-cell numbers.**
+
+### Next
+
+Score D by hand per arm (`tools/score.sh <sweep> perarm`), read C against the
+launcher's preregistered verdicts, then delete `score_rungs.sh` and
+`score_v35_rungs.sh`. **The Stage 1 ladder is still the critical path and still
+needs no GPU.**

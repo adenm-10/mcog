@@ -15,7 +15,118 @@ worth having in front of you at all times: the gotchas and the physics numbers.
 
 ---
 
-## Current state (2026-09-08 late — SWEEPS C+D IN FLIGHT)
+## Current state (2026-09-08 evening — REPO CLEANUP, SWEEPS C+D IN FLIGHT)
+
+### START HERE — what a fresh session must know, in one screen
+
+**Sweeps C (`45467495`, 12 cells) and D (`45467480`, 6 cells) are RUNNING**, ~3h
+in. Six commits landed alongside them, all repo hygiene, none touching a file
+`finalize.sh` runs. Gates **50**/27/290/172/18. Commits `d473d44` -> `45fb16a`.
+
+1. **THE ONE THING THAT NEARLY COST THE ROUND.** `tools/score_sweep.py` raised
+   `ModuleNotFoundError: No module named 'domains'` on EVERY production
+   invocation. It does `from domains.contact.keys import IFACE_KEYS`, but
+   `finalize.sh` runs it as `python tools/score_sweep.py`, so `sys.path[0]` is
+   `tools/` and the repo root is not importable. Introduced in `007e5b1` — the
+   commit that correctly collapsed five copy-pasted key lists — and invisible to
+   `static`, which runs from the repo root where the import happens to work.
+   **Sweep C's auto-scoring would have crashed the moment its last cell exited.**
+   Fixed in `9f15d34` with the `sys.path` guard the other two repo-importing
+   tools already had.
+   **PROVENANCE CONSEQUENCE, record it with the result: C and D were launched at
+   `87b7d3f`, which HAS the bug. The scoring code is no longer the commit the
+   runs trained under.** Unavoidable — the alternative was scoring nothing.
+
+2. **`domains/contact/physics.py` AND `planar_fingertips.py` NO LONGER EXIST.**
+   Merged into **`domains/contact/world.py`** (`d536780`); every import is now
+   `from domains.contact.world import ...`. Pymunk substrate on top, the
+   `obs()`/`step()` contract below, seam kept as a section banner so a future
+   substrate still replaces the top half and reuses the bottom. New `static`
+   gate: exactly one module under `domains/` may import pymunk — a claim
+   `STRUCTURE.md` said `cmd_layering` enforced, which it never did.
+
+3. **RUN THE GATES WITH `sbatch slurm/gates.sh`, NEVER ON THE LOGIN NODE.** All
+   five in parallel on a compute node, one summary, exit 0 iff green. The login
+   node has one core and sat at load 50-64 all session, so every gate timing
+   taken there is contaminated — the 249s once recorded for `static` was never
+   real. The job prints a provenance header (commit / tree / dirty / diff-sha /
+   host) because **it reads the WORKING TREE at run time, not the commit it was
+   submitted from**; switching branches while it is queued yields a result
+   describing a tree that never existed. Its `DIFF_SHA` hashes untracked files
+   too — without that, a red run and the green run that fixed it hashed
+   identically, which was found by comparing two of its own runs.
+
+4. **24 SCRIPTS DELETED, and a probe is not lost — it is `git show <sha>:<path>`.**
+   Thirteen in `d50103d`, eleven in `9f15d34`. The probes were pinned to boards
+   and sweeps that no longer exist: `probe_board_v2.py`'s "v2" portals are NOT
+   the adopted ones, `probe_reachable.py` hardcodes board 50x30 against v2's
+   90x60, and `probe_scaling_geometry.py` drove `slurm/submit_scaling.sh` — never
+   committed, so it was broken from the day it landed and nobody noticed.
+   **A probe's artifact is the DECISION (D1-D5), not the script.** Kept
+   `probe_curriculum.py`, the one written for reuse.
+
+5. **DO NOT DELETE `tools/score_rungs.sh` OR `tools/score_v35_rungs.sh` YET.**
+   Sweep C's running tasks hold `RUNG_SCORER=tools/score_rungs.sh` in memory and
+   will `sbatch` that literal path when the last cell exits. Both are superseded
+   by **`tools/score.sh`** (one variant table: rungs / countguard / faceguard /
+   settled / spawn / perarm) and go once C and D have scored. `perarm` is new and
+   is Sweep D's: its arms train on different tasks, so `--arm` was added to
+   `score_sweep.py` and verified additive.
+
+6. **TWO NEW HUMAN-FACING DOCS, AND THE RULE THAT KEEPS THEM HONEST.**
+   `ARCHITECTURE.md` and `RESEARCH_LOG.md` (repo root) are for a HUMAN: shape,
+   information flow, what each experiment answered. `status.md`,
+   `docs/PROGRESS.md`, `docs/TODO.md`, `docs/STRUCTURE.md` remain SESSION
+   context. **The human pair carries no measured numbers and no protocol
+   strings** — it links instead, because a third copy of a number is how this
+   project's defects start. The rule is written into `CLAUDE.md`.
+
+7. **`tests/` SOURCE AND `status.md` ARE NOW IN GIT.** `.gitignore` had a blanket
+   `tests/*` and a `status.md` line, so `tests/test_option_graph.py` (the
+   172-check gate), `probe_edges.py`, `summarize_horizon_sweep.py` and this file
+   had **no version control and no recovery path**, while `tests/fixture_eval.py`
+   — the sibling gate — was tracked. Fixed in `d473d44`; only the heavy frozen
+   artifacts stay ignored. Tag `pre-cleanup-2026-09-08` marks the tree before any
+   deletion. **`tests/fixtures_smoke/**/models/` (31 MB of weights) is still
+   untracked** although `freeze_fixtures.sh` instructs adding it — an open call,
+   and git-lfs must be set up BEFORE a first add or it is a history rewrite.
+
+### THE SWEEPS, LIVE AS OF THIS ENTRY (~3h elapsed)
+
+| cell | steps | diag eval | curriculum level |
+|---|---|---|---|
+| C `ctl_s0` | 455k / 2.4M | **0.438** | **3** |
+| D `g_one_s0` | 450k / 1M | **0.594** | — |
+
+**Both early signals are good, and both were preregistered worries.** The
+curriculum concern (`docs/TODO.md` item 2 — "level should read 2 or 3 at the 600k
+rung") is answered EARLY: level 3 at 455k. `g_one` is already clear of its
+**0.425** scripted reference and **0.208** floor. **NEITHER IS A RESULT.** These
+are each cell's OWN diag eval on its OWN reset distribution; the standing rule is
+that a diag eval is never a cross-cell number and is never quoted across digests.
+Read them only as "the sweep is healthy". D lands ~3-4h from this entry, C ~13h
+later.
+
+### GATES ARE 50 NOW, AND THE THREE NEW ONES TARGET THE SILENTLY-INERT CLASS
+
+- **"the live scoring chain emits real work, not just imports"** — `--help`
+  proves a tool IMPORTS; it does not prove the CHAIN runs. Drives the real scorer
+  in `--dry-run` against an archived sweep and asserts one well-formed
+  `eval_contact.py` command per cell x checkpoint (24 for 12 cells).
+- **"every tool is invocable the way production invokes it"** — subprocess from
+  the repo root, assert no `ModuleNotFoundError`. This is what would have caught
+  item 1.
+- **"ARCHITECTURE.md names no file that does not exist"** — fired on its first
+  run against six bare filenames in its own draft.
+
+**Still missing, and the highest-value gate not yet built: assert a flag CHANGES
+AN OBSERVABLE DISTRIBUTION.** Every long-lived bug this month was silently inert.
+`docs/TODO.md` ORDER OF WORK item 4.
+
+---
+
+
+## Current state, previous entry (2026-09-08 late — SWEEPS C+D SUBMITTED)
 
 ### START HERE — what a fresh session must know, in one screen
 
