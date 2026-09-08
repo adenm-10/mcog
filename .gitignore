@@ -23,9 +23,14 @@ wandb/
 # weights — the reference numbers only mean anything against the weights that
 # produced them.
 
-tests/*
-media/*
-status.md
+# SOURCE under tests/ is tracked. `tests/*` used to ignore all of it, which left
+# test_option_graph.py (the 172-check gate), probe_edges.py and
+# summarize_horizon_sweep.py with no version control and no recovery path --
+# while fixture_eval.py, its sibling gate, was tracked. Only the heavy frozen
+# artifacts are ignored now; slurm/freeze_fixtures.sh regenerates those.
+tests/fixtures/
+tests/fixtures_smoke/**/models/
+tests/**/__pycache__/
 .claude/settings.local.json
 CLAUDE.local.md
 .cleanup-backup/
