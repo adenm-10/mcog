@@ -221,7 +221,50 @@ def rollout(model, env, seed: int, gamma: float,
                 displacement=float(np.hypot(agT[0] - ag0[0], agT[1] - ag0[1])),
                 final_dist=float(np.hypot(agT[0] - dg[0], agT[1] - dg[1])),
                 min_dist=min_dist, min_tick=min_tick,
-                dth0=dth0, dth_final=_theta_err_deg(obs))
+                dth0=dth0, dth_final=_theta_err_deg(obs),
+                **_episode_labels(env, ag0, dg))
+
+
+def _episode_labels(env, ag0, dg) -> dict:
+    """What KIND of episode this was, so a selector can ask for one.
+
+    PURE ARITHMETIC on state already drawn -- it must not consume an RNG draw,
+    or every stored score is orphaned. Gated by replaying 249434216cd2.
+
+    Additive, never renamed: record loading drops unknown keys silently, so a
+    reader that predates these fields is unaffected and one that expects them
+    must tolerate their absence on archived files.
+    """
+    out = {"src_room": None, "dst_room": None, "crossing": False,
+           "blocked": False, "gamma_from": None, "gamma_to": None}
+    board = getattr(env, "_board", None)
+    if board is not None and getattr(env, "template", None) == "push":
+        src = board.region_of(float(ag0[0]), float(ag0[1]))
+        dst = board.region_of(float(dg[0]), float(dg[1]))
+        out["src_room"], out["dst_room"] = int(src), int(dst)
+        out["crossing"] = bool(src != dst)
+        if src != dst:
+            # Does the straight object->goal segment miss the doorway? On board
+            # v1 this was 0 of 400 resets, so "crossing" was a long straight
+            # push; the offset doors make it a routing problem, and THIS is the
+            # column that shows which resets actually require one.
+            d = np.asarray(dg[:2], dtype=float) - np.asarray(ag0[:2], dtype=float)
+            L = float(np.hypot(*d))
+            if L > 1e-9:
+                u = (d[0] / L, d[1] / L)
+                try:
+                    portal = board.portal_between(int(src), int(dst))
+                    out["blocked"] = not env._ray_passes_portal(
+                        (float(ag0[0]), float(ag0[1])), u, L, portal)
+                except KeyError:
+                    out["blocked"] = True      # not adjacent: no single doorway
+    if getattr(env, "gamma_goal", False):
+        # Which canonical interface this recontact went BETWEEN -- the pair that
+        # makes the transition matrix selectable. `_gamma` is (class, variant).
+        out["gamma_from"] = getattr(env, "_init_gamma", None)
+        g = getattr(env, "_gamma", None)
+        out["gamma_to"] = g[0] if g else None
+    return out
 
 
 def overshoot_report(rows: List[dict], arrival_eps: float) -> str:
@@ -295,25 +338,62 @@ def orientation_report(rows: List[dict], theta_tol_deg) -> str:
     return "\n".join(out)
 
 
+#: name -> (row filter, sort key). Every mode that is just "pick rows matching a
+#: predicate, hardest first" lives here rather than growing another `if` branch;
+#: only `auto` and `informative`, which INTERLEAVE two pools, need code below.
+#: `blocked` and `crossing` need the labels _episode_labels writes, so on an
+#: archived eval that predates them the filter simply matches nothing -- an
+#: empty reel, never a wrong one.
+_PICKERS = {
+    "arrived":      (lambda r: r["why"] == "arrived", lambda r: -r["d0"]),
+    "failed":       (lambda r: r["why"] != "arrived", lambda r: -r["d0"]),
+    # The three the reel asks for.
+    "same_room_hard": (lambda r: not r.get("crossing", False),
+                       # Orientation first: success is flat across distance at
+                       # convergence (range 0.083) while the orientation split
+                       # still carries 0.12-0.30, so |dtheta| is what "hard"
+                       # means for a converged push policy, not centimetres.
+                       lambda r: (-abs(r.get("dth0") or 0.0), -r["d0"])),
+    "crossing":     (lambda r: r.get("crossing", False),
+                     # Wall-blocked first: those are the resets that actually
+                     # require routing rather than a long straight push.
+                     lambda r: (not r.get("blocked", False), -r["d0"])),
+    "iface_matrix": (lambda r: r.get("gamma_to") is not None, lambda r: -r["d0"]),
+}
+
+
 def select_episodes(rows: List[dict], n: int, prefer: str = "auto") -> List[int]:
-    """Indices worth watching. `auto` alternates arrivals and contact_lost
-    failures then adds the worst final-distance episode, because failures carry
-    the information. `arrived` shows successes only, hardest (longest initial
-    goal distance) first -- for showing what the policy can actually do.
-    `failed` is the mirror image, for diagnosis. `informative` is half of each:
-    hardest arrivals plus the dominant failure mode."""
+    """Indices worth watching.
+
+    `auto` alternates arrivals and contact_lost failures then adds the worst
+    final-distance episode, because failures carry the information.
+    `informative` is half hardest-arrivals, half the dominant failure mode --
+    `auto` leads with the shortest goals, which makes a good policy look
+    trivial. Everything else is a `_PICKERS` entry.
+
+    `iface_matrix` is special-cased to return ONE episode per (gamma_from,
+    gamma_to) pair: the point of a recontact reel is coverage of the
+    transitions, not n samples of whichever pair happens to be easiest.
+    """
+    if prefer == "iface_matrix":
+        keep, seen = [], set()
+        pred, key = _PICKERS[prefer]
+        for i in sorted((i for i, r in enumerate(rows) if pred(rows[i])),
+                        key=lambda i: key(rows[i])):
+            pair = (rows[i].get("gamma_from"), rows[i].get("gamma_to"))
+            if pair not in seen:
+                seen.add(pair)
+                keep.append(i)
+        return keep[:n] if n and n > 0 else keep
+    if prefer in _PICKERS:
+        pred, key = _PICKERS[prefer]
+        return sorted((i for i, r in enumerate(rows) if pred(r)),
+                      key=lambda i: key(rows[i]))[:n]
+
     arrived = [i for i, r in enumerate(rows) if r["why"] == "arrived"]
     lost = [i for i, r in enumerate(rows) if r["why"] == "contact_lost"]
     other = [i for i, r in enumerate(rows) if r["why"] not in ("arrived", "contact_lost")]
-    if prefer == "arrived":
-        return sorted(arrived, key=lambda i: -rows[i]["d0"])[:n]
-    if prefer == "failed":
-        fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
-        return sorted(fail, key=lambda i: -rows[i]["d0"])[:n]
     if prefer == "informative":
-        # Half HARDEST arrivals, half the DOMINANT failure mode. `auto` leads
-        # with the shortest goals, which makes a good policy look trivial;
-        # this pairs the ceiling with the way it most often misses.
         k = max(1, n // 2)
         pick = sorted(arrived, key=lambda i: -rows[i]["d0"])[:k]
         fail = [i for i, r in enumerate(rows) if r["why"] != "arrived"]
@@ -469,11 +549,8 @@ def main(cfg: DictConfig) -> None:
     #
     # This is ONLY safe for a key whose default reproduces the old behaviour
     # bit-identically. Do not add one here without that check.
-    stamp_omit_if_default = {"push_spawn_along_frac": None}
-    iface_keys = ("action_interface", "slip_model", "slip_limit",
-                  "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
-                  "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
-                  "normalize_goal_keys", "rl_algo")
+    from domains.contact.keys import IFACE_KEYS as iface_keys
+    from domains.contact.keys import STAMP_OMIT_IF_DEFAULT as stamp_omit_if_default
     stamp = {k: repr(v) for k, v in sorted(env_kwargs.items())
              if k not in iface_keys
              and not (k in stamp_omit_if_default

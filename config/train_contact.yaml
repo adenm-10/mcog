@@ -353,6 +353,16 @@ init_gamma_modes: null       # which interface the fingers START in. null -> (fr
 #      range was being wasted -- measured std 0.039/0.071, the two weakest
 #      signals in the vector). Requires rich_obs=true.
 obs_version: 1
+# What xi's Gamma slot ENCODES -- `face` (the historical 4-way contact-face
+# one-hot) or `count` (D1's 3-way contact count: 0/1/2). An INTERFACE key: it
+# changes what the policy is TOLD, not what the task is. ENFORCING a count is
+# guard_contact_count, which is a TASK key and stays inside the digest.
+# Width is unchanged either way -- the count takes three of the face's four
+# slots and zeroes the fourth -- so a `count` and a `face` checkpoint share one
+# observation Box. Requires obs_version=2. Retiring the face is what makes Gamma
+# survive the memo's own T-shape (sec 3.1), a round object, 3D and a conformable
+# body: a count is topological, a face index is not.
+xi_gamma_mode: face
 # Normalize ONLY achieved_goal/desired_goal, via SB3's VecNormalize. Also an
 # INTERFACE key. Measured: those two keys' positions are the four
 # highest-variance dims of the whole 49-D network input (std 7.79/7.55/4.64/3.93
@@ -435,6 +445,23 @@ guard_face: false         # push only -- also enforce the edge's contact FACE.
                           # <=4.0cm of finger travel, which contact_lost already
                           # allows, while the opposite face of a 10x6 object
                           # needs ~7.5cm. v31 measured strict at 0.000 on 9/9.
+guard_contact_count: null # push only -- enforce Gamma as a CONTACT COUNT
+                          # instead of "the other finger must not touch".
+                          # null keeps the historical, finger-specific form and
+                          # is omitted from the env digest at that default.
+                          # An integer forbids only an EXCESS of contacts (too
+                          # few is contact_lost's job, which carries the grace
+                          # window) and is deliberately finger-agnostic: under a
+                          # count interface, WHICH finger touches is not part of
+                          # what the edge asked for. TASK key.
+guard_disp_eps_cm: 2.0    # recontact, guard_object_still=displacement only.
+                          # eps=2cm from tools/probe_gamma_feasible.py part D:
+                          # at a 2cm/s action scale the peak disturbance is a
+                          # median 0.62-0.76cm (p90 1.03-1.19), so 2cm leaves
+                          # 1.000 of ticks eligible while 1cm leaves 0.961-0.979
+                          # and is marginal for no benefit. At 20cm/s even 3cm
+                          # leaves only 0.33-0.43 -- the displacement FORM and a
+                          # low action scale are complementary, not substitutes.
 guard_object_still: false # recontact only -- the object must not move. That is
                           # recontact's standing invariant (the target interface
                           # cannot be, since acquiring it is the point). As a

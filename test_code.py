@@ -190,40 +190,44 @@ def cmd_static() -> None:
               "cell_dirs orders by task index, not lexically (2 before 10)",
               f"got {[os.path.basename(c.rstrip('/')) for c in _cells]}")
 
-    section("the interface-key list agrees everywhere it is copied")
-    # These eleven keys are EXCLUDED from the env digest, so they decide what two
-    # checkpoints are allowed to be compared as. Four modules carry their own
-    # copy: eval_contact computes the digest, and three tools re-derive per-cell
-    # overrides from it. Deduping them would force tools/score_sweep.py, which is
-    # stdlib-only orchestration, to import hydra and numpy for one tuple -- so
-    # they stay copies and this check makes a silent divergence impossible.
-    # Scoring a contact_frame policy as finger_velocity inverted a whole v25
-    # result once; a key in one copy and not another is that bug's next form.
-    IFACE_RX = re.compile(r"(?:iface_keys|IFACE_KEYS)\s*=\s*\((.*?)\)", re.S)
-    iface_copies = {}
-    for path in ("./eval_contact.py", "./tools/score_sweep.py",
-                 "./tools/probe_goal_diversity.py", "./tools/probe_p0_readiness.py"):
-        m = IFACE_RX.search(open(path, encoding="utf-8").read())
-        # [^"]+ not [a-z_]+: a narrow class SKIPS a key it cannot parse, which
-        # made an added "slip_model2" invisible to this very check in testing.
-        iface_copies[path] = tuple(re.findall(r'"([^"]+)"', m.group(1))) if m else None
-    check(len(set(iface_copies.values())) == 1 and None not in iface_copies.values(),
-          "all four copies of the interface-key list are identical",
-          "; ".join(f"{k}={v}" for k, v in iface_copies.items()))
+    section("the interface-key list has exactly ONE definition")
+    # These keys are EXCLUDED from the env digest, so they decide what two
+    # checkpoints are allowed to be compared as. They used to be copy-pasted into
+    # four modules with a gate asserting the copies agreed; the gate worked, but
+    # it could only fire AFTER a copy drifted. domains/contact/keys.py is now the
+    # single definition and is deliberately dependency-free, which is what makes
+    # it importable from tools/score_sweep.py (stdlib-only orchestration) --
+    # the objection that kept the copies alive.
+    from domains.contact.keys import IFACE_KEYS as _IK
+    from domains.contact.keys import STAMP_OMIT_IF_DEFAULT as _OMIT
+    _re_copy = re.compile(r"(?:iface_keys|IFACE_KEYS)\s*=\s*\(")
+    _regrown = [p_ for p_ in ("./eval_contact.py", "./tools/score_sweep.py",
+                              "./tools/probe_goal_diversity.py",
+                              "./tools/probe_p0_readiness.py")
+                if _re_copy.search(open(p_, encoding="utf-8").read())]
+    check(not _regrown,
+          "no module has regrown a literal copy of the interface-key list",
+          f"copies found in {_regrown}" if _regrown else "all import keys.py")
+    check(len(_IK) == len(set(_IK)), "no duplicate interface key", f"{_IK}")
     # obs_version/omega_max_rad_s/force_scale_kgcms2 joined this list 2026-09-02
-    # and that placement is the POINT, not an oversight: they change how the
-    # policy READS the world, not the reset distribution, reward or horizon. So
-    # excluding them leaves the v32/v33 digest 249434216cd2 intact -- verified
-    # by the pinned-digest check below -- and makes obs v1 vs v2 an arm that can
-    # be scored on ONE benchmark. Anything that moves the TASK must NOT go here.
-    check(iface_copies["./eval_contact.py"] == (
-              "action_interface", "slip_model", "slip_limit",
-              "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
-              "obs_version", "omega_max_rad_s", "force_scale_kgcms2",
-              "normalize_goal_keys", "rl_algo"),
-          "the interface-key list is the expected eleven keys",
-          f"got {iface_copies['./eval_contact.py']} -- adding a key here silently "
-          f"REMOVES it from the env digest and orphans every stored score")
+    # and xi_gamma_mode on 2026-09-08. That placement is the POINT, not an
+    # oversight: each changes how the policy READS the world (or what it is
+    # TOLD), not the reset distribution, reward or horizon. So excluding them
+    # leaves the v32/v33 digest 249434216cd2 intact -- verified by the
+    # pinned-digest check below -- and makes obs v1 vs v2, and face vs count,
+    # arms that can be scored on ONE benchmark. Anything that moves the TASK
+    # must NOT go here: enforcing a contact count is guard_contact_count, which
+    # is a task key and stays inside the digest.
+    check(_IK == ("action_interface", "slip_model", "slip_limit",
+                  "restrict_contact_actions", "mask_inactive_finger", "gap_assist",
+                  "obs_version", "xi_gamma_mode", "omega_max_rad_s",
+                  "force_scale_kgcms2", "normalize_goal_keys", "rl_algo"),
+          "the interface-key list is the expected twelve keys",
+          f"got {_IK} -- adding a key here silently REMOVES it from the env "
+          f"digest and orphans every stored score")
+    check("xi_gamma_mode" not in _OMIT,
+          "xi_gamma_mode is not ALSO in stamp_omit_if_default",
+          "an interface key is already excluded at every value, not just its default")
 
     section("the untrained floor is built for the algorithm it bounds")
     # rl_algo is an interface key, so a PPO arm and a SAC arm share one
@@ -1666,10 +1670,270 @@ def cmd_contact() -> None:
     # v32/v33 protocol moved 249434216cd2 -> e35ceab30ae5 while v33 ctl_s1
     # replayed bit-identically.
     _ec = open("./eval_contact.py", encoding="utf-8").read()
-    check("stamp_omit_if_default" in _ec and '"push_spawn_along_frac": None' in _ec,
-          "eval_contact omits a defaulted post-hoc TASK key from the digest")
+    from domains.contact.keys import STAMP_OMIT_IF_DEFAULT as _OMIT2
+    # Assert the CONTENT, not the source text: the table moved to keys.py once
+    # the interface-key copies were collapsed, and a grep for a literal in
+    # eval_contact.py would have gone quietly vacuous rather than failing.
+    check(_OMIT2.get("push_spawn_along_frac", "missing") is None,
+          "the post-hoc TASK keys are omitted from the digest at their default",
+          f"{_OMIT2}")
+    for _k, _v in (("guard_contact_count", None), ("guard_disp_eps_cm", 2.0)):
+        check(_k in _OMIT2 and _OMIT2[_k] == _v,
+              f"{_k} is omitted at its default {_v!r}",
+              "a new env kwarg otherwise rehashes every config and orphans "
+              "every stored score")
     check("stamp_omit_if_default[k]" in _ec,
           "...by VALUE, so setting the key still rehashes (the point)")
+
+    section("board v2: the crossing sampler reaches the doorway, and never leaks")
+    # THE BUG THIS GATES. _sample_push_edge_reverse -- the sampler
+    # curriculum_mode=band selects, i.e. the one every sweep since v32 uses --
+    # drew a crossing goal uniformly in the destination room and never checked
+    # the object->goal ray passes the doorway. _sample_goal_in_push_cone DID
+    # check. portal_goal=true hid it completely by making the goal BE the
+    # doorway; with portal_goal=false, 73.5% of crossing resets had no
+    # straight-line path. Both samplers now call ONE helper.
+    from domains.contact.gym_env import ContactEnv as _CE
+    from domains.contact.planar_fingertips import Portal as _P
+    from domains.contact.planar_fingertips import PlanarFingertipParams as _PP
+
+    def _board_v2(**kw):
+        _pp = _PP(board_w_cm=90.0, board_h_cm=60.0,
+                  portals=(_P(x=30.0, y_lo=10.0, y_hi=23.0),
+                           _P(x=60.0, y_lo=44.0, y_hi=57.0)))
+        _base = dict(template="push", params=_pp, seed=0, rich_obs=True,
+                     obs_version=2, wall_margin_cm=6.0, require_settled=True,
+                     push_cone_deg=75.0, same_room_goal_prob=0.5,
+                     portal_goal=False, portal_arrival=False,
+                     portal_clearance_cm=0.5, theta_tol_deg=22.5,
+                     theta_goal_window_deg=45.0, disengaged_away_deg=60,
+                     guard_face=False, curriculum_mode="band",
+                     curriculum_levels=None)
+        _base.update(kw)
+        return _CE(**_base)
+
+    for _spread in (None, 180.0):
+        _bv = _board_v2(object_theta_spread_deg=_spread)
+        _blocked = _cross = 0
+        for _s in range(200):
+            _o, _ = _bv.reset(seed=_s)
+            _a, _g = _o["achieved_goal"], _o["desired_goal"]
+            _r0 = _bv._board.region_of(float(_a[0]), float(_a[1]))
+            _r1 = _bv._board.region_of(float(_g[0]), float(_g[1]))
+            if _r0 == _r1:
+                continue
+            _cross += 1
+            _dd = float(np.hypot(_g[0] - _a[0], _g[1] - _a[1]))
+            _u = ((_g[0] - _a[0]) / _dd, (_g[1] - _a[1]) / _dd)
+            if not _bv._ray_passes_portal((float(_a[0]), float(_a[1])), _u, _dd,
+                                          _bv._board.portal_between(_r0, _r1)):
+                _blocked += 1
+        check(_cross > 0, f"spread={_spread}: the board actually produces crossings",
+              f"{_cross}/200")
+        check(_blocked == 0,
+              f"spread={_spread}: every crossing reset has a straight path "
+              f"through the doorway", f"{_blocked}/{_cross} blocked")
+        # A LEAK IS NOT A WARNING: it falls through to the forward sampler at the
+        # WRONG level distribution, i.e. silently trains on a different task.
+        # Full pose randomization leaked 3 of 400 at the old 256-attempt cap.
+        check(_bv.curriculum_leaks == 0,
+              f"spread={_spread}: the rejection loop never exhausts its attempts",
+              f"{_bv.curriculum_leaks} leaks -- raise the cap, do not ship this")
+
+    section("D1: Gamma as a contact COUNT, and the face encoding it retires")
+    from domains.contact.planar_fingertips import IDX_CONTACT as _IDXC
+    from domains.contact_templates import GAMMA_CONTACT_COUNT as _GCC
+
+    # pivot and pinch COLLAPSE. That is the whole abstraction: they differ in
+    # where the contacts sit, not how many, and a count is topological so it
+    # survives the memo's own T-shape (sec 3.1), a round object and 3D.
+    check(_GCC["pivot"] == _GCC["pinch"] == 2 and _GCC["push"] == 1
+          and _GCC["free"] == 0,
+          "the Gamma count map collapses pivot and pinch at two contacts",
+          f"{_GCC}")
+
+    # xi WIDTH IS UNCHANGED and the retired face slot is EXACTLY zero, which is
+    # what lets a `count` policy and a `face` policy share one observation Box.
+    _xf = _contact_env(obs_version=2, rich_obs=True, xi_gamma_mode="face")
+    _xc = _contact_env(obs_version=2, rich_obs=True, xi_gamma_mode="count")
+    _xf.reset(seed=3); _xc.reset(seed=3)
+    _vf, _vc = _xf._xi(), _xc._xi()
+    check(_vf.shape == _vc.shape, "xi width is identical under face and count",
+          f"{_vf.shape} vs {_vc.shape}")
+    check(float(_vc[6]) == 0.0, "the retired fourth face slot is EXACTLY zero",
+          f"xi[6]={float(_vc[6])!r}")
+    check(float(_vc[3 + 1]) == 1.0 and float(_vc[3]) == 0.0 and float(_vc[5]) == 0.0,
+          "push commands ONE contact in xi's count slot", f"{_vc[3:7]}")
+    check(int(_vf[3:7].sum()) == 1 and int(_vc[3:7].sum()) == 1,
+          "exactly one Gamma slot is hot in both encodings")
+    try:
+        _contact_env(obs_version=1, rich_obs=True, xi_gamma_mode="count")
+        check(False, "xi_gamma_mode=count under obs v1 raises")
+    except ValueError:
+        check(True, "xi_gamma_mode=count under obs v1 raises")
+
+    # THE GUARD IS A SEPARATE, TASK-SIDE DECISION. Telling the policy a count
+    # and enforcing one are two different claims; a sweep must be able to move
+    # one without the other.
+    from domains.contact_templates import push_guard as _pg
+    _ge2 = _contact_env(obs_version=2, rich_obs=True)
+    _ge2.reset(seed=5)
+    _leg = types.SimpleNamespace(direction="L")
+    _x2 = _ge2._x.copy()
+    _x2[_IDXC["L"]] = 1.0
+    _x2[_IDXC["R"]] = 1.0                       # an EXTRA contact
+    check(_pg(_x2, frozenset(), 1.0, _leg, params=_ge2.params,
+              commanded_count=1) == "forbidden_contact",
+          "a second contact is forbidden_contact when the edge commands ONE")
+    check(_pg(_x2, frozenset(), 1.0, _leg, params=_ge2.params,
+              commanded_count=2) is True,
+          "the SAME state is legal when the edge commands TWO",
+          "this is the pair that shows the guard reads the command, not a constant")
+    _x1 = _ge2._x.copy()
+    _x1[_IDXC["L"]] = 0.0
+    _x1[_IDXC["R"]] = 1.0                       # only the INACTIVE finger touches
+    check(_pg(_x1, frozenset(), 1.0, _leg, params=_ge2.params) == "forbidden_contact",
+          "the historical guard is finger-SPECIFIC (inactive contact forbidden)")
+    check(_pg(_x1, frozenset(), 1.0, _leg, params=_ge2.params,
+              commanded_count=1) is True,
+          "the count guard is finger-AGNOSTIC: one contact is one contact",
+          "under a count interface, WHICH finger touches is not what the edge asked")
+
+    section("D2: the still-guard as a latched DISPLACEMENT bound")
+    from domains.contact_templates import (object_displacement_cm as _odisp,
+                                           object_pose as _opose,
+                                           recontact_guard as _rg)
+    _re = _contact_env_t("recontact", guard_object_still="displacement",
+                         guard_disp_eps_cm=2.0, rich_obs=True, obs_version=2)
+    check(_re.guard_object_still == "displacement", "displacement mode is accepted")
+    check(_contact_env_t("recontact", guard_object_still=True).guard_object_still
+          == "velocity",
+          "guard_object_still=true still spells 'velocity' (archived checkpoints)")
+    try:
+        _contact_env_t("recontact", guard_object_still="wobble")
+        check(False, "an unknown guard_object_still mode raises")
+    except ValueError:
+        check(True, "an unknown guard_object_still mode raises")
+
+    _re.reset(seed=11)
+    _ref = _opose(_re._x)
+    check(_odisp(_re._x, _ref, 3.12) == 0.0,
+          "displacement from the reference pose is zero at reset")
+    _moved = _re._x.copy()
+    _moved[0] += 1.5
+    check(abs(_odisp(_moved, _ref, 3.12) - 1.5) < 1e-9,
+          "a 1.5cm translation reads 1.5cm", f"{_odisp(_moved, _ref, 3.12):.4f}")
+    # Rotation folds in as the arc a 3.12cm lever sweeps -- ONE scalar bounds
+    # position and heading, with no second swept constant. Rotate RELATIVE to
+    # the reference heading, which is whatever this episode spawned at.
+    _th0 = math.atan2(_ref[3], _ref[2])
+
+    def _rotated(delta):
+        _r = _re._x.copy()
+        _r[2], _r[3] = math.cos(_th0 + delta), math.sin(_th0 + delta)
+        return _r
+    check(abs(_odisp(_rotated(0.1), _ref, 3.12) - 0.1 * 3.12) < 1e-6,
+          "a 0.1rad rotation reads as its 3.12cm lever arc",
+          f"{_odisp(_rotated(0.1), _ref, 3.12):.4f} vs {0.1 * 3.12:.4f}")
+    # And it WRAPS. A delta just past pi must read as just UNDER pi, not as
+    # ~2pi: an atan2-of-difference form has a branch cut exactly there, and a
+    # guard that jumped to 2*pi*3.12 = 19.6cm at the wrap would fire on a
+    # rotation of a fraction of a degree.
+    _near = _odisp(_rotated(math.pi + 0.02), _ref, 3.12)
+    check(abs(_near - (math.pi - 0.02) * 3.12) < 1e-6,
+          "the heading difference is WRAPPED, not an unbounded angle delta",
+          f"{_near:.4f} vs {(math.pi - 0.02) * 3.12:.4f}")
+
+    check(_rg(_re._x, frozenset(), 1.0, None, params=_re.params,
+              object_still="displacement", disp_cm=1.9, eps_disp_cm=2.0) is True,
+          "a state inside the bound passes the guard")
+    check(_rg(_re._x, frozenset(), 1.0, None, params=_re.params,
+              object_still="displacement", disp_cm=2.1,
+              eps_disp_cm=2.0) == "object_disturbed",
+          "a state past the bound scores object_disturbed")
+    try:
+        _rg(_re._x, frozenset(), 1.0, None, params=_re.params,
+            object_still="displacement")
+        check(False, "displacement mode without disp_cm raises")
+    except ValueError:
+        check(True, "displacement mode without disp_cm raises",
+              "the latch lives in the caller and must not silently default")
+
+    # THE LATCH. Instantaneous net displacement would let a policy shove the
+    # object and push it back -- the same cheat w_m=50 taught push (park it
+    # against a wall). Drive the env, then check the recorded max never falls.
+    _re.reset(seed=12)
+    _peaks = []
+    for _ in range(12):
+        _re.step(_re.action_space.sample())
+        _peaks.append(_re._max_disp_cm)
+    check(all(b >= a - 1e-12 for a, b in zip(_peaks, _peaks[1:])),
+          "the displacement latch is MONOTONE over an episode",
+          f"peaks {[round(p, 3) for p in _peaks[:6]]}...")
+    _re.reset(seed=13)
+    check(_re._max_disp_cm == 0.0 and _re._obj_ref_pose is not None,
+          "the latch and the reference pose are RE-READ every episode",
+          "a cached per-episode value is silent corruption, not a crash")
+
+    section("the rollout reward and the relabeled reward agree under the new guard")
+    # THE regression test for the class that made v31's Gamma arms
+    # uninterpretable: step() and HER's compute_reward computed success two
+    # different ways. Drive a real episode under the displacement guard and
+    # replay each transition through compute_reward with its own stored info.
+    # SPARSE weights, which is what every Gamma arm runs and the only setting
+    # where the invariant is even claimed: compute_reward reconstructs the
+    # GOAL-DEPENDENT terms only, and recontact's defaults (w_T/w_a/w_m) are
+    # goal-INDEPENDENT, so they are dropped on relabel by design. See
+    # reward.RELABEL_DROPPED for the full list and each term's bound.
+    from domains.contact.reward import RewardWeights as _RW
+    _rr = _contact_env_t("recontact", guard_object_still="displacement",
+                         guard_disp_eps_cm=2.0, rich_obs=True, obs_version=2,
+                         gamma_goal="count", her_settled=False,
+                         weights=_RW(goal_reward=10.0))
+    _obs, _ = _rr.reset(seed=21)
+    _mismatch, _n = 0, 0
+    for _ in range(40):
+        _o2, _rew, _term, _trunc, _info = _rr.step(_rr.action_space.sample())
+        _replay = float(np.asarray(_rr.compute_reward(
+            _o2["achieved_goal"][None, :], _o2["desired_goal"][None, :],
+            [_info])).reshape(-1)[0])
+        _n += 1
+        if abs(_replay - float(_rew)) > 1e-6:
+            _mismatch += 1
+        _obs = _o2
+        if _term or _trunc:
+            _obs, _ = _rr.reset(seed=22)
+    check(_mismatch == 0,
+          "rollout reward == relabeled reward on every transition "
+          "(sparse, under guard_object_still=displacement)",
+          f"{_mismatch} of {_n} transitions disagreed")
+
+    section("count-mode Gamma arrival is the count, and is relabel-safe")
+    _cm = _contact_env_t("recontact", gamma_goal="count", rich_obs=True,
+                         obs_version=2, xi_gamma_mode="count",
+                         goal_gamma_modes=("pinch",))
+    _cm.reset(seed=31)
+    check(_cm.gamma_count_mode and _cm.gamma_goal,
+          "gamma_goal='count' sets count mode AND keeps the 6-D goal vector")
+    check(_cm._commanded_count() == 2,
+          "a pinch goal commands TWO contacts", f"{_cm._commanded_count()}")
+    # A state whose COUNT matches arrives, whatever the positions are.
+    _ag = np.asarray(_cm._achieved_xy(_cm._x), dtype=np.float64).copy()[None, :]
+    _dg = np.asarray(_cm._goal_xy, dtype=np.float64).copy()[None, :]
+    _ag[0, :4] = _dg[0, :4] + 99.0          # positions WILDLY wrong
+    _ag[0, 4:6] = _dg[0, 4:6]               # count matches
+    check(bool(_cm._gamma_arrived(_ag, _dg)[0]),
+          "count mode ignores POSITION entirely -- the goal is the count",
+          "sec 6.1: Gamma_l is a target SET, and the drawn points are one member")
+    _ag2 = _ag.copy(); _ag2[0, 5] = 0.0     # one contact short
+    check(not bool(_cm._gamma_arrived(_ag2, _dg)[0]),
+          "one contact short does NOT arrive")
+    # Relabel safety BY CONSTRUCTION: the rule reads both counts off the goal
+    # vectors, so a relabeled goal is graded by exactly the rule its own
+    # achieved state satisfies -- no per-transition field to forget.
+    check(bool(_cm._gamma_arrived(_ag2, _ag2)[0]),
+          "any state trivially arrives at ITS OWN relabeled goal",
+          "this is what makes count mode relabel-safe with no info payload")
 
     section("the nested curriculum is gone, and its keys fail loudly")
     # Eq 15's literal nested form was measured INERT on this board: same-room

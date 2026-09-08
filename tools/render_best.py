@@ -56,14 +56,19 @@ def pick_best(eval_dir: str, min_d0: float) -> dict[str, dict]:
     return best
 
 
-def render(rec: dict, pins: list[str], media_root: str, n: int, dry: bool) -> bool:
-    out = os.path.join(media_root, rec["arm"])
+def render(rec: dict, pins: list[str], media_root: str, n: int, dry: bool,
+           pick: str = "informative") -> bool:
+    # One sub-directory per (arm, pick) so a reel of several picks does not
+    # overwrite itself; `informative` keeps the historical flat layout, which is
+    # what every archived media/<TAG>/<arm>/ path already is.
+    out = os.path.join(media_root, rec["arm"]
+                       if pick == "informative" else f"{rec['arm']}__{pick}")
     cmd = [sys.executable, "eval_contact.py", f"contact={rec['template']}", "seed=0",
            *pins, *_iface_argv(rec["interface"]),
            f"eval_ckpt={rec['ckpt']}",
            f"eval_out={os.path.join(out, 'eval.json')}",
            f"eval_media_dir={out}",   # else it lands in media/eval/<cell>
-           "eval_video=true", f"eval_video_n={n}", "eval_video_pick=informative",
+           "eval_video=true", f"eval_video_n={n}", f"eval_video_pick={pick}",
            "eval_summary_png=true"]
     if dry:
         print(" ".join(cmd))
@@ -91,20 +96,27 @@ def main() -> None:
     ap.add_argument("--media-dir", required=True)
     ap.add_argument("--n", type=int, default=6, help="episodes per arm")
     ap.add_argument("--min-d0", type=float, default=3.0)
+    ap.add_argument("--pick", action="append", dest="picks",
+                    help="episode selector: informative (default) | arrived | "
+                         "failed | same_room_hard | crossing | iface_matrix. "
+                         "Repeatable: --pick same_room_hard --pick crossing.")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
+    picks = a.picks or ["informative"]
     best = pick_best(a.eval_dir, a.min_d0)
     if not best:
         sys.exit(f"no eval JSONs with per-episode rows in {a.eval_dir}")
-    ok = 0
+    ok = want = 0
     for arm in sorted(best):
         rec = best[arm]
         print(f"{arm:>14}  {rec['tag']}  {os.path.basename(rec['path'])}  "
               f">={a.min_d0:.0f}cm {rec['hard']:.3f}  all {rec['success']:.3f}")
-        ok += render(rec, a.pins.split(), a.media_dir, a.n, a.dry_run)
-    print(f"{ok}/{len(best)} arms rendered -> {a.media_dir}")
-    sys.exit(0 if ok == len(best) else 1)
+        for pick in picks:
+            want += 1
+            ok += render(rec, a.pins.split(), a.media_dir, a.n, a.dry_run, pick)
+    print(f"{ok}/{want} reels rendered -> {a.media_dir}")
+    sys.exit(0 if ok == want else 1)
 
 
 if __name__ == "__main__":

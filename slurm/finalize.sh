@@ -52,7 +52,21 @@ python tools/score_sweep.py "${SWEEP}" \
   --out-dir "logs/eval/${TAG}" --template "${TEMPLATE}" --jobs 4 \
   --ckpt model.zip model_best.zip --pins "${PINS}"
 
+# THREE REELS, not one. `informative` (hardest arrivals + the dominant failure)
+# is the historical default and keeps the flat media/<TAG>/<arm>/ layout. The
+# other two answer the questions board v2 was built to pose and that no reel
+# could express before the episode labels existed: can it place a hard pose
+# inside its own region, and can it route through an offset doorway. A pick that
+# matches no episode writes an empty directory rather than failing, so this is
+# safe on a template or board where the category does not exist.
 python tools/render_best.py "logs/eval/${TAG}" \
-  --pins "${PINS}" --media-dir "media/${TAG}" --n 6
+  --pins "${PINS}" --media-dir "media/${TAG}" --n 6 \
+  --pick informative --pick same_room_hard --pick crossing
 
 echo "done: logs/eval/${TAG} and media/${TAG}"
+# Figures are deliberately NOT auto-generated. Each sweep's panels answer that
+# sweep's preregistered questions -- Sweep B's were budget-vs-treatment, Sweep
+# C's are an interface ranking -- so a generic auto-figure would render the
+# previous sweep's question against the new sweep's numbers, which is worse than
+# no figure. Write the panels with the reading, and cite tools/figs_v34.py's
+# palette/load/one_digest rather than re-deriving them.

@@ -8,6 +8,7 @@ every caller asks this file instead.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Optional, Sequence, Tuple
 
@@ -192,6 +193,13 @@ def _touching(x: State, finger: Finger) -> bool:
     return bool(x[15 if finger == "L" else 16] > 0.5)
 
 
+def _n_touching(x: State) -> int:
+    """How many fingertips are in contact. The ONE reading of Gamma-as-a-count,
+    shared by push's guard and recontact's count arrival so the two cannot
+    disagree about what "two contacts" means."""
+    return int(_touching(x, "L")) + int(_touching(x, "R"))
+
+
 def _no_contact_steps(x: State, finger: Finger) -> int:
     return int(x[17 if finger == "L" else 18])
 
@@ -226,6 +234,43 @@ def object_settled(x: State, eps_v_cm_s: Optional[float] = None,
     v_kw = {} if eps_v_cm_s is None else dict(eps_v_cm_s=eps_v_cm_s)
     w_kw = {} if eps_omega_deg_s is None else dict(eps_omega_deg_s=eps_omega_deg_s)
     return _linear_settled(*_obj_vel(x), **v_kw) and _angular_settled(_obj_omega(x), **w_kw)
+
+
+def object_pose(x: State) -> Tuple[float, float, float, float]:
+    """(x, y, cos, sin) -- the reference an option's displacement is measured
+    against. A tuple rather than a slice so nothing downstream has to know the
+    state layout."""
+    ox, oy = _obj_xy(x)
+    return (ox, oy, float(x[2]), float(x[3]))
+
+
+def object_displacement_cm(x: State, ref: Tuple[float, float, float, float],
+                           arm_cm: float) -> float:
+    """How far the object has MOVED from `ref`, position and heading in one cm.
+
+    Decision D2, a recorded memo deviation. The memo's recontact invariant is
+    "the object does not move"; velocity and displacement are two readings of it
+    and they forbid DIFFERENT things. A velocity threshold forbids a sharp tap
+    but tolerates a 0.4cm/s drift that carries the object 3.2cm over a horizon;
+    a displacement bound forbids net motion but tolerates the unavoidable
+    contact transient. The invariant exists so a SUCCESSOR option finds the
+    object where it expected it, which is a displacement property.
+
+    Rotation folds into the same scalar as the arc a lever of `arm_cm` sweeps --
+    the pressure-weighted mean radius the table-drag model already uses -- so one
+    bound covers position and heading without a second swept constant.
+
+    Measured price of the velocity reading: two-contact Gamma unreachable at any
+    speed tried (0.000 / 0.013), 71-80 of 80 scripted episodes disturbed even at
+    2cm/s, and HER's relabel credit blacked out from median tick 8 of 200.
+    """
+    ox, oy, ch, sh = ref
+    px, py = _obj_xy(x)
+    # Wrapped heading difference via the cross/dot of the two unit vectors, so
+    # there is no atan2-branch discontinuity at +/-pi to special-case.
+    c2, s2 = float(x[2]), float(x[3])
+    dtheta = abs(math.atan2(s2 * ch - c2 * sh, c2 * ch + s2 * sh))
+    return float(np.hypot(px - ox, py - oy) + dtheta * float(arm_cm))
 
 
 def push_arrival(x: State, *, target, arrival_eps: float,
@@ -316,7 +361,8 @@ def nearest_face(x: State, finger: Finger, ow: float, oh: float) -> int:
 
 
 def push_guard(x: State, allowed, cell_size, leg=None, *, params,
-               face: Optional[int] = None, allow_adjacent: bool = False):
+               face: Optional[int] = None, allow_adjacent: bool = False,
+               commanded_count: Optional[int] = None):
     """`allowed`/`cell_size` are signature-compat only -- push has no cell grid.
     `leg.direction` names the active (pushing) finger.
 
@@ -341,7 +387,18 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params,
     if active_finger not in ("L", "R"):
         raise ValueError(
             f"push guard needs leg.direction in ('L', 'R'), got {active_finger!r}")
-    if _touching(x, _other(active_finger)):
+    if commanded_count is None:
+        # Historical form: the edge names an ACTIVE finger and the other must be
+        # clear. Kept bit-identical because every archived push checkpoint and
+        # digest was trained against it.
+        if _touching(x, _other(active_finger)):
+            return "forbidden_contact"
+    elif _n_touching(x) > int(commanded_count):
+        # Count form (D1): the edge commands HOW MANY contacts, not which
+        # finger. Only an EXCESS is a violation -- too few is `contact_lost`'s
+        # job, which already carries the grace window. This is deliberately
+        # finger-agnostic: under a count interface "the left finger is the one
+        # touching" is not part of what the edge asked for.
         return "forbidden_contact"
     if _no_contact_steps(x, active_finger) > CONTACT_N_GRACE_STEPS:
         return "contact_lost"
@@ -358,20 +415,36 @@ def push_guard(x: State, allowed, cell_size, leg=None, *, params,
 def recontact_guard(x: State, allowed, cell_size, leg=None, *, params,
                     eps_v_cm_s: Optional[float] = None,
                     eps_omega_deg_s: Optional[float] = None,
-                    object_still: bool = False):
+                    object_still=False, disp_cm: Optional[float] = None,
+                    eps_disp_cm: Optional[float] = None):
     """Universal checks, plus the recontact invariant when `object_still`.
 
     What must hold THROUGHOUT a recontact is that the object does not move --
     the target interface cannot be, since acquiring it is the whole point. That
     invariant used to live in ContactEnv as a sticky flag folded into the
     arrival test; as a guard it also becomes visible to the HER validity filter.
+
+    `object_still` selects the READING (D2): "velocity" (or True, the archived
+    spelling) is the instantaneous speed test every Gamma checkpoint on disk was
+    trained against and is DEPRECATED, not deleted. "displacement" thresholds
+    `disp_cm` -- which the caller supplies as the LATCHED RUNNING MAX since
+    episode start, because an instantaneous net displacement would let a policy
+    shove the object and push it back, the same cheat that made w_m=50 teach
+    push to park the object against a wall.
     """
     if not _on_board(x, params.board_w_cm, params.board_h_cm):
         return "off_board"
     if not _force_ok(x, params):
         return "force_limit"
-    if object_still and not object_settled(x, eps_v_cm_s, eps_omega_deg_s):
-        return "object_disturbed"
+    if object_still:
+        if str(object_still) == "displacement":
+            if disp_cm is None or eps_disp_cm is None:
+                raise ValueError("object_still='displacement' needs disp_cm and "
+                                 "eps_disp_cm -- the latch lives in the caller")
+            if float(disp_cm) > float(eps_disp_cm):
+                return "object_disturbed"
+        elif not object_settled(x, eps_v_cm_s, eps_omega_deg_s):
+            return "object_disturbed"
     return True
 
 
@@ -403,6 +476,20 @@ K = frozenset(TEMPLATES)
 # policy sees. That is what makes Gamma_l a genuinely multi-valued input and so
 # tests Eq 9's "one shared network instantiates many edges".
 GAMMA_CLASSES = ("push", "pivot", "pinch")
+
+#: Gamma as a CONTACT COUNT (decision D1). The commanded contact FACE is retired:
+#: a 4-way face one-hot breaks at the memo's own second object (sec 3.1's T-shape
+#: has eight edges), has no meaning for a round or conformable body, and does not
+#: extend to 3D. A count is topological, so it survives all of those and needs
+#: only tactile sensing rather than face localization.
+#:
+#: pivot and pinch BOTH collapse to two contacts -- they differ in where the
+#: contacts sit, not how many -- which is exactly the abstraction this buys, and
+#: what tools/probe_gamma_feasible.py measured: one contact is reachable at
+#: 0.425, two at 0.000/0.013, i.e. the classes split at the second contact.
+GAMMA_CONTACT_COUNT = {"free": 0, "push": 1, "pivot": 2, "pinch": 2}
+N_GAMMA_COUNTS = 3       # {0, 1, 2}; the width of the count one-hot in xi
+
 ANCHOR_TOL_CM = 0.3      # "a few mm" -- the contact the successor starts from
 RETRACT_TOL_CM = 2.0     # a retracted finger only needs to be clear
 RETRACT_CLEAR_CM = 3.0   # how far outside the face counts as clear

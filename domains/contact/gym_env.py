@@ -34,10 +34,11 @@ from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_XY,
                                                face_frame)
 from domains.contact.reward import (RewardWeights, arrived_loose, goal_dist,
                                     pose_arrived, step_reward)
-from domains.contact_templates import (GAMMA_CLASSES, Arrival,
+from domains.contact_templates import (GAMMA_CLASSES, GAMMA_CONTACT_COUNT, Arrival,
                                        RECONTACT_OVERSHOOT_GRACE_STEPS, TEMPLATES,
                                        interface_targets, n_variants,
-                                       nearest_face, object_settled,
+                                       nearest_face, object_displacement_cm,
+                                       object_pose, object_settled,
                                        sample_interface)
 
 _WALL_MARGIN_CM = 6.0    # > the object's half-diagonal (~5.8cm) plus a margin
@@ -92,7 +93,9 @@ class ContactEnv(gym.Env):
                 init_gamma_modes: Optional[tuple] = None,
                 rich_obs: bool = False,
                 guard_face=False,
-                guard_object_still: bool = False,
+                guard_contact_count: Optional[int] = None,
+                guard_object_still=False,
+                guard_disp_eps_cm: float = 2.0,
                 portal_goal: bool = False,
                 portal_depth_cm: float = 2.0,
                 portal_clearance_cm: float = 0.5,
@@ -106,6 +109,7 @@ class ContactEnv(gym.Env):
                 restrict_contact_actions: bool = False,
                 push_spawn_along_frac: Optional[float] = None,
                 obs_version: int = 1,
+                xi_gamma_mode: str = "face",
                 omega_max_rad_s: float = 3.0,
                 force_scale_kgcms2: float = 300.0,
                 action_interface: str = "finger_velocity",
@@ -254,7 +258,21 @@ class ContactEnv(gym.Env):
         # makes the goal Eq 13's canonical interface: BOTH fingertip targets in
         # the object's frame plus the desired touching flag for each (6-D). The
         # object's pose is deliberately not in it -- recontact must not move it.
-        self.gamma_goal = bool(gamma_goal)
+        # WIDENED, not replaced (D1): false | true | "count". "count" keeps the
+        # same 6-D goal vector -- so the wire format and every archived
+        # checkpoint's observation Box are untouched -- but grades arrival on
+        # the CONTACT COUNT alone, with no positional tolerance. That is the
+        # target-SET reading of sec 6.1: Gamma_l is a set, the drawn positions
+        # are one member of it, and reaching any member is reaching the set.
+        if isinstance(gamma_goal, str):
+            if gamma_goal not in ("count",):
+                raise ValueError("gamma_goal must be false, true or 'count', "
+                                 f"got {gamma_goal!r}")
+            self.gamma_count_mode = True
+            self.gamma_goal = True
+        else:
+            self.gamma_count_mode = False
+            self.gamma_goal = bool(gamma_goal)
         if self.gamma_goal and template != "recontact":
             raise ValueError("gamma_goal is recontact-only: it is the template "
                              "whose target set IS another template's initiation set")
@@ -289,10 +307,37 @@ class ContactEnv(gym.Env):
                              f"'adjacent', got {guard_face!r}")
         self.guard_face = bool(guard_face)
         self.guard_face_adjacent = guard_face == "adjacent"
-        self.guard_object_still = bool(guard_object_still)
+        # TASK key (it changes what counts as a violation, so it changes what
+        # success is), deliberately SEPARATE from xi_gamma_mode, which is an
+        # INTERFACE key. Telling the policy a count and enforcing a count are
+        # two different claims and a sweep has to be able to move one without
+        # the other. None keeps push's historical "the other finger must not
+        # touch" and is omitted from the digest at its default.
+        self.guard_contact_count = (None if guard_contact_count is None
+                                    else int(guard_contact_count))
+        # WIDENED, not replaced (D2): false | "velocity" (or true, the archived
+        # spelling) | "displacement". `velocity` is DEPRECATED and kept because
+        # every archived Gamma checkpoint was trained against it; deleting it
+        # would strand them.
+        if guard_object_still is True:
+            self.guard_object_still = "velocity"
+        elif guard_object_still is False or guard_object_still is None:
+            self.guard_object_still = False
+        else:
+            if guard_object_still not in ("velocity", "displacement"):
+                raise ValueError("guard_object_still must be false, true, "
+                                 "'velocity' or 'displacement', got "
+                                 f"{guard_object_still!r}")
+            self.guard_object_still = str(guard_object_still)
         if self.guard_object_still and template != "recontact":
             raise ValueError("guard_object_still is recontact-only: push exists "
                              "precisely to move the object")
+        self.guard_disp_eps_cm = float(guard_disp_eps_cm)
+        # Latched running max of object displacement since reset, and the pose it
+        # is measured from. Re-read every episode -- a cached per-episode value
+        # is silent corruption, not a crash.
+        self._obj_ref_pose = None
+        self._max_disp_cm = 0.0
         self.portal_goal = bool(portal_goal)
         if self.portal_goal and template != "push":
             raise ValueError("portal_goal is push-only")
@@ -326,6 +371,22 @@ class ContactEnv(gym.Env):
             raise ValueError("obs_version=2 requires rich_obs=true: the point "
                              "of v2 is a single state+xi head shared by every "
                              "template")
+        # WHAT xi's Gamma slot ENCODES. An INTERFACE key like obs_version: it
+        # changes what the policy is told, not the task. "face" is the 4-way
+        # one-hot every archived checkpoint trained against; "count" is D1's
+        # 3-way contact count. Width is unchanged at N_XI_V2 either way -- the
+        # count occupies three of the face's four slots and zeroes the fourth --
+        # so a `count` policy and a `face` policy share one observation Box and
+        # SB3's check_for_correct_spaces still lets both load.
+        self.xi_gamma_mode = str(xi_gamma_mode)
+        if self.xi_gamma_mode not in ("face", "count"):
+            raise ValueError("xi_gamma_mode must be 'face' or 'count', got "
+                             f"{xi_gamma_mode!r}")
+        if self.xi_gamma_mode == "count" and self.obs_version < 2:
+            # v1's xi is a different 12-wide layout kept only for replay. Adding
+            # a second count encoding there would be a fourth thing to keep in
+            # step for no arm that needs it.
+            raise ValueError("xi_gamma_mode=count requires obs_version=2")
         self.omega_max_rad_s = float(omega_max_rad_s)
         self.force_scale_kgcms2 = float(force_scale_kgcms2)
         self._scales = (
@@ -697,6 +758,24 @@ class ContactEnv(gym.Env):
             lo, hi = max(lo, min(t0, t1)), min(hi, max(t0, t1))
         return (lo, hi) if hi > lo else None
 
+    @staticmethod
+    def _ray_passes_portal(obj_xy, u, length, portal) -> bool:
+        """Does the straight segment obj_xy -> obj_xy + length*u cross `portal`?
+
+        ONE definition, called by BOTH push samplers. It used to live only in
+        the forward sampler, so `_sample_push_edge_reverse` -- the one
+        curriculum_mode=band selects -- handed 73.5% of crossing resets a goal
+        with no straight-line path the moment portal_goal was turned off.
+        Latent since v32 and hidden only because every sweep pinned
+        portal_goal=true, which made the goal BE the doorway.
+        """
+        if abs(u[0]) < 1e-9:
+            return False
+        t = (portal.x - obj_xy[0]) / u[0]
+        if not 0.0 <= t <= length:
+            return False
+        return bool(portal.y_lo <= obj_xy[1] + t * u[1] <= portal.y_hi)
+
     def _sample_goal_in_push_cone(self, room, obj_xy, push_dir, portal=None, cap=None):
         """Goal inside the cone the contacted face can actually push into, and
         (cross-room) reachable by a straight path through `portal`. None if the
@@ -724,14 +803,8 @@ class ContactEnv(gym.Env):
             if hi <= lo:
                 continue
             r = float(self._rng.uniform(lo, hi))
-            if portal is not None:
-                if abs(u[0]) < 1e-9:
-                    continue
-                t = (portal.x - obj_xy[0]) / u[0]
-                if not 0.0 <= t <= r:
-                    continue
-                if not portal.y_lo <= obj_xy[1] + t * u[1] <= portal.y_hi:
-                    continue
+            if portal is not None and not self._ray_passes_portal(obj_xy, u, r, portal):
+                continue
             return (float(obj_xy[0] + r * u[0]), float(obj_xy[1] + r * u[1]))
         return None
 
@@ -1042,8 +1115,20 @@ class ContactEnv(gym.Env):
         # (58% of resets needed a retry at level 2). Cheap -- pure arithmetic, no
         # physics -- and unbiased, since every draw is redrawn together. 64 left
         # 1 reset in 600 unresolved, which fell through to the forward sampler at
-        # the WRONG level distribution; 256 leaves none.
-        for attempt in range(256):
+        # the WRONG level distribution; 256 left none on board v1.
+        #
+        # RAISED to 1024 for board v2. Full START-pose randomization
+        # (object_theta_spread_deg=180) makes a crossing edge much harder to
+        # satisfy: the object may only travel along the CONTACTED FACE's inward
+        # normal within the cone, so an arbitrary object heading often cannot
+        # reach a 13cm door offset 34cm in y at all. Measured over 400 resets --
+        # leaks at 256 attempts: spread null 0, spread 90 0, spread 180 THREE.
+        # A leak is not a warning: it falls through to the forward sampler at the
+        # wrong level distribution, i.e. silently trains on a different task.
+        # Raising the cap only changes draws that would otherwise have leaked, so
+        # every non-leaking config keeps its exact RNG sequence -- verified by
+        # replaying 249434216cd2 bit-identically.
+        for attempt in range(1024):
             if th_half is not None:
                 theta = float(self._rng.uniform(-th_half, th_half))
             elif self.object_theta_spread_deg is None:
@@ -1089,6 +1174,13 @@ class ContactEnv(gym.Env):
             span = d_hi - d_lo
             d = float(self._rng.uniform(d_lo + lo_f * span, d_lo + hi_f * span))
             ox, oy = goal_xy[0] - d * u[0], goal_xy[1] - d * u[1]
+            # A crossing edge needs a straight path THROUGH the doorway, not just
+            # a goal in the far room. Gated on `not portal_goal` because that mode
+            # draws the goal inside the portal, where the test is vacuous -- so
+            # every archived portal_goal=true digest stays bit-identical.
+            if portal is not None and not self.portal_goal \
+                    and not self._ray_passes_portal((ox, oy), u, d, portal):
+                continue
             # The ray interval keeps the OBJECT legal; the finger hangs outside it
             # and has to clear the board on its own.
             fx, fy = ox + face_offset[0], oy + face_offset[1]
@@ -1162,9 +1254,27 @@ class ContactEnv(gym.Env):
         v = np.zeros(N_XI_V2, dtype=np.float32)
         v[0 if self.template == "push" else 1] = 1.0
         v[2] = 0.0 if self._active_finger == "L" else 1.0
-        v[3 + int(self._face_idx) % 4] = 1.0
+        if self.xi_gamma_mode == "count":
+            # Three slots of the face's four; v[6] stays exactly zero, which is
+            # what a `count` checkpoint loading against a `face` Box relies on.
+            v[3 + self._commanded_count()] = 1.0
+        else:
+            v[3 + int(self._face_idx) % 4] = 1.0
         v[7 + self._GAMMA_IDX[self._init_gamma]] = 1.0
         return v
+
+    def _commanded_count(self) -> int:
+        """How many contacts THIS edge asks for -- xi's Gamma slot under D1.
+
+        Push is single-finger by construction, so it commands one. Recontact
+        reads it off the TARGET interface class it drew, which is where
+        pivot and pinch collapse together: both want two contacts and differ
+        only in where they sit.
+        """
+        if self.template == "push":
+            return GAMMA_CONTACT_COUNT["push"]
+        cls = self._gamma[0] if self._gamma else self._init_gamma
+        return GAMMA_CONTACT_COUNT[cls]
 
     def _gamma_arrived(self, achieved_goal, desired_goal, tol=None) -> np.ndarray:
         """Per-finger tolerance, per the interface table: the anchoring contact
@@ -1180,6 +1290,14 @@ class ContactEnv(gym.Env):
         """
         ag = np.atleast_2d(np.asarray(achieved_goal, dtype=np.float64))
         dg = np.atleast_2d(np.asarray(desired_goal, dtype=np.float64))
+        if self.gamma_count_mode:
+            # Count mode needs NO tolerance and NO info: the count is read off
+            # the goal vectors themselves, so a relabeled goal is graded by
+            # exactly the rule its own achieved state satisfies. That is what
+            # makes this branch relabel-safe by construction rather than by a
+            # per-transition field that has to be remembered -- the failure that
+            # made 63 GPU-hours of Gamma arms uninterpretable.
+            return self._contact_count(ag) == self._contact_count(dg)
         if tol is None:
             t = self._gamma_tol or {"L": self.arrival_eps, "R": self.arrival_eps}
             tol = np.tile(np.array([[t["L"], t["R"]]], dtype=np.float64),
@@ -1194,12 +1312,27 @@ class ContactEnv(gym.Env):
             ok &= (ag[:, 4 + i] > 0.5) == (dg[:, 4 + i] > 0.5)
         return ok
 
+    @staticmethod
+    def _contact_count(g) -> np.ndarray:
+        """Contacts encoded in a batch of 6-D Gamma goal vectors (slots 4, 5)."""
+        g = np.atleast_2d(np.asarray(g, dtype=np.float64))
+        return (g[:, 4] > 0.5).astype(np.int64) + (g[:, 5] > 0.5).astype(np.int64)
+
     def _gamma_dist(self, achieved_goal, desired_goal) -> float:
         """Worst per-finger distance, for diagnostics and the shaping terms.
 
         The two tolerances differ (anchor 0.3cm vs retracted 2.0cm), so this is
         a reported quantity, not the arrival test -- `_gamma_arrived` is.
+
+        UNDER COUNT MODE THE UNIT CHANGES: there is no positional target, so
+        this returns the count shortfall (in contacts, not cm). Every consumer
+        is a diagnostic or a `w_prog`-style shaping term, both of which only
+        need it to fall as the goal is approached -- but a `min_dist` column in
+        a count-mode eval is contacts, and must not be read as centimetres.
         """
+        if self.gamma_count_mode:
+            return float(abs(int(self._contact_count(achieved_goal)[0])
+                             - int(self._contact_count(desired_goal)[0])))
         ag = np.asarray(achieved_goal, dtype=np.float64).reshape(-1)
         dg = np.asarray(desired_goal, dtype=np.float64).reshape(-1)
         return float(max(np.hypot(ag[2 * i] - dg[2 * i], ag[2 * i + 1] - dg[2 * i + 1])
@@ -1343,6 +1476,13 @@ class ContactEnv(gym.Env):
         silently read finger L's slots only, which is the same slicing mistake
         that made the Gamma arrival test wrong."""
         if self.template == "recontact" and self.gamma_goal:
+            if self.gamma_count_mode:
+                # Same unit change as _gamma_dist, and it has to be the same
+                # rule: this one feeds w_prog's reconstructed shaping term, so a
+                # metric that disagreed with the arrival test would relabel to a
+                # different objective than the rollout optimized.
+                return np.abs(self._contact_count(ag)
+                              - self._contact_count(dg)).astype(np.float64)
             a = np.atleast_2d(np.asarray(ag, dtype=np.float64))
             d = np.atleast_2d(np.asarray(dg, dtype=np.float64))
             return np.maximum(np.hypot(a[:, 0] - d[:, 0], a[:, 1] - d[:, 1]),
@@ -1390,6 +1530,10 @@ class ContactEnv(gym.Env):
         self._close_not_settled_steps = 0
         self._guard_charged = False
         self._object_disturbed = False
+        # Re-read every episode, never cached: the reference is THIS episode's
+        # spawn pose and the latch starts empty.
+        self._obj_ref_pose = object_pose(self._x)
+        self._max_disp_cm = 0.0
         # Episode budget for the settle bonus. Capped so "sit still near the
         # goal forever" cannot out-earn arriving.
         self._settle_credit = float(self.weights.settle_cap)
@@ -1454,12 +1598,29 @@ class ContactEnv(gym.Env):
 
         leg = SimpleNamespace(direction=self._active_finger)
         guard_kw = {}
-        if self.template == "push" and self.guard_face:
-            guard_kw["face"] = int(self._face_idx)
-            guard_kw["allow_adjacent"] = self.guard_face_adjacent
+        if self.template == "push":
+            # MERGE, not elif: guard_face and guard_contact_count are
+            # independent TASK keys and the count arm sets only the second. An
+            # `elif` here would silently drop one whenever both were asked for
+            # -- the same dropped-variable shape as the v16 `iface` bug below.
+            if self.guard_face:
+                guard_kw["face"] = int(self._face_idx)
+                guard_kw["allow_adjacent"] = self.guard_face_adjacent
+            if self.guard_contact_count is not None:
+                guard_kw["commanded_count"] = self.guard_contact_count
         elif self.template == "recontact" and self.guard_object_still:
-            guard_kw = dict(object_still=True, eps_v_cm_s=self.eps_v_cm_s,
-                            eps_omega_deg_s=self.eps_omega_deg_s)
+            # LATCH FIRST, then test: the guard sees the running max since
+            # reset, not this tick's net displacement. Instantaneous net
+            # displacement lets a policy shove the object and push it back.
+            self._max_disp_cm = max(
+                self._max_disp_cm,
+                object_displacement_cm(x_next, self._obj_ref_pose,
+                                       self.params.angular_drag_arm_cm))
+            guard_kw = dict(object_still=self.guard_object_still,
+                            eps_v_cm_s=self.eps_v_cm_s,
+                            eps_omega_deg_s=self.eps_omega_deg_s,
+                            disp_cm=self._max_disp_cm,
+                            eps_disp_cm=self.guard_disp_eps_cm)
         guard_outcome = self._tmpl.guard(x_next, frozenset(), 1.0, leg,
                                          params=self.params, **guard_kw)
         # MERGE, not reassign: an earlier version rebuilt this dict inside the
