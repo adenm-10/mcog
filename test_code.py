@@ -262,6 +262,47 @@ def cmd_static() -> None:
               f"{_t} imports cleanly as a script",
               _r.stderr.strip().splitlines()[-1][:110] if _r.stderr.strip() else "")
 
+    section("ARCHITECTURE.md names no file that does not exist")
+    # A human-facing map that drifts is worse than none: STRUCTURE.md called
+    # tests/probe_edges.py a "deletion path" long after it became F1's next
+    # action, and the label was believed. Backtick-quoted paths only.
+    _arch = open("ARCHITECTURE.md", encoding="utf-8").read()
+    _paths = {m for m in re.findall(r"`([A-Za-z0-9_./]+\.(?:py|sh|md|pdf|yaml))`", _arch)}
+    _missing = sorted(p_ for p_ in _paths if not os.path.exists(p_))
+    check(not _missing, "every file ARCHITECTURE.md names exists",
+          f"missing: {_missing}" if _missing else f"{len(_paths)} paths checked")
+
+    section("the live scoring chain emits real work, not just imports")
+    # `--help` proves a tool imports; it does not prove the CHAIN runs. The
+    # score_sweep.py ModuleNotFoundError (2026-09-08) was caught by --help only
+    # because the bad import sat at module scope. A wrong --pins, a cell-dir
+    # glob that matches nothing, or a regex that stops matching cell names all
+    # survive --help and produce an empty, silent, successful-looking run.
+    #
+    # So: drive the real scorer in --dry-run against a real archived sweep and
+    # assert it emits one well-formed eval_contact.py command per cell x ckpt.
+    # This is the chain finalize.sh fires when a sweep's last task exits.
+    _sweep = "logs/sweep_44379812"
+    if not os.path.isdir(_sweep):
+        check(True, f"live scoring chain SKIPPED ({_sweep} absent)")
+    else:
+        _n_cells = len([d for d in glob.glob(os.path.join(_sweep, "*/"))
+                        if re.search(r"jobid\d+_(\d+)_", d)])
+        _r = subprocess.run(
+            [sys.executable, "tools/score_sweep.py", _sweep,
+             "--out-dir", os.path.join(tempfile.mkdtemp(), "x"), "--dry-run"],
+            capture_output=True, text=True, cwd=".")
+        _cmds = [l for l in _r.stdout.splitlines() if "eval_contact.py" in l]
+        check(_r.returncode == 0, "score_sweep.py --dry-run exits 0",
+              _r.stderr.strip().splitlines()[-1][:110] if _r.stderr.strip() else "")
+        # two checkpoints per cell (model + model_best) is score_sweep's default
+        check(len(_cmds) == 2 * _n_cells,
+              "one eval command per cell x checkpoint",
+              f"{len(_cmds)} commands for {_n_cells} cells (expected {2 * _n_cells})")
+        check(all("eval_ckpt=" in c and "eval_out=" in c and "--pins" not in c
+                  for c in _cmds),
+              "every emitted command is a well-formed eval_contact.py invocation")
+
     section("the untrained floor is built for the algorithm it bounds")
     # rl_algo is an interface key, so a PPO arm and a SAC arm share one
     # benchmark -- but NOT one floor: an untrained PPO reads a different random

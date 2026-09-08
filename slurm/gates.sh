@@ -30,6 +30,22 @@ export JAX_PLATFORMS=cpu XLA_PYTHON_CLIENT_PREALLOCATE=false MPLBACKEND=Agg
 # and fixture_eval's tol=0 comparison REQUIRES a fixed reduction order.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 
+# PROVENANCE. This job reads the WORKING TREE at run time, not the commit it was
+# submitted from -- switch branches or edit while it is queued and the result
+# describes a tree that never existed. Recording the tree makes a green result
+# attributable, the same reason _run_cell.sh stamps every training run.
+echo "COMMIT   $(git rev-parse HEAD 2>/dev/null)"
+echo "TREE     $(git rev-parse HEAD^{tree} 2>/dev/null)"
+echo "DIRTY    $(test -n "$(git status --porcelain 2>/dev/null)" && echo yes || echo no)"
+# UNTRACKED FILES COUNT. `git diff HEAD` alone does not see them, so two runs
+# whose only difference was a new untracked file hashed IDENTICALLY -- caught
+# 2026-09-08 when a red run and the green run that fixed it shared a DIFF_SHA.
+echo "DIFF_SHA $( { git diff HEAD 2>/dev/null; \
+                    git ls-files --others --exclude-standard -z 2>/dev/null \
+                      | xargs -0r sha256sum; } | sha256sum | cut -c1-16)"
+echo "HOST     $(hostname)   $(date -Iseconds)"
+echo
+
 D=$(mktemp -d)
 run () { "${@:2}" > "$D/$1.log" 2>&1; echo "$?" > "$D/$1.rc"; }   # never aborts
 

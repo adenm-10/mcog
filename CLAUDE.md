@@ -7,6 +7,15 @@ planning. Python 3.11, conda env `tsmc`, run from repo root.
 **Read before acting:** `status.md` (current state, gotchas, reference numbers) ->
 `docs/TODO.md` (open work, ORDER OF WORK first) -> `docs/STRUCTURE.md` (repo map, layering,
 gates). Those files hold what is true *today*; this one holds what is true every time.
+
+**Two audiences, and they must not be merged.** `ARCHITECTURE.md` and
+`RESEARCH_LOG.md` (repo root) are written for a HUMAN: shape, information flow,
+and what each experiment answered. The four files above are written for a
+SESSION: every gotcha and every measured number. The human-facing pair carries
+NO measured numbers and NO protocol strings -- it links instead. Keep it that
+way; a third copy of a number is how this project's worst bugs start. When a
+fact changes, update the file that OWNS it and check whether the pointer still
+reads true.
 A handoff doc's "confirmed on disk" is a claim, not a fact — verify by reading the file.
 
 ## The memo is the reference
