@@ -126,6 +126,29 @@ ${BOARD_V2_PORTALS} ${BOARD_V2_EVAL}"
 #     benchmark, which is the property a band curriculum has to have.
 BOARD_V2_SAME_ROOM_SCHEDULE="same_room_goal_prob=[1.0,0.85,0.65,0.5]"
 
+#   curriculum_threshold  0.6 -> 0.4, and this is a CORRECTION, not a preference:
+#     0.6 is UNREACHABLE on board v2, so the curriculum could never advance.
+#     Push's measured rotation authority is a median 1.8deg per episode (p90
+#     7.0), so a goal demanding more than the 22.5deg tolerance is effectively
+#     out of reach. Measured fraction of goals that demand it:
+#         board v1 level 0   0.38   -> local-success ceiling ~0.61 vs threshold 0.60
+#         board v2 level 0   0.49   -> local-success ceiling ~0.50 vs threshold 0.60
+#     Board v1 cleared the bar by 0.01. Board v2 cannot clear it at all.
+#
+#     THE CAUSE IS A CHANGE WE MADE ON PURPOSE. portal_goal=false moved crossing
+#     goals out of the doorway, which also removed _sample_portal_pose's narrow
+#     admissible heading band (+/-28.1deg for board v1's gap); every goal now
+#     draws from the full +/-45deg theta_goal_window_deg.
+#
+#     theta_goal_window_deg is deliberately NOT narrowed to compensate.
+#     ORIENTATION IS THE ONLY SURVIVING GRADED AXIS (Sweep B: ctl's distance
+#     spread collapsed to 0.083 while the orientation split still carries
+#     0.12-0.30), and contact_descriptors is being built on it. Removing the
+#     orientation demand would defeat the calibration this board exists to enable.
+#     The ~0.50 ceiling is fine for the BENCHMARK -- Bar 1 asks for >=0.40 -- it
+#     was only ever the ADVANCE threshold that was mis-set for this board.
+BOARD_V2_CURRIC_THRESHOLD="curriculum_threshold=0.4"
+
 # NOTE the unbraced $_sr. `${VAR/pat/${OTHER}}` does NOT work in bash: the inner
 # expansion's closing brace terminates the OUTER one, the substitution silently
 # does not apply, and training would run the benchmark's 0.5 at every level --
@@ -134,11 +157,17 @@ BOARD_V2_SAME_ROOM_SCHEDULE="same_room_goal_prob=[1.0,0.85,0.65,0.5]"
 _sr="${BOARD_V2_SAME_ROOM_SCHEDULE}"
 BOARD_V2_TRAIN_PINS="${BOARD_V2_PINS/curriculum_levels=null/curriculum_levels=4}"
 BOARD_V2_TRAIN_PINS="${BOARD_V2_TRAIN_PINS/same_room_goal_prob=0.5/$_sr}"
+BOARD_V2_TRAIN_PINS="${BOARD_V2_TRAIN_PINS} ${BOARD_V2_CURRIC_THRESHOLD}"
 unset _sr
 
 case "${BOARD_V2_TRAIN_PINS}" in
   *"curriculum_levels=4"*) ;;
   *) echo "pins_board_v2.sh: curriculum_levels flip did not apply" >&2
+     return 1 2>/dev/null || exit 1 ;;
+esac
+case "${BOARD_V2_TRAIN_PINS}" in
+  *"curriculum_threshold=0.4"*) ;;
+  *) echo "pins_board_v2.sh: advance threshold missing" >&2
      return 1 2>/dev/null || exit 1 ;;
 esac
 case "${BOARD_V2_TRAIN_PINS}" in
