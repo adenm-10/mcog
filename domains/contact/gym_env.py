@@ -448,7 +448,39 @@ class ContactEnv(gym.Env):
         # cross-room-only curriculum that is almost always still the source room
         # (measured: 94/100 episodes never leave it), so the sampled goal
         # distribution was far off what HER teaches implicitly.
-        self.same_room_goal_prob = float(same_room_goal_prob)
+        # WIDENED, not replaced: a scalar (bit-identical to every archived run)
+        # or a PER-LEVEL schedule of length curriculum_levels.
+        #
+        # WHY A SCHEDULE IS NEEDED AT ALL, and it is measured. _LEVEL_WINDOWS are
+        # fractions of the edge's REACHABLE RANGE, so the reverse curriculum ramps
+        # difficulty relative to the board rather than in absolute centimetres.
+        # On board v1 that gave a level-0 median goal distance of 4.6cm; on board
+        # v2 the same fractions give 15.4cm, i.e. the EASIEST rung is harder than
+        # board v1's hardest. Worse, with 50% crossings the ramp is nearly INERT:
+        # level 0 median 15.4cm against level 3's 16.4cm, because a crossing edge
+        # has an intrinsically large minimum distance -- there is no such thing as
+        # a SHORT crossing -- so crossings pin the distribution at every level.
+        # That is the same "measured inert" failure that deleted the nested ramp.
+        #
+        # push_range_max_cm is NOT the lever: capping the far end below a
+        # crossing's minimum makes d_hi <= d_lo, so every crossing draw is
+        # rejected and the sampler LEAKS (measured 310 leaks in 300 resets).
+        # The lever is WHICH EDGES are drawn. Same-room only at level 0 gives a
+        # 2.2cm median and a real ramp to 4.2cm by level 3.
+        if np.isscalar(same_room_goal_prob) or same_room_goal_prob is None:
+            self.same_room_goal_prob = float(same_room_goal_prob or 0.0)
+            self._same_room_schedule = None
+        else:
+            sched = tuple(float(x) for x in same_room_goal_prob)
+            if self.curriculum_levels is not None and len(sched) != self.curriculum_levels:
+                raise ValueError(
+                    f"same_room_goal_prob has {len(sched)} levels but "
+                    f"curriculum_levels={self.curriculum_levels}")
+            self._same_room_schedule = sched
+            # The BENCHMARK (curriculum_levels=null) is the full task, so it takes
+            # the LAST entry -- the same rule _level_window uses when it returns
+            # (0.0, 1.0) rather than a band.
+            self.same_room_goal_prob = sched[-1]
         # Push only: clamp the active finger's outward-normal velocity so it
         # cannot open the contact gap faster than the object recedes. Aimed at
         # push's dominant failure mode, contact_lost -- with one circle on one
@@ -908,7 +940,8 @@ class ContactEnv(gym.Env):
         """
         n = self._board.n_regions
         src = int(self._rng.randint(n))
-        if self.same_room_goal_prob > 0.0 and self._rng.uniform() < self.same_room_goal_prob:
+        p_same = self._same_room_prob()
+        if p_same > 0.0 and self._rng.uniform() < p_same:
             dst = src
         else:
             dst = int(self._rng.choice(sorted(self._board.adjacency()[src])))
@@ -1076,6 +1109,13 @@ class ContactEnv(gym.Env):
     # distance including the near bins, so the final training distribution has
     # to be the benchmark's or the last level introduces a train/test mismatch.
     _LEVEL_WINDOWS = ((0.00, 0.35), (0.15, 0.60), (0.35, 0.85), (0.00, 1.00))
+
+    def _same_room_prob(self) -> float:
+        """This level's P(goal room == source room). Constant unless a schedule
+        was given; see the schedule's rationale at its assignment."""
+        if self._same_room_schedule is None or self.curriculum_levels is None:
+            return self.same_room_goal_prob
+        return self._same_room_schedule[self._curr_level]
 
     def _level_window(self):
         """(near, far) as fractions of the edge's reachable distance range."""

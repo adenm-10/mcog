@@ -1740,6 +1740,66 @@ def cmd_contact() -> None:
               f"spread={_spread}: the rejection loop never exhausts its attempts",
               f"{_bv.curriculum_leaks} leaks -- raise the cap, do not ship this")
 
+    section("the band curriculum ramps the EDGE MIX, not just the distance")
+    # _LEVEL_WINDOWS are fractions of the edge's REACHABLE RANGE, so difficulty
+    # ramps relative to the board rather than in absolute cm. On board v1 that
+    # gave a level-0 median goal distance of 4.6cm; the same fractions on board
+    # v2 give 15.4cm -- the EASIEST rung harder than board v1's hardest. And with
+    # 50% crossings the ramp is nearly INERT (15.4 -> 16.4cm across four levels),
+    # because a crossing edge has an intrinsically large minimum distance: there
+    # is no such thing as a SHORT crossing. A 200k smoke caught it -- the
+    # curriculum never left level 0 in 13 diag evals.
+    _SCHED = [1.0, 0.85, 0.65, 0.5]
+
+    def _lvl_dists(env, lvl, n=120):
+        env._curr_level = lvl
+        out = []
+        for _s in range(n):
+            _o, _ = env.reset(seed=_s + 1000 * lvl)
+            out.append(float(np.hypot(*(_o["desired_goal"][:2]
+                                        - _o["achieved_goal"][:2]))))
+        return np.array(out)
+
+    _bv = _board_v2(object_theta_spread_deg=180.0, curriculum_levels=4,
+                    same_room_goal_prob=_SCHED)
+    _meds = [float(np.median(_lvl_dists(_bv, _l))) for _l in range(4)]
+    check(all(b > a for a, b in zip(_meds, _meds[1:])),
+          "the schedule makes level difficulty MONOTONE in goal distance",
+          f"medians {[round(m, 1) for m in _meds]}cm")
+    check(_meds[0] < 5.0,
+          "level 0 is genuinely easy (board v1's level 0 was 4.6cm)",
+          f"{_meds[0]:.1f}cm -- a flat curriculum is what stalled the smoke")
+    check(_bv.curriculum_leaks == 0,
+          "the schedule introduces no sampler leaks", f"{_bv.curriculum_leaks}")
+
+    # THE BENCHMARK TAKES THE LAST ENTRY. curriculum_levels=null is the full task
+    # and must resolve to the SAME scalar the digest was computed with, or the
+    # sweep is scored on a different reset distribution than it trained toward.
+    _bb = _board_v2(object_theta_spread_deg=180.0, curriculum_levels=None,
+                    same_room_goal_prob=_SCHED)
+    check(_bb.same_room_goal_prob == _SCHED[-1],
+          "curriculum_levels=null resolves the schedule to its LAST entry",
+          f"{_bb.same_room_goal_prob}")
+
+    # A SCALAR IS BIT-IDENTICAL. Every archived run passed a float, and widening
+    # the key must not touch them.
+    _bs = _board_v2(object_theta_spread_deg=180.0, curriculum_levels=4,
+                    same_room_goal_prob=0.5)
+    check(_bs._same_room_schedule is None and _bs.same_room_goal_prob == 0.5,
+          "a scalar same_room_goal_prob keeps the historical constant path")
+    _a = [tuple(np.round(_bs.reset(seed=_s)[0]["desired_goal"], 12)) for _s in range(60)]
+    _bs2 = _board_v2(object_theta_spread_deg=180.0, curriculum_levels=4,
+                     same_room_goal_prob=0.5)
+    _b = [tuple(np.round(_bs2.reset(seed=_s)[0]["desired_goal"], 12)) for _s in range(60)]
+    check(_a == _b, "the scalar path is deterministic and unchanged")
+
+    try:
+        _board_v2(curriculum_levels=4, same_room_goal_prob=[1.0, 0.5])
+        check(False, "a schedule of the wrong length raises")
+    except ValueError:
+        check(True, "a schedule of the wrong length raises",
+              "silently padding it would train a different ramp than the header claims")
+
     section("D1: Gamma as a contact COUNT, and the face encoding it retires")
     from domains.contact.planar_fingertips import IDX_CONTACT as _IDXC
     from domains.contact_templates import GAMMA_CONTACT_COUNT as _GCC

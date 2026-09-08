@@ -92,9 +92,57 @@ curriculum_mode=band curriculum_levels=null \
 theta_tol_deg=22.5 theta_goal_window_deg=45.0 push_spawn_along_frac=null \
 ${BOARD_V2_PORTALS} ${BOARD_V2_EVAL}"
 
-# The TRAINING form differs from the benchmark form in exactly one key:
-# curriculum_levels. The benchmark is the reverse sampler at FULL range (null),
-# which is what every arm's last curriculum level trains on; training ramps
-# through 4 levels. Keeping them one string apart is what stops a scorer from
-# accidentally benchmarking on level 0.
+# The TRAINING form differs from the benchmark form in exactly TWO keys, and the
+# BENCHMARK's values are the ones inside the env digest.
+#
+#   curriculum_levels    null (the reverse sampler at FULL range, which is what
+#                        every arm's last level trains on) vs 4.
+#
+#   same_room_goal_prob  0.5 (the task) vs a PER-LEVEL SCHEDULE.
+#     MEASURED, and it is why board v2 needs a schedule where board v1 did not.
+#     _LEVEL_WINDOWS are fractions of the edge's REACHABLE RANGE, so the reverse
+#     curriculum ramps difficulty RELATIVE TO THE BOARD, not in absolute cm. On
+#     board v1 level 0 had a 4.6cm median goal distance; the same fractions on
+#     board v2 give 15.4cm -- the EASIEST rung harder than board v1's hardest.
+#     And with 50% crossings the ramp is nearly INERT (level 0 15.4cm against
+#     level 3's 16.4cm), because a crossing edge has an intrinsically large
+#     minimum distance: there is no such thing as a SHORT crossing, so crossings
+#     pin the distribution at every level. That is the same "measured inert"
+#     failure that deleted the nested ramp.
+#
+#     CAUGHT BY THE 200k SMOKE (job 45439094): ctl's curriculum never left level
+#     0 across 13 diag evals, local success 0.00-0.06 against a 0.6 advance
+#     threshold, full-task eval 0.000 -- before ~220 GPU-hours went into it.
+#
+#     push_range_max_cm is NOT the lever: capping the far end below a crossing's
+#     minimum makes d_hi <= d_lo, so every crossing draw is rejected and the
+#     sampler LEAKS (measured 310 leaks in 300 resets). The lever is WHICH EDGES
+#     are drawn. This schedule measures:
+#         level 0  med  2.2cm  p90  5.6  crossing 0.00
+#         level 1  med  6.0cm  p90 26.0  crossing 0.17
+#         level 2  med 12.5cm  p90 35.4  crossing 0.36
+#         level 3  med 16.4cm  p90 35.3  crossing 0.48
+#     i.e. push locally first, then learn to cross -- and the LAST level IS the
+#     benchmark, which is the property a band curriculum has to have.
+BOARD_V2_SAME_ROOM_SCHEDULE="same_room_goal_prob=[1.0,0.85,0.65,0.5]"
+
+# NOTE the unbraced $_sr. `${VAR/pat/${OTHER}}` does NOT work in bash: the inner
+# expansion's closing brace terminates the OUTER one, the substitution silently
+# does not apply, and training would run the benchmark's 0.5 at every level --
+# exactly what this schedule exists to avoid. The asserts below are what keep a
+# silent no-op from becoming a sweep trained on a different task than its header.
+_sr="${BOARD_V2_SAME_ROOM_SCHEDULE}"
 BOARD_V2_TRAIN_PINS="${BOARD_V2_PINS/curriculum_levels=null/curriculum_levels=4}"
+BOARD_V2_TRAIN_PINS="${BOARD_V2_TRAIN_PINS/same_room_goal_prob=0.5/$_sr}"
+unset _sr
+
+case "${BOARD_V2_TRAIN_PINS}" in
+  *"curriculum_levels=4"*) ;;
+  *) echo "pins_board_v2.sh: curriculum_levels flip did not apply" >&2
+     return 1 2>/dev/null || exit 1 ;;
+esac
+case "${BOARD_V2_TRAIN_PINS}" in
+  *"same_room_goal_prob=[1.0,0.85,0.65,0.5]"*) ;;
+  *) echo "pins_board_v2.sh: same_room schedule flip did not apply" >&2
+     return 1 2>/dev/null || exit 1 ;;
+esac
