@@ -230,6 +230,18 @@ def cmd_static() -> None:
           "xi_gamma_mode is not ALSO in stamp_omit_if_default",
           "an interface key is already excluded at every value, not just its default")
 
+    section("pymunk is confined to one module")
+    # STRUCTURE.md claimed this was "enforced by cmd_layering". It was not:
+    # cmd_layering only asserts option_graph/ is pymunk-free, which says nothing
+    # about domains/. The confinement was TRUE and UNGATED -- exactly the class
+    # of claim this repo keeps discovering was never checked. Gated 2026-09-08,
+    # when planar_fingertips.py and physics.py merged into world.py.
+    _pym = sorted(p_ for p_ in glob.glob("domains/**/*.py", recursive=True)
+                  if re.search(r"^\s*import pymunk", open(p_, encoding="utf-8").read(), re.M))
+    check(_pym == ["domains/contact/world.py"],
+          "domains/contact/world.py is the only module importing pymunk",
+          f"got {_pym}")
+
     section("every tool is invocable the way production invokes it")
     # score_sweep.py imported domains.contact.keys but ran as
     # `python tools/score_sweep.py`, so sys.path[0] was tools/ and the repo root
@@ -533,7 +545,7 @@ def cmd_geometry() -> None:
 
 def _contact_env(**kw):
     from domains.contact.gym_env import ContactEnv
-    from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+    from domains.contact.world import PlanarFingertipParams, Portal
     params = PlanarFingertipParams(board_w_cm=50.0, board_h_cm=30.0,
                                    portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),))
     return ContactEnv(template="push", params=params, seed=0, require_settled=False,
@@ -545,7 +557,7 @@ def _contact_env_t(template: str, **kw):
     push-only and raise on recontact, so they are added per template rather
     than shared -- which is also why _contact_env stays push-shaped."""
     from domains.contact.gym_env import ContactEnv
-    from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+    from domains.contact.world import PlanarFingertipParams, Portal
     params = PlanarFingertipParams(board_w_cm=50.0, board_h_cm=30.0,
                                    portals=(Portal(x=25.0, y_lo=5.0, y_hi=25.0),))
     if template == "push":
@@ -571,7 +583,7 @@ def cmd_contact() -> None:
     import math
 
     import numpy as np
-    from domains.contact.planar_fingertips import face_frame
+    from domains.contact.world import face_frame
 
     section("face_frame: outward normal on each face, unrotated")
     for finger, want, lab in (((10.0, 0.0), (1.0, 0.0), "+x"),
@@ -597,7 +609,7 @@ def cmd_contact() -> None:
     check(base == again, "finger_velocity is deterministic across two envs")
 
     section("_restrict_push_action is bit-identical after the face_frame refactor")
-    from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+    from domains.contact.world import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                    IDX_OBJ_VEL, IDX_OBJ_XY)
 
     def _ref(env, x, active, a):
@@ -651,7 +663,7 @@ def cmd_contact() -> None:
     for _ in range(60):
         env.step(np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32))
         x, side = env._x, env._active_finger
-        from domains.contact.planar_fingertips import (IDX_FINGER_VEL, IDX_FINGER_XY,
+        from domains.contact.world import (IDX_FINGER_VEL, IDX_FINGER_XY,
                                                        IDX_OBJ_HEADING, IDX_OBJ_VEL,
                                                        IDX_OBJ_XY)
         theta = float(np.arctan2(x[IDX_OBJ_HEADING][1], x[IDX_OBJ_HEADING][0]))
@@ -668,7 +680,7 @@ def cmd_contact() -> None:
           f"worst (v-v_obj).n = {worst_gap:+.3f}")
 
     section("friction_cone ties the tangential budget to the push")
-    from domains.contact.planar_fingertips import (ContactFrameCommand,
+    from domains.contact.world import (ContactFrameCommand,
                                                    _tangential_speed)
     mu, v_max = 0.75, 20.0
     def _cone(push, slide):
@@ -746,7 +758,7 @@ def cmd_contact() -> None:
           "60 resets")
 
     section("gap_assist is an assist, and off is a real change")
-    from domains.contact.planar_fingertips import (IDX_FINGER_XY, IDX_OBJ_HEADING,
+    from domains.contact.world import (IDX_FINGER_XY, IDX_OBJ_HEADING,
                                                    IDX_OBJ_XY)
     sig2 = inspect.signature(ContactEnv.__init__).parameters
     check(sig2["gap_assist"].default is True,
@@ -820,7 +832,7 @@ def cmd_contact() -> None:
           "after rotation the active finger still sits on its face's outward normal",
           f"worst off-normal residual {worst:.2e} cm")
     try:
-        from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+        from domains.contact.world import PlanarFingertipParams, Portal
         ContactEnv(template="push", seed=0, require_settled=False,
                    params=PlanarFingertipParams(
                        board_w_cm=50.0, board_h_cm=30.0,
@@ -917,7 +929,7 @@ def cmd_contact() -> None:
     # these call the real functions on real snapshots, not an import check.
     import tempfile
 
-    from domains.contact.physics import to_snapshot
+    from domains.contact.world import to_snapshot
     from domains.contact import visualize as V
     env = _contact_env()
     env.reset(seed=4242)
@@ -1062,7 +1074,7 @@ def cmd_contact() -> None:
     section("guards enforce the CONTACT MODE, not just 'is touching'")
     from domains.contact_templates import (nearest_face, push_guard,
                                            recontact_guard)
-    from domains.contact.planar_fingertips import IDX_CONTACT, IDX_OBJ_VEL
+    from domains.contact.world import IDX_CONTACT, IDX_OBJ_VEL
     from types import SimpleNamespace
     e = _contact_env(guard_face=True)
     e.reset(seed=7)
@@ -1098,7 +1110,7 @@ def cmd_contact() -> None:
 
     section("portal goals are drawn only from orientations that FIT the gap")
     import math
-    from domains.contact.planar_fingertips import (PlanarFingertipParams as _PP,
+    from domains.contact.world import (PlanarFingertipParams as _PP,
                                                     Portal as _Pt)
     pe = ContactEnv(template="push", seed=0, require_settled=False,
                     push_cone_deg=30.0, same_room_goal_prob=0.0,
@@ -1221,11 +1233,11 @@ def cmd_contact() -> None:
     section("guard_face: adjacent bans the opposite face and nothing else")
     from types import SimpleNamespace as _SNS
 
-    from domains.contact.planar_fingertips import IDX_CONTACT as _IC
-    from domains.contact.planar_fingertips import IDX_FINGER_XY as _IF
-    from domains.contact.planar_fingertips import IDX_NO_CONTACT_STEPS as _INC
-    from domains.contact.planar_fingertips import IDX_OBJ_HEADING as _IH
-    from domains.contact.planar_fingertips import IDX_OBJ_XY as _IO
+    from domains.contact.world import IDX_CONTACT as _IC
+    from domains.contact.world import IDX_FINGER_XY as _IF
+    from domains.contact.world import IDX_NO_CONTACT_STEPS as _INC
+    from domains.contact.world import IDX_OBJ_HEADING as _IH
+    from domains.contact.world import IDX_OBJ_XY as _IO
     from domains.contact_templates import nearest_face as _nf
 
     def _guard_at(env, face_name):
@@ -1382,7 +1394,7 @@ def cmd_contact() -> None:
     # observation, so a goal-derived feature outside this slice goes stale on
     # ~80% of every batch with no error -- the v18 bug. These checks are what
     # make widening obs() safe, so they exist BEFORE the widening.
-    from domains.contact.physics import (OBS_STATE_DIM, goal_derived_slice,
+    from domains.contact.world import (OBS_STATE_DIM, goal_derived_slice,
                                          n_goal_derived, obs_dim)
 
     for pose in (False, True):
@@ -1434,14 +1446,14 @@ def cmd_contact() -> None:
     section("obs v2: one head layout, one normalizer, and the frame fix")
     # Everything here guards a bug that was LIVE and measured, not a
     # hypothetical. See docs/PROGRESS.md 2026-09-02.
-    from domains.contact.physics import N_XI_V2, ObsScales, xi_dim
+    from domains.contact.world import N_XI_V2, ObsScales, xi_dim
 
     # (a) THE NORMALIZER IS THE ONLY PLACE A DIVISOR LIVES.
     # Before ObsScales the scales sat in three scopes and one was a hand-copied
     # duplicate in her_buffer.py kept in step by a comment. A scale that
     # disagrees between obs() and the HER patcher trains the critic on a state
     # that never occurred, which is exactly the v18 failure mode.
-    _phys_src = open("./domains/contact/physics.py", encoding="utf-8").read()
+    _phys_src = open("./domains/contact/world.py", encoding="utf-8").read()
     _obs_body = _phys_src[_phys_src.index("    def obs(self, x, target"):]
     _obs_body = _obs_body[:_obs_body.index("\n    def ")]
     _bare = re.findall(r"/\s*(\d+\.?\d*)", _obs_body)
@@ -1561,9 +1573,9 @@ def cmd_contact() -> None:
     # gamma_goal was instantiated ZERO times in this harness before today.
     # That is how ~63 GPU-hours ran against a broken arrival test.
     from domains.contact.reward import GUARD_OUTCOMES, RewardWeights, step_reward
-    from domains.contact.planar_fingertips import IDX_CONTACT as IDX_CONTACT_T
-    from domains.contact.planar_fingertips import IDX_FINGER_XY as IDX_FINGER_XY_T
-    from domains.contact.planar_fingertips import IDX_OBJ_XY as IDX_OBJ_XY_T
+    from domains.contact.world import IDX_CONTACT as IDX_CONTACT_T
+    from domains.contact.world import IDX_FINGER_XY as IDX_FINGER_XY_T
+    from domains.contact.world import IDX_OBJ_XY as IDX_OBJ_XY_T
     from domains.contact_templates import Arrival
 
     _ge = _contact_env_t("recontact", gamma_goal=True, continuous_gamma=True,
@@ -1715,8 +1727,8 @@ def cmd_contact() -> None:
     # doorway; with portal_goal=false, 73.5% of crossing resets had no
     # straight-line path. Both samplers now call ONE helper.
     from domains.contact.gym_env import ContactEnv as _CE
-    from domains.contact.planar_fingertips import Portal as _P
-    from domains.contact.planar_fingertips import PlanarFingertipParams as _PP
+    from domains.contact.world import Portal as _P
+    from domains.contact.world import PlanarFingertipParams as _PP
 
     def _board_v2(**kw):
         _pp = _PP(board_w_cm=90.0, board_h_cm=60.0,
@@ -1822,7 +1834,7 @@ def cmd_contact() -> None:
               "silently padding it would train a different ramp than the header claims")
 
     section("D1: Gamma as a contact COUNT, and the face encoding it retires")
-    from domains.contact.planar_fingertips import IDX_CONTACT as _IDXC
+    from domains.contact.world import IDX_CONTACT as _IDXC
     from domains.contact_templates import GAMMA_CONTACT_COUNT as _GCC
 
     # pivot and pinch COLLAPSE. That is the whole abstraction: they differ in
@@ -1997,7 +2009,7 @@ def cmd_contact() -> None:
     # transition that the rollout scored ARRIVED was scored NOT-arrived on
     # relabel. Measured on g_two_disp before the fix: the flag latched at a
     # median tick 2 of 400 in 45% of episodes. Assert the CONSTRUCTED case.
-    from domains.contact.planar_fingertips import IDX_OBJ_VEL as _IDXV
+    from domains.contact.world import IDX_OBJ_VEL as _IDXV
     from domains.contact_templates import object_settled as _object_settled
     _dg_env = _contact_env_t("recontact", guard_object_still="displacement",
                              guard_disp_eps_cm=2.0, rich_obs=True,

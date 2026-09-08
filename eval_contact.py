@@ -147,7 +147,7 @@ def rollout(model, env, seed: int, gamma: float,
     # any contact_descriptor built on it, rests on |dtheta|, not on distance.
     dth0 = _theta_err_deg(obs)
     if snapshots is not None:
-        from domains.contact.physics import to_snapshot
+        from domains.contact.world import to_snapshot
         # The overlay is per-episode: reset re-samples the active finger, and
         # the goal is not in the state vector at all.
         overlay = dict(arrival_eps_cm=getattr(env, "arrival_eps", None),

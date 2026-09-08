@@ -23,7 +23,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from domains.contact.gym_env import ContactEnv                     # noqa: E402
-from domains.contact.planar_fingertips import (IDX_OBJ_XY,          # noqa: E402
+from domains.contact.world import (IDX_OBJ_XY,          # noqa: E402
                                                PlanarFingertipParams, Portal)
 
 # The proposed arm config, pinned here so the probe and the launcher cannot

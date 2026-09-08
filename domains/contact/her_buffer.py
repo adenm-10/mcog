@@ -34,7 +34,7 @@ from stable_baselines3.common.type_aliases import DictReplayBufferSamples
 
 # Never hardcode these bounds: physics.py owns them, and the `contact` gate
 # asserts they are obs()'s tail and cover every goal-derived feature.
-from domains.contact.physics import GOAL_DERIVED_SLICE as _TARGET_SLICE
+from domains.contact.world import GOAL_DERIVED_SLICE as _TARGET_SLICE
 
 
 class DonePatchedHerReplayBuffer(HerReplayBuffer):

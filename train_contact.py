@@ -110,7 +110,7 @@ def _make_env(template, seed, horizon, arrival_eps, params, weights,
 def build_env_kwargs(d: dict) -> dict:
     """Every `ContactEnv` kwarg except `template`/`seed`, from a resolved Hydra
     dict. Shared with eval_contact.py so both build the identical env."""
-    from domains.contact.planar_fingertips import PlanarFingertipParams, Portal
+    from domains.contact.world import PlanarFingertipParams, Portal
     from domains.contact.reward import RewardWeights
 
     params = PlanarFingertipParams(
@@ -305,7 +305,7 @@ def main(cfg: DictConfig) -> None:
     # her_buffer.DonePatchedHerReplayBuffer._patch_observations.
     her_buffer_cls = (PushRelabelSafeHerReplayBuffer if template == "push"
                       else DonePatchedHerReplayBuffer)
-    from domains.contact.physics import goal_derived_slice
+    from domains.contact.world import goal_derived_slice
     # Scale and slice come from the ENV, never recomputed here: a divisor that
     # disagrees with obs()'s trains the critic on a state that never occurred.
     # obs_version=1 keeps recontact unpatched, reproducing the archived runs.

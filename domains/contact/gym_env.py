@@ -23,9 +23,9 @@ except ModuleNotFoundError as e:  # pragma: no cover
     ) from e
 
 from domains.contact.board import Board
-from domains.contact.physics import (N_XI, N_XI_V2, OBS_DIM, ObsScales,
+from domains.contact.world import (N_XI, N_XI_V2, OBS_DIM, ObsScales,
                                      Physics, goal_derived_slice, obs_dim)
-from domains.contact.planar_fingertips import (IDX_CONTACT, IDX_FINGER_XY,
+from domains.contact.world import (IDX_CONTACT, IDX_FINGER_XY,
                                                IDX_OBJ_HEADING,
                                                IDX_OBJ_VEL, IDX_OBJ_XY,
                                                IDX_PEAK_FORCE, SLIP_MODELS,

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, FrozenSet, Optional, Sequence, Tuple
 
-from domains.contact.planar_fingertips import Portal
+from domains.contact.world import Portal
 
 Node = int
 Point = Tuple[float, float]
