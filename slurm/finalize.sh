@@ -68,5 +68,5 @@ echo "done: logs/eval/${TAG} and media/${TAG}"
 # sweep's preregistered questions -- Sweep B's were budget-vs-treatment, Sweep
 # C's are an interface ranking -- so a generic auto-figure would render the
 # previous sweep's question against the new sweep's numbers, which is worse than
-# no figure. Write the panels with the reading, and cite tools/figs_v34.py's
+# no figure. Write the panels with the reading, and cite tools/figs.py's
 # palette/load/one_digest rather than re-deriving them.

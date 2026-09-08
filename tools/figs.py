@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Figures for the v34 result: one for push (Sweep A), one for recontact (Sweep D).
+"""Result figures for a scored sweep. One figure set per sweep, selected by name.
 
-    python tools/figs_v34.py [out_dir]        # default media/v34
+    python tools/figs.py v34    [out_dir]   # media/v34: push (Sweep A) + recontact
+    python tools/figs.py sweepB [out_dir]   # media/sweepB: budget, gradient, two-way
+
+Was two files until 2026-09-08. figs_sweepB.py imported the palette, `load` and
+`one_digest` from figs_v34.py, so the shared library was living inside a script
+named after a superseded sweep. Adding a sweep means adding a figure function
+and one dispatch entry, not a new file.
 
 Reads only the scored eval jsons, and REFUSES to plot a panel whose cells
 disagree on `env_digest` -- two success rates measured on different reset
