@@ -4026,3 +4026,117 @@ Read the smoke (job 45439094), then submit Sweep C (12 cells, 2.4M, four rungs)
 and Sweep D (6 cells, 1M, four rungs). Both launchers are written, gated and
 committed, and neither has been submitted. **Start the Stage 1 ladder build in
 parallel -- Result 4 is why it is now the critical path.**
+
+---
+
+## 2026-09-08 (late) — the pre-launch audit: one live bug, and Sweeps C+D submitted
+
+**Question.** Before spending ~250 GPU-hours: are the assumptions in Sweep C and
+Sweep D actually implemented, and are the two experiments valid as written?
+
+**What ran.** A full audit against the *code*, not the headers. Every launcher
+was executed with its exec line stubbed (a one-line `sed`, diffed to prove it),
+so all 18 cells' real `EXTRA_OVERRIDE` strings were read rather than retyped.
+
+### The audit passed on everything it was designed to check
+
+- **All six scoring digests reproduce the on-disk floors exactly**, recomputed
+  through `score_sweep`'s own rule (protocol pins + that cell's IFACE keys from
+  `meta.txt`): `ctl`/`raw`/`obs_v1` -> `98e24e99890f`, `count` -> `b99150951ac7`,
+  `g_one` -> `60c119c9ef02`, `g_two_disp` -> `3b54b18fe084`.
+- **The band curriculum's last level IS the benchmark**, which is the property it
+  has to have: level 3 measures med 17.5cm / p90 36.3 / max 49.3 / crossing 0.483
+  against the benchmark's identical figures. Ramp 0.00 -> 0.13 -> 0.34 -> 0.48
+  crossing. **`curriculum_leaks` = 0** at every level and on the benchmark.
+- **0 of 72 benchmark episodes have a blocked straight-line path** -- the
+  `_ray_passes_portal` fix holds on the real protocol.
+- **The advance threshold is now clearable, and the margin is thin.** Measured
+  fraction of level-0 goals demanding more than the 22.5deg tolerance: **0.492**,
+  so the local-success ceiling is ~0.51 against the corrected 0.4 threshold. The
+  old 0.6 was unreachable. Confirmed live on smoke 45449813: local success
+  reached **0.406 at 180k**, so the first advance costs ~7.5% of a 2.4M budget.
+- **The two smokes are bit-identical at every matched step** (0.062, 0.062,
+  0.000, ... at 4753 ... 89699). An earlier read of "divergence" was wrong --
+  smoke3 was simply 90k behind. `curriculum_threshold` lives in the CALLBACK, not
+  `env_kwargs`, so it cannot move the RNG stream.
+- **`xi_gamma_mode=count` does exactly one thing to the observation**: slots
+  3-6 go from a varying 4-way face one-hot to a constant, active-finger slot 2
+  unchanged. So `count` vs `ctl` is cleanly "retire the face label".
+- **Sweep D excludes same-count pairs by construction**: `g_one` init 0 -> goal 1
+  on 300/300; `g_two_disp` init 0 (138) or 1 (162) -> goal 2, **0/300 satisfied at
+  t=0**, and 54% are the grasp-to-grasp case composition needs.
+- Perfect-goal assertions pass on both templates (push `ag:=dg` -> +10.0;
+  gamma `ag:=dg` -> arrived).
+
+### THE BUG: D2 landed in the guard and not in the HER gate
+
+`guard_object_still="displacement"` moved the still-GUARD to a latched 2cm
+displacement bound. `_her_arrived`'s sticky `object_disturbed` flag was left on
+the instantaneous 0.5cm/s velocity test. **So `step()` and the HER relabel scored
+the same transition differently** -- proven directly, not inferred: a perfect-goal
+transition with the object settled is `arrived` on the rollout path and
+`not arrived` on the relabel path whenever the sticky flag is set.
+
+Measured on `g_two_disp`, 80 random episodes:
+
+| | episodes flag latched | median first latch | ticks with HER off |
+|---|---|---|---|
+| before | 36/80 | tick **2** of 400 | **41.9%** |
+| after | 24/80 | tick 205 of 400 | **0.2%** |
+
+`g_one` is 0/80 either way -- its object never moves -- so **the 0.604 result
+stands and does not need re-running**, and this is also why the bug survived the
+smoke.
+
+This is the seventh instance of the one pattern: the same quantity computed in
+two places with nothing forcing agreement. The fix makes `_max_disp_cm` (already
+a running max) the single reading, so guard and HER gate cannot disagree;
+`guard_object_still="velocity"` keeps the old semantics bit-identically.
+
+**Why the existing gate missed it for a whole sweep.** The "rollout reward ==
+relabeled reward" regression test drives RANDOM actions, where no transition is
+ever a success and both paths agree on 0.0 trivially. The replacement constructs
+the discriminating state -- object moving at 30cm/s but only 0.902cm travelled,
+inside the 2cm bound -- and **fails without the fix** (verified by disabling it).
+This is the "gates are strong at *does the code do what it says* and weak at *did
+this flag do anything*" gap, hit again.
+
+**Floors regenerated after the fix: all six bit-identical**, as expected -- the
+change touches only the relabel path and the floor eval reads the rollout
+predicate. Verified rather than assumed, because the digest does NOT move.
+
+### Two reporting corrections
+
+- **Eq 35 counted only training steps.** The diagnostic eval (32 full-task + 32
+  local episodes every 5000 steps) consumes **2.09x** the training steps on Sweep
+  C and **1.78x** on Sweep D. Real totals: **~89M** and **~17M** environment
+  interactions, not 28.8M and 6M. Both headers corrected.
+- Wall-time projection from the smoke's measured 41.6 steps/s: **16.0h/cell** for
+  Sweep C against a 30h wall.
+
+### Two limitations, recorded not hidden
+
+- **`count` bundles three changes** (xi encoding, `guard_contact_count=1`,
+  `mask_inactive_finger=false`). They are not separable in principle -- a count
+  interface with the second finger masked is not a count interface -- but it
+  means a `count` WIN is attributable and a `count` LOSS is not.
+- **The count guard is inert on the three masked arms.** Measured: max contacts
+  = 1 on 200/200 episodes, 0 `forbidden_contact`. So `score_rungs.sh`'s two-way
+  pass gives `ctl`/`raw`/`obs_v1` numerically identical results under
+  `guard_contact_count=1` -- which is what makes `(count - ctl)` a clean paired
+  comparison, but also means 9 of its 12 cells are re-scored for a known answer.
+
+### Submitted
+
+**Sweep C = job 45467495** (12 cells), **Sweep D = job 45467480** (6 cells), both
+at commit `87b7d3f`, `GIT_DIRTY=no`. Gates 42/27/**290**/172/18.
+
+### Next
+
+Sweep D lands first (~7-13h). Score it BY HAND, per arm, against
+`PINS.<arm>.txt`. For Sweep C the one number to watch at the 600k rung is
+`eval/curriculum_level`: if it is still 0 across all three seeds, the runs are
+training same-room 2.2cm goals and being scored on a 48%-crossing benchmark, and
+the mitigation is a step-based advance fallback in
+`domains/contact/callbacks.py`. **Build the Stage 1 ladder in parallel** -- it is
+the critical path and it needs no experiment.
