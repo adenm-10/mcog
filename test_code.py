@@ -1968,6 +1968,66 @@ def cmd_contact() -> None:
           "(sparse, under guard_object_still=displacement)",
           f"{_mismatch} of {_n} transitions disagreed")
 
+    section("the HER disturbance gate reads the SAME criterion as the guard")
+    # The gate above drives RANDOM actions, so no transition is ever a success
+    # and both paths agree on 0.0 trivially -- which is exactly why it missed
+    # this. D2 moved the GUARD to a latched displacement bound but left
+    # _her_arrived's sticky flag on the instantaneous velocity test, so a
+    # transition that the rollout scored ARRIVED was scored NOT-arrived on
+    # relabel. Measured on g_two_disp before the fix: the flag latched at a
+    # median tick 2 of 400 in 45% of episodes. Assert the CONSTRUCTED case.
+    from domains.contact.planar_fingertips import IDX_OBJ_VEL as _IDXV
+    from domains.contact_templates import object_settled as _object_settled
+    _dg_env = _contact_env_t("recontact", guard_object_still="displacement",
+                             guard_disp_eps_cm=2.0, rich_obs=True,
+                             obs_version=2, gamma_goal="count")
+    _o, _ = _dg_env.reset(seed=41)
+    # THE DISCRIMINATING STATE, constructed rather than hoped for: give the
+    # object a velocity well above eps_v_cm_s while it has travelled ~0cm. The
+    # instantaneous velocity test calls that "disturbed"; the 2cm displacement
+    # bound does not. A random-action rollout almost never produces it, which is
+    # why the gate above this one missed the divergence for a whole sweep.
+    _xd = _dg_env._x.copy()
+    _xd[_IDXV] = (30.0, 0.0)
+    _dg_env._physics.world.write_state(_xd)
+    _dg_env._x = _dg_env._physics.world.read_state()
+    _o, _r, _t, _tr, _inf = _dg_env.step(np.zeros(_dg_env.action_space.shape,
+                                                  dtype=np.float32))
+    _moving = not _object_settled(_dg_env._x, _dg_env.eps_v_cm_s,
+                                  _dg_env.eps_omega_deg_s)
+    check(_moving and _dg_env._max_disp_cm <= _dg_env.guard_disp_eps_cm,
+          "the constructed state IS the discriminating one "
+          "(moving, but inside the displacement bound)",
+          f"moving={_moving} max_disp={_dg_env._max_disp_cm:.3f} eps=2.0")
+    check(bool(_inf["object_disturbed"])
+          == bool(_dg_env._max_disp_cm > _dg_env.guard_disp_eps_cm),
+          "displacement mode: the HER flag IS the guard's own bound, "
+          "not the instantaneous velocity test",
+          f"flag={_inf['object_disturbed']} "
+          f"max_disp={_dg_env._max_disp_cm:.3f} eps=2.0")
+    # A perfect-goal transition must be arrived on BOTH paths whenever the
+    # object is inside the bound -- the divergence was that it was not.
+    _perfect = np.asarray(_o["desired_goal"], dtype=float)[None, :]
+    _clean = {"obj_settled": True, "object_disturbed": False}
+    check(bool(_dg_env._her_arrived(_perfect, _perfect, [_clean])[0]),
+          "a perfect-goal transition inside the bound relabels as ARRIVED")
+
+    # And velocity mode keeps the OLD sticky semantics bit-identically, so every
+    # archived recontact checkpoint still means what it meant.
+    _vel = _contact_env_t("recontact", guard_object_still="velocity",
+                          rich_obs=True, obs_version=2, gamma_goal="count")
+    _vel.reset(seed=41)
+    _saw, _latched = False, False
+    for _ in range(30):
+        _o2, _r2, _t2, _tr2, _i2 = _vel.step(_vel.action_space.sample())
+        if _i2["object_disturbed"]:
+            _latched = True
+        elif _latched:
+            _saw = True          # would mean the flag UN-set, i.e. not sticky
+        if _t2 or _tr2:
+            break
+    check(not _saw, "velocity mode: the flag is still STICKY (unchanged)")
+
     section("count-mode Gamma arrival is the count, and is relabel-safe")
     _cm = _contact_env_t("recontact", gamma_goal="count", rich_obs=True,
                          obs_version=2, xi_gamma_mode="count",

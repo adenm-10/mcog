@@ -106,7 +106,7 @@
 #   - BOTH CHECKPOINTS, and disagreement is itself a verdict. Sweep B's widecone
 #     was +0.118 on model and exactly +0.000 on model_best; an arm that splits
 #     like that has not converged and defers to the curve.
-#   - THE BENCHMARK'S RESOLUTION IS ONE EPISODE IN 60. Two Sweep A/B checkpoints
+#   - THE BENCHMARK'S RESOLUTION IS ONE EPISODE IN 72. Two Sweep A/B checkpoints
 #     that were bit-identical in weights to 9e-4 differed on 3-7 of 48 episodes.
 #     Report the point estimate beside the CI bound.
 #   - EXPECT BOARD V2 TO STILL BE CLIMBING AT 2.4M. Every harder arm in Sweep B
@@ -134,8 +134,12 @@
 # BUDGET AND WALL. 2.4M at Sweep B's MEASURED 18.3h/cell median (range
 # 15.1-20.3) against a 30h wall. ckpt_freq=600000 puts snapshots at 600k/1.2M/
 # 1.8M on disk, so a cell killed at the wall still yields three rungs.
-# Eq 35 accounting: 12 x 2.4M = 28.8M environment interactions, plus 4 untrained
-# floors at zero gradient steps.
+# Eq 35 accounting, MEASURED rather than quoted as the training budget alone:
+# the diagnostic eval (32 full-task + 32 local episodes every 5000 steps) is not
+# free. On smoke 45449813 it consumed 2.09x the TRAINING steps, so a 2.4M cell
+# costs ~7.4M interactions, not 2.4M. Sweep C total ~89M environment
+# interactions (12 x 2.4M train + ~12 x 5.0M eval), plus 4 untrained floors at
+# zero gradient steps. Report the 89M, not the 28.8M (CLAUDE.md, Reporting).
 # ===========================================================================
 
 set -e
@@ -173,8 +177,8 @@ esac
 TEMPLATE="push"
 TOTAL_STEPS=2400000
 CKPT_FREQ=600000
-EVAL_EPS=32   # not 16: the curriculum advance gate compares against 0.6, and
-              # 16 episodes make that a 10-of-16 coin flip.
+EVAL_EPS=32   # not 16: the curriculum advance gate compares against 0.4, and
+              # 16 episodes make that a 6-of-16 coin flip.
 
 EXTRA_OVERRIDE="${BOARD_V2_TRAIN_PINS} ${OBS} ${ACT} ${XI} ${GUARD} \
 ckpt_freq=${CKPT_FREQ} diag_eval_episodes=${EVAL_EPS}"

@@ -1703,7 +1703,19 @@ class ContactEnv(gym.Env):
                 guard_outcome = "overshoot"
             # Sticky: stays set even if the object settles again before arrival.
             obj_settled_now = object_settled(x_next, self.eps_v_cm_s, self.eps_omega_deg_s)
-            self._object_disturbed = self._object_disturbed or not obj_settled_now
+            if self.guard_object_still == "displacement":
+                # ONE definition of "the object moved", shared with the guard.
+                # D2 moved the GUARD to a latched displacement bound and left this
+                # HER gate on the instantaneous velocity test, so the two disagreed:
+                # measured on g_two_disp, the flag latched at a median tick 2 of 400
+                # in 45% of episodes and switched HER off for the rest of each one,
+                # while the guard happily let the episode run. That is the same
+                # rollout-vs-relabel divergence that made 63 GPU-hours of the
+                # previous Gamma arms uninterpretable, reintroduced one layer down.
+                # _max_disp_cm is already a running max, so this stays sticky.
+                self._object_disturbed = self._max_disp_cm > self.guard_disp_eps_cm
+            else:
+                self._object_disturbed = self._object_disturbed or not obj_settled_now
 
         # Latch, so w_m is charged at most once per episode.
         guard_for_reward = guard_outcome

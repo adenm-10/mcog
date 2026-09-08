@@ -77,7 +77,7 @@ BOARD_V2_PORTALS="portals=[{x:30.0,y_lo:10.0,y_hi:23.0},{x:60.0,y_lo:44.0,y_hi:5
 # have a 6.1cm median and crossings a 30.9cm median, so under the old edges ALL
 # FOUR lower bins were pure same-room and every crossing collapsed into "12+" --
 # 11 of 48 in-scope episodes, on a board that is 50/50 by construction.
-# Measured over candidates; [3,8,15,25,35] gives 60 in-scope episodes at 62%
+# Measured over candidates; [3,8,15,25,35] gives 72 in-scope episodes at 67%
 # crossing with a monotone distance spread across the whole 3-51cm range.
 BOARD_V2_EVAL="eval_dist_edges=[3.0,8.0,15.0,25.0,35.0]"
 
@@ -92,8 +92,10 @@ curriculum_mode=band curriculum_levels=null \
 theta_tol_deg=22.5 theta_goal_window_deg=45.0 push_spawn_along_frac=null \
 ${BOARD_V2_PORTALS} ${BOARD_V2_EVAL}"
 
-# The TRAINING form differs from the benchmark form in exactly TWO keys, and the
-# BENCHMARK's values are the ones inside the env digest.
+# The TRAINING form differs from the benchmark form in exactly THREE keys, and
+# the BENCHMARK's values are the ones inside the env digest. curriculum_threshold
+# is the third; it lives in the CALLBACK, not in env_kwargs, so it is not in the
+# digest and cannot move the reset distribution.
 #
 #   curriculum_levels    null (the reverse sampler at FULL range, which is what
 #                        every arm's last level trains on) vs 4.

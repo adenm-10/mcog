@@ -89,8 +89,13 @@
 #   g_one       digest 60c119c9ef02   floor 0.208
 #   g_two_disp  digest 3b54b18fe084   floor 0.000
 #
-# Eq 35 accounting: 6 x 1M = 6M environment interactions, plus 2 untrained
-# floors at zero gradient steps. At Sweep B's measured 7.6h per 1M, ~8h/cell.
+# Eq 35 accounting, MEASURED: the diagnostic eval is not free. On the g_one
+# smoke it consumed 1.78x the TRAINING steps (falling as episodes start
+# ending on arrival), so a 1M cell costs ~2.8M interactions, not 1M. Sweep D
+# total ~17M environment interactions, plus 2 untrained floors at zero
+# gradient steps. Report the 17M, not the 6M (CLAUDE.md, Reporting).
+# Wall: the smoke ran 41.6 steps/s, so ~6.7h/cell at push's horizon; recontact
+# runs horizon=400 so budget up to ~13h against the 18h wall.
 # ===========================================================================
 
 set -e
