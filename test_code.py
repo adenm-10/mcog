@@ -10,6 +10,7 @@ Exit code 0 iff every check passes.
 """
 from __future__ import annotations
 
+import glob
 import os
 import re
 import subprocess
@@ -201,9 +202,9 @@ def cmd_static() -> None:
     from domains.contact.keys import IFACE_KEYS as _IK
     from domains.contact.keys import STAMP_OMIT_IF_DEFAULT as _OMIT
     _re_copy = re.compile(r"(?:iface_keys|IFACE_KEYS)\s*=\s*\(")
-    _regrown = [p_ for p_ in ("./eval_contact.py", "./tools/score_sweep.py",
-                              "./tools/probe_goal_diversity.py",
-                              "./tools/probe_p0_readiness.py")
+    # The two probe tools that used to be on this list were deleted 2026-09-08
+    # (pinned to archived sweeps). Any NEW consumer of the key list belongs here.
+    _regrown = [p_ for p_ in ("./eval_contact.py", "./tools/score_sweep.py")
                 if _re_copy.search(open(p_, encoding="utf-8").read())]
     check(not _regrown,
           "no module has regrown a literal copy of the interface-key list",
@@ -228,6 +229,26 @@ def cmd_static() -> None:
     check("xi_gamma_mode" not in _OMIT,
           "xi_gamma_mode is not ALSO in stamp_omit_if_default",
           "an interface key is already excluded at every value, not just its default")
+
+    section("every tool is invocable the way production invokes it")
+    # score_sweep.py imported domains.contact.keys but ran as
+    # `python tools/score_sweep.py`, so sys.path[0] was tools/ and the repo root
+    # was not importable. It raised ModuleNotFoundError on EVERY finalize.sh and
+    # score.sh invocation while this gate stayed green, because `static` runs
+    # from the repo root where the import happens to work. Landed and shipped in
+    # the same commit that (correctly) collapsed five copies of the key list.
+    #
+    # So the check is not "does it import" -- it is "does it import from the
+    # directory and argv0 production uses". Subprocess, not importlib.
+    for _t in sorted(glob.glob("tools/*.py")):
+        if not re.search(r"^\s*(from|import) +(domains|option_graph|config|checkpoints)",
+                         open(_t, encoding="utf-8").read(), re.M):
+            continue
+        _r = subprocess.run([sys.executable, _t, "--help"],
+                            capture_output=True, text=True, cwd=".")
+        check("ModuleNotFoundError" not in _r.stderr,
+              f"{_t} imports cleanly as a script",
+              _r.stderr.strip().splitlines()[-1][:110] if _r.stderr.strip() else "")
 
     section("the untrained floor is built for the algorithm it bounds")
     # rl_algo is an interface key, so a PPO arm and a SAC arm share one

@@ -15,8 +15,15 @@ import re
 import subprocess
 import sys
 
+# Invoked as `python tools/score_sweep.py` by finalize.sh and score.sh, so
+# sys.path[0] is tools/ and the repo root is NOT importable without this.
+# Omitting it made the import below raise ModuleNotFoundError in every
+# production invocation while `static` (which runs from the repo root) stayed
+# green -- see the "tools are invocable as scripts" gate in test_code.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Change what the policy's outputs MEAN: read per cell, excluded from the digest.
-from domains.contact.keys import IFACE_KEYS
+from domains.contact.keys import IFACE_KEYS  # noqa: E402
 # Change what success IS or which states are visited: pinned, inside the digest.
 TASK_PINS = ("use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true "
              "board_w_cm=50.0 board_h_cm=30.0 min_progress_ticks=1 "
@@ -75,6 +82,11 @@ def main() -> None:
                     help="arm whose checkpoints are also scored under every "
                          "other group's overrides")
     ap.add_argument("--jobs", type=int, default=6)
+    ap.add_argument("--arm", default=None,
+                    help="restrict to cells whose name contains _<arm>_. For a "
+                         "sweep whose arms trained on DIFFERENT tasks there is no "
+                         "common protocol, so each arm is scored against its own "
+                         "PINS.<arm>.txt and the results are never pooled.")
     ap.add_argument("--pins", default=None,
                     help="replace TASK_PINS wholesale, e.g. a cross-room protocol. "
                          "The pins ARE the protocol -- record them next to the numbers.")
@@ -83,6 +95,10 @@ def main() -> None:
 
     os.makedirs(a.out_dir, exist_ok=True)
     cells = cell_dirs(a.sweep)
+    if a.arm:
+        cells = [c for c in cells if f"_{a.arm}_" in f"_{os.path.basename(c.rstrip('/'))}_"]
+        if not cells:
+            raise SystemExit(f"--arm {a.arm!r} matched no cell in {a.sweep}")
 
     # A cell's group is the value it trained with; absent means the config default.
     groups: dict[str, list[str]] = {}
