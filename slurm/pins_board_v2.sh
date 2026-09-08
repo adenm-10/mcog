@@ -71,6 +71,16 @@
 # bash brace-expands [{a,b}] into separate words, in heredocs and sbatch alike.
 BOARD_V2_PORTALS="portals=[{x:30.0,y_lo:10.0,y_hi:23.0},{x:60.0,y_lo:44.0,y_hi:57.0}]"
 
+# EVAL BIN EDGES, pinned here because an eval protocol's parameters belong
+# beside the numbers, not in a launcher comment. Board v1's [3,6,9,12] is WRONG
+# for board v2 and would have silently unbalanced the benchmark: same-room goals
+# have a 6.1cm median and crossings a 30.9cm median, so under the old edges ALL
+# FOUR lower bins were pure same-room and every crossing collapsed into "12+" --
+# 11 of 48 in-scope episodes, on a board that is 50/50 by construction.
+# Measured over candidates; [3,8,15,25,35] gives 60 in-scope episodes at 62%
+# crossing with a monotone distance spread across the whole 3-51cm range.
+BOARD_V2_EVAL="eval_dist_edges=[3.0,8.0,15.0,25.0,35.0]"
+
 BOARD_V2_PINS="use_her=true w_d=0 w_a=0 w_F=0 w_m=0 w_T=0 guard_terminates=true \
 board_w_cm=90.0 board_h_cm=60.0 min_progress_ticks=1 learning_starts=10000 \
 her_n_sampled_goal=4 target_clip=10 disengaged_away_deg=60 \
@@ -80,7 +90,7 @@ angular_drag_arm_cm=3.12 portal_arrival=false portal_goal=false \
 portal_clearance_cm=0.5 guard_face=false rich_obs=true \
 curriculum_mode=band curriculum_levels=null \
 theta_tol_deg=22.5 theta_goal_window_deg=45.0 push_spawn_along_frac=null \
-${BOARD_V2_PORTALS}"
+${BOARD_V2_PORTALS} ${BOARD_V2_EVAL}"
 
 # The TRAINING form differs from the benchmark form in exactly one key:
 # curriculum_levels. The benchmark is the reverse sampler at FULL range (null),

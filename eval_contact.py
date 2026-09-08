@@ -193,6 +193,25 @@ def rollout(model, env, seed: int, gamma: float,
 
     done, steps, succ, touch, ret = False, 0, 0.0, 0, 0.0
     why = "horizon"
+    # THE SECOND SUCCESS PREDICATE, computed alongside the first so both live on
+    # ONE eval and ONE digest. The pose goal is what the policy TRAINS on (it is
+    # well-posed under HER); "left through the correct portal into the adjacent
+    # region" is what a crossing edge inside a route actually has to do. The wall
+    # blocks every other way in, so entering dst IS passing its doorway.
+    # Reported beside the pose number with its own floor -- never pooled with it,
+    # because a random policy shoves the object through an open door and the
+    # crossing floor is an order of magnitude higher.
+    # None on a SAME-ROOM episode, not False: the object starts in the
+    # destination region, so the predicate is trivially true and averaging it
+    # in would report a floor of 1.000 for doing nothing. It is defined only
+    # where "leave through the correct portal" is a question.
+    _board = getattr(env, "_board", None)
+    _dst = _src = None
+    if _board is not None and env.template == "push":
+        _src = _board.region_of(float(ag0[0]), float(ag0[1]))
+        _d = _board.region_of(float(dg[0]), float(dg[1]))
+        _dst = _d if _d != _src else None
+    entered_dst = None if _dst is None else False
     # E3: closest approach and when it happened. A large final_dist means
     # something very different depending on whether min_dist was ever small.
     min_dist, min_tick = d0, 0
@@ -207,6 +226,9 @@ def rollout(model, env, seed: int, gamma: float,
             min_dist, min_tick = dist, steps
         touch += int(float(obs["observation"][OBS_CONTACT[active]]) > 0.5)
         succ = max(succ, float(info.get("is_success", 0.0)))
+        if _dst is not None and not entered_dst:
+            entered_dst = bool(_board.region_of(float(env._x[0]),
+                                                float(env._x[1])) == _dst)
         if term or trunc:
             go = info.get("guard_outcome")
             why = ("arrived" if succ > 0.5 else
@@ -222,6 +244,7 @@ def rollout(model, env, seed: int, gamma: float,
                 final_dist=float(np.hypot(agT[0] - dg[0], agT[1] - dg[1])),
                 min_dist=min_dist, min_tick=min_tick,
                 dth0=dth0, dth_final=_theta_err_deg(obs),
+                entered_dst=entered_dst,
                 **_episode_labels(env, ag0, dg))
 
 

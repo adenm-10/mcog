@@ -30,12 +30,26 @@ python train_contact.py \
   wandb_group="${GROUP:-lean}_${SLURM_ARRAY_JOB_ID}"
 rc=$?
 
-still=$(squeue -h -j "${SLURM_ARRAY_JOB_ID}" -t PENDING,RUNNING -o "%A_%a" \
+# AM I THE LAST TASK STANDING? `-o "%i"`, NOT "%A_%a": on this Slurm %a renders
+# as the ACCOUNT name ("43892866_hankyang_lab"), so the grep matched nothing,
+# `still` never reached 0, and this block silently never ran -- on v29, v32 or
+# v33, leaving 621 orphaned staging files. submit_sweep.sh fixed its own INLINE
+# copy on 2026-09-04; this shared one was still broken until 2026-09-08, which is
+# the same "one behaviour, two copies" defect the fix was about. One copy now.
+still=$(squeue -h -j "${SLURM_ARRAY_JOB_ID}" -t PENDING,RUNNING -o "%i" \
         | grep -v "^${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}$" | wc -l)
-if [ "${still}" -eq 0 ]; then
+# mkdir is atomic, so two tasks finishing in the same instant cannot both submit.
+if [ "${still}" -eq 0 ] && mkdir "${SWEEP_DIR}/.finalized" 2>/dev/null; then
   mkdir -p "${SWEEP_DIR}/slurm_logs"
   find logs/slurm_staging -maxdepth 1 -type f \
        \( -name "${SLURM_ARRAY_JOB_ID}_*.out" -o -name "${SLURM_ARRAY_JOB_ID}_*.err" \) \
        -exec mv -t "${SWEEP_DIR}/slurm_logs/" {} + 2>/dev/null
+  # Score + render as a FOLLOW-ON job, not inline: this cell may be near its own
+  # wall, and scoring 24-60 checkpoints is not free. Only when the launcher asks
+  # for it, so the older launchers that source this file keep their behaviour.
+  if [ -n "${FINALIZE_TAG:-}" ]; then
+    sbatch slurm/finalize.sh "${SWEEP_DIR}" "${FINALIZE_TAG}"
+    [ -n "${RUNG_SCORER:-}" ] && sbatch "${RUNG_SCORER}" "${SWEEP_DIR}"
+  fi
 fi
 exit $rc
