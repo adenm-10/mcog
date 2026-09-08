@@ -96,7 +96,74 @@ nothing, so the hard factors are trained only once the interface is decided.
 - **Primary metric unchanged:** mean success on goals **>=3cm** under BOTH `model` and
   `model_best`. The 5-bin mean carries a 0.150 floor from the 0-3cm bin and is not the number.
 
-## ORDER OF WORK — updated 2026-09-04 (late), PHASE 0 DONE, SWEEP B IN FLIGHT
+## ORDER OF WORK — updated 2026-09-08, PHASE 1 DONE, SWEEPS C+D READY TO SUBMIT
+
+**Sweep B is scored and read (`docs/PROGRESS.md`, 2026-09-08). Phase 1 is built,
+gated and committed (`007e5b1` -> `c2ac8fe`). Nothing is in flight**, so no file
+is frozen. Gates 42/27/279/172/18.
+
+1. **READ THE SMOKE (job 45439094), then submit.** Two 200k cells on board v2,
+   `ctl` and `g_one`. It must show the diag climbing off a 0.000 floor and
+   `curriculum_leaks` at 0. This is the 1.5h check that stands between a
+   task-design mistake and ~220 GPU-hours.
+
+2. **SUBMIT SWEEP C — 12 cells, 2.4M, four rungs.** `slurm/submit_sweep_c.sh`.
+   `ctl` / `count` / `raw` / `obs_v1`, all on board v2, all at obs v2 with
+   `obs_v1` as the contrast. Preregistered verdicts are in the launcher header
+   and are not to be re-litigated after the numbers land. Auto-scores itself via
+   `finalize.sh` + `tools/score_rungs.sh`.
+
+3. **SUBMIT SWEEP D — 6 cells, 1M, four rungs.** `slurm/submit_sweep_d.sh`.
+   `g_one` / `g_two_disp` under contact-count Gamma and the displacement guard.
+   **Score BY HAND, per arm, against `PINS.<arm>.txt`**: the two arms train on
+   different tasks, so there is no single common protocol and `finalize.sh`
+   (which assumes one) is deliberately not wired up.
+
+4. **BUILD THE STAGE 1 CONTACT LADDER — now the CRITICAL PATH, and it needs no
+   experiment.** 4-8 days: a contact bundle, `contact_entry_conditions`,
+   `contact_descriptors`, wiring `contact_hooks` into `calibrate`/`run_eval`, an
+   `eval_harness` adapter. `domains/contact/hooks.py` defines `contact_hooks` and
+   NOTHING CALLS IT.
+
+   **Sweep B changed why this is urgent.** It has been waiting on "push is not
+   good enough"; the actual situation is the reverse — push is now so good that
+   the current board cannot GRADE it. `ctl`'s distance spread went
+   0.278 -> 0.194 -> **0.083** across the rungs and at 2.4M success *rises* with
+   distance. **Build `contact_descriptors` on ORIENTATION** (0.914 inside
+   tolerance vs 0.795 must-rotate; +0.299 on spread's protocol) and calibrate on
+   a HARDER PROTOCOL or an EARLIER RUNG, not on the converged winner. Touches
+   nothing either sweep uses, so it runs in parallel from today.
+
+5. **CONDITIONAL / DEFERRED, each with its reason.**
+   - `raw_count`, 3 cells — only if BOTH `count` and `raw` are adopted.
+   - The full hard task (`guard_face=adjacent`, both fingers free, randomized
+     physics) — after the interface is frozen, so a zero is interpretable. Each
+     factor is a TASK key: own digest, own floor, and per memo sec 5.2 a
+     re-baseline.
+   - PPO + `sac_dense`, 6 cells — a replication that gates no design decision.
+   - The flat baseline is STILL NOT DEFINABLE on a single-edge task, and that is
+     a finding. **The fairness commitment and the composed task are the same
+     piece of work**, which is an argument for doing item 4 sooner.
+
+6. **PREVENTION, partially landed.** `domains/contact/keys.py`,
+   `_ray_passes_portal` and the two `pins_*.sh` files collapsed four
+   "computed twice" pairs this session, and `_run_cell.sh`'s broken last-task
+   check was a fifth. **Still open: gates are strong at "does the code do what it
+   says" and weak at "did this flag do anything at all."** The longest-lived bugs
+   were all silently inert. An "assert this flag changes an observable
+   distribution" mode would convert that class from a two-sweep discovery into a
+   launch-time failure.
+
+7. **Housekeeping.** The 621 orphaned staging files are still orphaned; moving
+   them is a bulk move and NEEDS APPROVAL. `ruff` is still not installed.
+
+**SUPERSEDED 2026-09-08:** the previous ORDER OF WORK items 1-4 (read Sweep B,
+Phase 1 code, and the sweep definitions) are DONE and are recorded above. Item
+1's "if push saturates by 1.8M, drop every later cell to 1.8M" is **REJECTED on
+measurement**: the arm ordering flipped between 1.8M and 2.4M, so 1.8M would have
+ranked `widecone` vs `ctl` backwards. Budget stays 2.4M with four rungs.
+
+## ORDER OF WORK — superseded, kept for the reasoning (2026-09-04 late)
 
 **Sweep B (job 44379812) is 37% done and lands ~2026-09-05 09:00 EDT.** It scores itself.
 **Do NOT edit `eval_contact.py`, `tools/score_sweep.py`, `tools/render_best.py` or anything

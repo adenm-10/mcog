@@ -93,9 +93,9 @@ since `DomainHooks` (executor.py) is already the abstraction boundary.
 ## Gates — run all five before and after every commit
 
 ```bash
-python test_code.py static                                    # 38/38
+python test_code.py static                                    # 42/42
 python test_code.py geometry                                  # 27/27
-python test_code.py contact                                   # 243/243
+python test_code.py contact                                   # 279/279
 python -m tests.test_option_graph all                         # 172/172
 python -m tests.fixture_eval fixtures tests/fixtures_smoke    # 18/18
 ```
@@ -115,7 +115,25 @@ logs/probe/edges_n8_h{35,40,45,50,55,60,70,90}.json      horizon sweep, 16 files
 logs/eval/v32_floor/untrained_*.json                     untrained floor, v32 protocol
 logs/eval/v32_floor/xing_*.json                          the REJECTED portal_arrival variant
 logs/eval/v32_floor/PROTOCOL.md                          the pins, beside the numbers
+logs/eval/board_v2_floor/<arm>/eval.json                 board v2 floors, 6 arms
+logs/eval/board_v2_floor/PROTOCOL.md                     board v2's pins, beside the numbers
 ```
+
+**Board v2 reports TWO predicates over THREE strata**, and they must never be
+pooled: `pose reached` (what the policy trains on) and `entered dst` (what a
+crossing edge in a route has to do), split by same-room / crossing /
+crossing-blocked. `tools/split_floor.py <dir>` prints all of them. Their floors
+differ by an order of magnitude.
+
+**One home per protocol, sourced never retyped:** `slurm/pins_board_v2.sh`
+(push) and `slurm/pins_gamma_ladder.sh` (recontact). Two files because
+`ContactEnv` REFUSES push-only keys on recontact rather than ignoring them, so
+sourcing the wrong one is a hard error instead of a silent wrong task.
+
+**One home for the INTERFACE/TASK split:** `domains/contact/keys.py`. It is
+dependency-free on purpose, so `tools/score_sweep.py` (stdlib-only
+orchestration) can import it -- that was the objection that kept five
+copy-pasted copies alive.
 
 **A floor is specific to (interface, goal space, protocol).** `logs/eval/v29_floor` does not
 apply to v32: the goal mix, damping, doorway width and observation all moved. v32 floor on

@@ -3809,3 +3809,220 @@ checkpoint can answer it.** Half the arms proposed this session died to that que
 
 Read Sweep B first, `ctl` before any arm. Then the Phase 1 code list and the two sweeps in
 `docs/TODO.md`'s ORDER OF WORK.
+
+## 2026-09-08 — SWEEP B READ, PHASE 1 BUILT, and five defects the floors caught
+
+**Question:** read Sweep B against its preregistered verdicts, then build
+everything Sweep C and Sweep D need. No GPU except one 200k smoke.
+
+**What ran:** Sweep B re-scored and re-read from `logs/eval/sweepB*/`; a code
+audit of the hot paths; the Phase 1 code list; six untrained floors; and job
+45439094, a 200k smoke on board v2. Commits `007e5b1` -> `c2ac8fe`.
+Gates 40/27/243/172/18 -> **42/27/279/172/18**.
+
+### Result 1 — Sweep B: push converges for `ctl` and for nothing harder
+
+Primary metric, goals >=3cm, common protocol `249434216cd2`, paired per-episode
+bootstrap over 144 episodes.
+
+| arm | 600k | 1.2M | 1.8M | 2.4M | 2.4M - 1.2M (preregistered) | 2.4M - 1.8M |
+|---|---|---|---|---|---|---|
+| `ctl` | 0.618 | 0.806 | 0.889 | 0.882 | **+0.076** [+0.007,+0.146] | -0.007 |
+| `obsv2` | 0.576 | 0.743 | 0.819 | 0.847 | **+0.104** [+0.021,+0.188] | +0.028 |
+| `widecone` | 0.611 | 0.715 | 0.819 | 0.889 | **+0.174** [+0.090,+0.257] | +0.069 |
+| `spread` | 0.576 | 0.653 | 0.806 | 0.812 | **+0.160** [+0.069,+0.250] | +0.007 |
+
+**The preregistered test fires the "still not converged at 2.4M" branch on all
+four arms.** `ctl` is flat over the last 600k and nothing harder is.
+
+**THE ARM ORDERING FLIPPED BETWEEN 1.8M AND 2.4M**: `widecone` went 2nd -> 3rd ->
+tied -> **1st**. Reading this sweep at 1.8M gets `widecone` vs `ctl` backwards.
+That is now a preregistered instruction in both new launchers.
+
+### Result 2 — the replication check PASSED EXACTLY, and the 0.02 "miss" was a snapshot artifact
+
+`ctl` @600k reproduced 0.618 exactly; @1.2M gave 0.806 against Sweep A's 0.826.
+Chased, because that is the branch the header said to stop on:
+
+| comparison | result |
+|---|---|
+| Sweep A vs B, `model_600000_steps` | **max abs dW = 0.000e+00**, 32 tensors, 3 seeds |
+| Sweep A vs B, `model_1200000_steps` | **max abs dW = 0.000e+00** |
+| Sweep A `model.zip` vs B's 1.2M rung | 7.6e-4 .. 9.4e-4; 3-7 of 48 episodes flip |
+
+**Training is bit-exactly reproducible across jobs, hosts and a commit change.**
+Sweep A's headline was scored on `model.zip` -- the save AFTER `learn()` returns,
+a few gradient steps past the callback. Two things follow: the check passed, and
+**the benchmark's resolution is 0.021, one episode in 48**. A "final" checkpoint
+and a rung checkpoint at the same nominal step are not the same number.
+
+### Result 3 — obs v2's penalty is real, and the cause is in `normalize_goal_keys`
+
+| protocol | `obsv2 - ctl` model | model_best |
+|---|---|---|
+| common | -0.035 | -0.076 |
+| spread's own | -0.049 | **-0.097** |
+| widecone's own | -0.083 | **-0.160** |
+
+Holds below -0.05 on `model_best` on all three, significant on two, and **the
+penalty roughly doubles with task difficulty**.
+
+**But the arm was two keys, not one, and no cell has ever trained
+`obs_version=2` alone.** The defect is in the second key. `VecNormalize` keeps a
+SEPARATE `RunningMeanStd` per key, while `achieved_goal` and `desired_goal` are
+the same physical quantity measured twice and the whole task is making one equal
+the other. Measured from the saved statistics, all three seeds:
+
+| dim | std(achieved) | std(desired) | ratio |
+|---|---|---|---|
+| goal x / y (cm) | 9.10-9.22 / 4.08-4.13 | 8.25-8.39 / 3.59-3.62 | 1.10 / 1.13 |
+| **cos(theta)** | 0.134-0.143 | 0.078-0.079 | **1.70-1.80** |
+
+So a PERFECTLY achieved heading still shows the network a residual of up to
+**1.24** in normalized units, and the residual CHANGES SIGN inside the goal
+window. It also whitens a unit-vector pair, which `train_contact`'s own comment
+forbids for exactly this reason -- the rule was written down and applied to the
+wrong slice.
+
+**This is also the first account of why obs v2 disagreed between templates.**
+`recon_base_v2` ran `gamma_goal=false`, so its goal key is 2-D fingertip
+position with NO (cos, sin) pair -- nothing to corrupt, and obs v2 measured free
+there. Push's goal carries a heading, and pays.
+
+INFERRED, not proven: I tried to confirm it by asking whether the penalty
+concentrates on must-rotate episodes and **the test was inconclusive** --
+`widecone`, which does not touch the observation, shows the same subgroup
+signature at n=39. Sweep C's `obs_v1` arm is the decisive test.
+
+### Result 4 — push is now too flat to calibrate on
+
+`ctl`, success by goal distance, common protocol:
+
+| rung | 3-6 | 6-9 | 9-12 | 12+ | range |
+|---|---|---|---|---|---|
+| 600k | 0.639 | 0.750 | 0.611 | 0.472 | 0.278 |
+| 1.2M | 0.889 | 0.750 | 0.889 | 0.694 | 0.194 |
+| **2.4M** | 0.861 | 0.833 | 0.917 | 0.917 | **0.083** |
+
+**At 2.4M the gradient has not just gone, it has INVERTED** -- success rises with
+distance. Distance is dead as a `p_hat` feature on this board. What survives is
+ORIENTATION (`ctl` 0.914 inside tolerance vs 0.795 must-rotate; +0.299 on
+spread's protocol) and a harder protocol (`ctl` drops to 0.694 on cone 90 with
+real bin spread). **This is why the Stage 1 ladder became the critical path
+rather than merely the long pole**, and why `contact_descriptors` is built on
+orientation.
+
+`spread` also shows the aggregate hiding the effect: on its own task it buys
+**+0.154 on the 27% of episodes that must rotate**, diluted to +0.028 in the mean.
+
+### Result 5 — the code audit: one pattern, and one live instance of it
+
+All five gates were green before any change. `her_buffer._patch_observations`
+handles the heading correctly; `_her_arrived` reads every goal-independent fact
+from `info`; the digest is correct-by-construction (it stamps every env kwarg
+except an explicit interface allowlist); and a mechanical check of all 140
+config keys found only two with no reader, both Stage-0 nav keys.
+
+**~22 defects in a month, and nearly all are one pattern: the same quantity is
+computed in two places and nothing forces them to agree.** `obs()` vs
+`her_buffer`'s divisor; rollout vs relabeled reward (v18, reintroduced at v32,
+again as the Gamma arrival bug, again as `w_prog`); `step()` vs HER's arrival;
+launcher vs scorer vs floor protocol; commanded face vs live normal. Every fix
+that stuck has the same shape -- collapse the copies, then gate the regrowth.
+
+Applied proactively this session: `domains/contact/keys.py` replaces FIVE copies
+of the interface-key list, `_ray_passes_portal` replaces two portal checks, and
+`slurm/pins_*.sh` replaces the retyped protocols.
+
+**A LIVE INSTANCE FOUND: `slurm/_run_cell.sh` still had the broken `-o "%A_%a"`
+last-task check.** On this Slurm `%a` renders as the ACCOUNT name, so the block
+never fired -- that is the bug behind 621 orphaned staging files.
+`submit_sweep.sh` fixed its own INLINE copy on 2026-09-04 and this shared one was
+never touched, which is the same defect the fix was about. Fixed.
+
+**A hypothesis of mine came back NEGATIVE and is recorded as such:** I expected
+obs v2's `_max_goal_cm()` divisor to break on board v2, since its docstring
+derives it from the SAME-ROOM diagonal while half of board v2's goals are
+cross-room. Wrong -- it scales with the board (22.20 -> 51.26cm) and mean
+`|rel_target|` only moves 0.299 -> 0.366. My first run of that check produced a
+FALSE POSITIVE because my harness silently dropped `board_w_cm`, which is not a
+`ContactEnv` kwarg but arrives via `params`.
+
+### Result 6 — Phase 1 landed, and 249434216cd2 replays bit-identically after all of it
+
+The sampler fix (both samplers now call ONE `_ray_passes_portal`; 73.5% -> 0 of
+199 crossing resets blocked), contact-count Gamma (xi width unchanged at 11, the
+retired face slot exactly zero), the displacement guard (latched running max,
+eps=2cm, rotation as a 3.12cm lever arc), episode labels, and the selector table.
+
+After every one of them: digest `249434216cd2`, **60 of 60 episodes identical
+across all 13 pre-existing fields**, success 0.866667.
+
+The regression test that matters is now a gate: **rollout reward == relabeled
+reward on every transition under the new guard**, under sparse weights. That
+equality is what 63 GPU-hours of Gamma arms were uninterpretable for want of.
+
+### Result 7 — FIVE defects the untrained floors caught, before any GPU
+
+1. **The eval bin edges were wrong for board v2.** Board v1's `[3,6,9,12]` put
+   all four lower bins on same-room goals and collapsed every crossing into
+   "12+" -- 11 of 48 in-scope episodes on a board that is 50/50 by construction.
+   Measured candidates; `[3,8,15,25,35]` gives 60 in-scope at **62% crossing**
+   with a monotone spread across the whole 3-51cm range.
+2. **`entered_dst` was trivially true on same-room episodes** (the object starts
+   in the destination region), i.e. a floor of 1.000 for doing nothing. Now
+   `None` where the question is not asked.
+3. **Full pose randomization made the crossing sampler LEAK.** At the old
+   256-attempt cap: spread null 0 leaks, spread 90 0, **spread 180 three of
+   400**. A leak falls through to the FORWARD sampler at the wrong level
+   distribution. Cap raised to 1024; leaks 0, and now gated.
+4. **The Gamma ladder had to become DIRECTIONAL.** Under a count goal a start
+   whose count already equals the goal's is satisfied at t=0: init from all four
+   classes gave floors **g_one 0.583 / g_two_disp 0.396**. Excluding same-count
+   pairs was NOT enough -- g_one was still **0.542**, because two thirds of those
+   starts hold two contacts and a random policy reaches "one" by drifting off
+   one. **MEASURED FINDING: releasing a contact is not a skill (floor 0.542);
+   acquiring one is.** Both rungs are now acquisitions: g_one 0.208,
+   g_two_disp 0.000.
+5. **The count abstraction's real cost, recorded not hidden:** pinch <-> pivot is
+   a genuine interface transition (two contacts, different geometry) that
+   contact count cannot express, so it reads as a no-op. Count buys transfer to a
+   T-shape, a round object and 3D; it pays by collapsing same-count regrasps.
+
+**AND THE OFFSET DOOR EARNED ITS KEEP.** The crossing floor was the expected
+problem -- on board v1 a random policy shoves the object through an open doorway
+for 0.271 overall, 0.42 in the crossing bins. Offsetting the doors 34cm in y
+drops it to **0.000-0.162**, so the crossing metric is readable after all.
+
+### Board v2's floors, regenerated before the sweeps
+
+| arm | digest | pose >=3cm | entered-dst (crossing only) |
+|---|---|---|---|
+| `ctl` | `98e24e99890f` | 0.000 | 0.000 |
+| `count` | `b99150951ac7` | 0.000 | 0.000 |
+| `raw` | `98e24e99890f` | 0.000 | 0.000 |
+| `obs_v1` | `98e24e99890f` | 0.000 | 0.162 |
+| `g_one` | `60c119c9ef02` | 0.208 | -- |
+| `g_two_disp` | `3b54b18fe084` | 0.000 | -- |
+
+`count` carries its own digest because `guard_contact_count` is a TASK key --
+being TOLD a count and having one ENFORCED are different tasks -- so it gets the
+two-way treatment.
+
+### The portal-arrival decision, and why it is EVAL-ONLY
+
+Success was specified as "reach any goal pose in the initial region, OR leave
+through the correct portal." That is `portal_arrival=true`, which is implemented
+end to end for the rollout -- but `_her_arrived` grades relabeled transitions
+with `pose_arrived` and no portal predicate, so training on it would put the
+rollout reward and ~80% of every batch on two different objectives. **The exact
+divergence this project has paid for six times.** So the policy trains on a
+well-posed pose goal in the far room, and the eval reports BOTH predicates on the
+same episodes, one digest, never pooled.
+
+### Next
+
+Read the smoke (job 45439094), then submit Sweep C (12 cells, 2.4M, four rungs)
+and Sweep D (6 cells, 1M, four rungs). Both launchers are written, gated and
+committed, and neither has been submitted. **Start the Stage 1 ladder build in
+parallel -- Result 4 is why it is now the critical path.**
