@@ -4140,3 +4140,17 @@ training same-room 2.2cm goals and being scored on a 48%-crossing benchmark, and
 the mitigation is a step-based advance fallback in
 `domains/contact/callbacks.py`. **Build the Stage 1 ladder in parallel** -- it is
 the critical path and it needs no experiment.
+
+**ADDENDUM, same day — both `ctl` smokes finished and settled the curriculum
+question.** Threshold 0.4 advanced level 0 -> 1 at **179,805 steps**, 7.5% of a
+2.4M budget. Threshold 0.6 stalled at level 0 with a local max of **0.406** —
+the measured ~0.51 ceiling refusing to reach 0.6, exactly as the correction
+predicted. Both runs hit identical local (0.406) and full-task (0.281) maxima,
+which is what bit-identical runs should do. After advancing, rollout success fell
+0.340 -> 0.260 because level 1 is harder: the curriculum working, not failing.
+
+**Still unproven: levels 1 -> 2 -> 3**, which carry more crossings. Level 1 local
+success sits at 0.22-0.28 and must climb back to 0.4. At level 0's pace four
+rungs cost ~550-750k of 2.4M, but the later rungs are harder, so
+`eval/curriculum_level` at the 600k rung remains the number to watch — it should
+read 2 or 3.

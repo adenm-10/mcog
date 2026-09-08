@@ -127,16 +127,21 @@ game, including all of item 3.**
    this arm is expected to clear its reference comfortably. The open question is
    the second contact.
 
-2. **WATCH `eval/curriculum_level` AT SWEEP C's 600k RUNG.** If it is still 0
-   across all three seeds, the cells are training same-room 2.2cm goals and being
-   scored on a 48%-crossing benchmark, and the arms are not readable.
+2. **WATCH `eval/curriculum_level` AT SWEEP C's 600k RUNG — it should read 2 or
+   3.** Both smokes finished and settled the first rung: threshold 0.4 advanced
+   level 0 -> 1 at **179,805 steps**, while threshold 0.6 stalled at level 0 with
+   a local max of 0.406 against its unreachable bar. So the correction works and
+   the first advance costs 7.5% of the budget. **Levels 1 -> 2 -> 3 are still
+   unproven** and carry more crossings; level 1 local success sits at 0.22-0.28
+   and must climb back to 0.4. If the level is still 0 or 1 at 600k across all
+   three seeds, the cells are training near-same-room goals and being scored on a
+   48%-crossing benchmark, and the arms are not readable.
    **Mitigation, designed and deliberately NOT built:** a step-based fallback in
    `domains/contact/callbacks.py` — advance on `local >= threshold` OR once a
    level consumes its share of the budget, defaulting to `None` so behaviour
    stays bit-identical. Not built because the signal is currently trending the
-   right way (local success **0.406 at 180k** on smoke 45449813, against a 0.4
-   threshold and a measured ~0.51 ceiling) and a third tuned constant needs a
-   reason. Four rungs mean a stall costs 25% of the sweep, not all of it.
+   right way -- the first advance is now MEASURED rather than projected -- and a
+   third tuned constant needs a reason. Four rungs mean a stall costs 25% of the sweep, not all of it.
 
    Sweep C auto-scores via `finalize.sh` + `tools/score_rungs.sh`. Its
    preregistered verdicts are in the launcher header and in PREREGISTERED
